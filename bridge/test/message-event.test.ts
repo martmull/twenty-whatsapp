@@ -26,6 +26,16 @@ test('only new direct incoming text can enter the queue', () => {
   assert.equal(toInboundMessageEvent(message('15551234567@s.whatsapp.net', 'Mine', true)), undefined);
 });
 
+test('a direct LID message with a shared phone number reaches the matching queue', () => {
+  const incoming = message('123456789012345@lid', 'Qaa');
+  incoming.key.senderPn = '15551234567@s.whatsapp.net';
+
+  const event = toInboundMessageEvent(incoming);
+
+  assert.equal(event?.chatId, '15551234567@s.whatsapp.net');
+  assert.equal(event?.text, 'Qaa');
+});
+
 test('queued message survives restart encrypted and can be acknowledged', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-events-'));
   const key = randomBytes(32);

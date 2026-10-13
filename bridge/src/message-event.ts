@@ -11,7 +11,9 @@ export type InboundMessageEvent = {
 };
 
 export const toInboundMessageEvent = (message: WAMessage): InboundMessageEvent | undefined => {
-  const chatId = message.key.remoteJid;
+  const remoteJid = message.key.remoteJid;
+  // shortcut: LID chats without a shared phone number need a separate identity mapping before CRM import.
+  const chatId = remoteJid?.endsWith('@lid') ? message.key.senderPn : remoteJid;
   const providerMessageId = message.key.id;
   const text = message.message?.conversation ?? message.message?.extendedTextMessage?.text;
 
