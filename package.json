@@ -1,0 +1,27 @@
+{
+  "name": "twenty-whatsapp",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": "^24.5.0",
+    "npm": "please-use-yarn",
+    "yarn": ">=4.0.2",
+    "twenty": ">=2.45.0"
+  },
+  "keywords": [
+    "twenty-app"
+  ],
+  "packageManager": "yarn@4.13.0",
+  "scripts": {
+    "twenty": "twenty"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "twenty-sdk": "2.45.0",
+    "twenty-ui": "2.45.0",
+    "typescript": "^5.9.3"
+  }
+}
