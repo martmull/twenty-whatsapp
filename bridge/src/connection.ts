@@ -7,7 +7,7 @@ import { toDataURL } from 'qrcode';
 
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
-import { toInboundMessageEvent, type InboundMessageEvent } from './message-event.js';
+import { messageEventId, toMessageEvent, type MessageEvent } from './message-event.js';
 
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
@@ -20,6 +20,7 @@ export type SendReceipt = {
   requestId: string;
   state: 'unknown' | 'sent';
   providerMessageId?: string;
+  eventId?: string;
 };
 
 export class WhatsAppConnection {
@@ -28,8 +29,9 @@ export class WhatsAppConnection {
   private generation = 0;
   private intentionallyDisconnected = false;
   private reconnectTimer: NodeJS.Timeout | undefined;
-  private readonly events: EncryptedJsonStore<InboundMessageEvent>;
+  private readonly events: EncryptedJsonStore<MessageEvent>;
   private readonly sends: EncryptedJsonStore<SendReceipt>;
+  private readonly phoneNumbers: EncryptedJsonStore<{ chatId: string }>;
   private readonly sendingRequests = new Set<string>();
 
   constructor(
@@ -38,9 +40,10 @@ export class WhatsAppConnection {
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
+    this.phoneNumbers = new EncryptedJsonStore(join(directory, 'phone-numbers'), encryptionKey);
   }
 
-  async getEvents(): Promise<InboundMessageEvent[]> {
+  async getEvents(): Promise<MessageEvent[]> {
     return this.events.list(100);
   }
 
@@ -94,6 +97,7 @@ export class WhatsAppConnection {
         requestId,
         state: 'sent',
         providerMessageId: sent?.key.id ?? undefined,
+        eventId: sent?.key.id ? messageEventId(chatId, sent.key.id) : undefined,
       };
       await this.sends.write(requestId, receipt);
       return receipt;
@@ -129,20 +133,44 @@ export class WhatsAppConnection {
       markOnlineOnConnect: false,
       syncFullHistory: false,
       shouldSyncHistoryMessage: () => false,
+      emitOwnEvents: false,
     });
 
     this.socket = socket;
     socket.ev.on('creds.update', saveCreds);
-    socket.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (generation !== this.generation || type !== 'notify') {
+    socket.ev.on('messages.upsert', async ({ messages }) => {
+      if (generation !== this.generation) {
         return;
       }
 
       for (const message of messages) {
-        const event = toInboundMessageEvent(message);
+        const remoteJid = message.key.remoteJid;
+        const mappedChatId = remoteJid?.endsWith('@lid')
+          ? (await this.phoneNumbers.read(remoteJid))?.chatId
+          : undefined;
+        const event = toMessageEvent(message, mappedChatId);
 
         if (event) {
+          if (remoteJid?.endsWith('@lid') && !message.key.fromMe) {
+            await this.phoneNumbers.write(remoteJid, { chatId: event.chatId });
+          }
           await this.events.write(event.eventId, event);
+        }
+      }
+    });
+    socket.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
+      if (generation === this.generation && /^\d{7,15}@lid$/.test(lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(jid)) {
+        await this.phoneNumbers.write(lid, { chatId: jid });
+      }
+    });
+    socket.ev.on('contacts.upsert', async (contacts) => {
+      if (generation !== this.generation) {
+        return;
+      }
+
+      for (const contact of contacts) {
+        if (contact.lid && contact.jid && /^\d{7,15}@lid$/.test(contact.lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)) {
+          await this.phoneNumbers.write(contact.lid, { chatId: contact.jid });
         }
       }
     });

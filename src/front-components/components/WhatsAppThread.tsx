@@ -4,6 +4,7 @@ import { t } from 'twenty-sdk/front-component';
 import { themeCssVariables } from 'twenty-ui/theme';
 
 import { PreviewBadge, PreviewButton, getPreviewStyles } from 'src/front-components/components/PreviewUi';
+import { createRequestId } from 'src/front-components/components/createRequestId';
 
 type Conversation = {
   id: string;
@@ -114,13 +115,13 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
       return;
     }
 
-    const stableRequestId = requestId ?? crypto.randomUUID();
-    setRequestId(stableRequestId);
     setSending(true);
     setError('');
     setNotice('');
 
     try {
+      const stableRequestId = requestId ?? createRequestId();
+      setRequestId(stableRequestId);
       const result = await new RestApiClient().post<{ state: 'sent' | 'unknown' }>('/s/whatsapp/messages/send', {
         conversationId: selectedId,
         requestId: stableRequestId,

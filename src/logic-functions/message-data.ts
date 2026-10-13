@@ -29,10 +29,11 @@ type Person = {
   phones?: { primaryPhoneNumber?: string | null; primaryPhoneCallingCode?: string | null } | null;
 };
 
-type InboundEvent = {
+type BridgeMessageEvent = {
   eventId: string;
   chatId: string;
   providerMessageId: string;
+  direction?: 'inbound' | 'outbound';
   text: string;
   sentAt: string;
 };
@@ -133,7 +134,7 @@ export const findMessageByRequestId = async (client: CoreApiClient, requestId: s
   return result.whatsappMessages?.edges?.[0]?.node as Message | undefined;
 };
 
-export const syncInboundMessages = async (): Promise<{ imported: number; ignored: number }> => {
+export const syncMessages = async (): Promise<{ imported: number; ignored: number }> => {
   const status = await bridgeRequest('/status');
   const phoneNumber = status.phoneNumber ? `+${digits(status.phoneNumber)}` : undefined;
 
@@ -160,7 +161,7 @@ export const syncInboundMessages = async (): Promise<{ imported: number; ignored
     throw new Error('Could not create WhatsApp account');
   }
 
-  const events = await bridgeJsonRequest<InboundEvent[]>('/events');
+  const events = await bridgeJsonRequest<BridgeMessageEvent[]>('/events');
 
   if (events.length === 0) {
     return { imported: 0, ignored: 0 };
@@ -172,7 +173,7 @@ export const syncInboundMessages = async (): Promise<{ imported: number; ignored
   let ignored = 0;
 
   for (const event of events) {
-    if (!/^[a-f\d]{64}$/.test(event.eventId) || !/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) || !event.text || event.text.length > 4096) {
+    if (!/^[a-f\d]{64}$/.test(event.eventId) || !/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
       throw new Error('Invalid bridge event');
     }
 
@@ -214,10 +215,10 @@ export const syncInboundMessages = async (): Promise<{ imported: number; ignored
               name: event.text.slice(0, 80),
               conversationId: conversation.id,
               externalId: event.eventId,
-              direction: 'inbound',
+              direction: event.direction ?? 'inbound',
               text: event.text,
               sentAt: event.sentAt,
-              deliveryState: 'received',
+              deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
             },
           },
           id: true,

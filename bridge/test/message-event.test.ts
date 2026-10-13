@@ -8,7 +8,7 @@ import test from 'node:test';
 import type { WAMessage } from '@whiskeysockets/baileys';
 
 import { EncryptedJsonStore } from '../src/encrypted-json-store.js';
-import { toInboundMessageEvent } from '../src/message-event.js';
+import { messageEventId, toMessageEvent } from '../src/message-event.js';
 
 const message = (chatId: string, text: string, fromMe = false): WAMessage => ({
   key: { remoteJid: chatId, id: 'provider-1', fromMe },
@@ -16,30 +16,42 @@ const message = (chatId: string, text: string, fromMe = false): WAMessage => ({
   messageTimestamp: 1_700_000_000,
 });
 
-test('only new direct incoming text can enter the queue', () => {
-  const direct = toInboundMessageEvent(message('15551234567@s.whatsapp.net', 'Hello'));
+test('direct incoming and phone-sent text enter the queue with stable IDs', () => {
+  const direct = toMessageEvent(message('15551234567@s.whatsapp.net', 'Hello'));
+  const outgoing = toMessageEvent(message('15551234567@s.whatsapp.net', 'Mine', true));
 
   assert.equal(direct?.text, 'Hello');
   assert.equal(direct?.chatId, '15551234567@s.whatsapp.net');
-  assert.equal(toInboundMessageEvent(message('15551234567@g.us', 'Group')), undefined);
-  assert.equal(toInboundMessageEvent(message('15551234567@lid', 'LID')), undefined);
-  assert.equal(toInboundMessageEvent(message('15551234567@s.whatsapp.net', 'Mine', true)), undefined);
+  assert.equal(direct?.direction, 'inbound');
+  assert.equal(outgoing?.direction, 'outbound');
+  assert.equal(outgoing?.eventId, messageEventId('15551234567@s.whatsapp.net', 'provider-1'));
+  assert.equal(toMessageEvent(message('15551234567@g.us', 'Group')), undefined);
+  assert.equal(toMessageEvent(message('15551234567@lid', 'LID')), undefined);
 });
 
 test('a direct LID message with a shared phone number reaches the matching queue', () => {
   const incoming = message('123456789012345@lid', 'Qaa');
   incoming.key.senderPn = '15551234567@s.whatsapp.net';
 
-  const event = toInboundMessageEvent(incoming);
+  const event = toMessageEvent(incoming);
 
   assert.equal(event?.chatId, '15551234567@s.whatsapp.net');
   assert.equal(event?.text, 'Qaa');
 });
 
+test('a phone-sent LID message uses the contact mapping, never the sender phone', () => {
+  const outgoing = message('123456789012345@lid', 'From my phone', true);
+  outgoing.key.senderPn = '19999999999@s.whatsapp.net';
+
+  assert.equal(toMessageEvent(outgoing), undefined);
+  assert.equal(toMessageEvent(outgoing, '15551234567@s.whatsapp.net')?.chatId, '15551234567@s.whatsapp.net');
+  assert.equal(toMessageEvent(outgoing, '15551234567@s.whatsapp.net')?.direction, 'outbound');
+});
+
 test('queued message survives restart encrypted and can be acknowledged', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-events-'));
   const key = randomBytes(32);
-  const event = toInboundMessageEvent(message('15551234567@s.whatsapp.net', 'Private text'));
+  const event = toMessageEvent(message('15551234567@s.whatsapp.net', 'Private text'));
   assert.ok(event);
 
   try {

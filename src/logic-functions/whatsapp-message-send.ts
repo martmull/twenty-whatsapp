@@ -4,7 +4,7 @@ import { bridgeJsonRequest, bridgeRequest } from 'src/logic-functions/bridge-req
 import { applicationClient, findMessageByRequestId, userClient } from 'src/logic-functions/message-data';
 
 type SendRequest = { conversationId?: string; requestId?: string; text?: string };
-type SendReceipt = { state: 'unknown' | 'sent'; providerMessageId?: string };
+type SendReceipt = { state: 'unknown' | 'sent'; eventId?: string };
 
 const handler = async (event: RoutePayload<SendRequest>) => {
   if (!event.userWorkspaceId) {
@@ -79,7 +79,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
   if (receipt.state === 'sent') {
     await client.mutation({
       updateWhatsappMessage: {
-        __args: { id: message.id, data: { deliveryState: 'sent', externalId: receipt.providerMessageId ? `${conversation.chatId}:${receipt.providerMessageId}` : undefined } },
+        __args: { id: message.id, data: { deliveryState: 'sent', externalId: receipt.eventId } },
         id: true,
       },
     });
