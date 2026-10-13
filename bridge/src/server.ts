@@ -102,6 +102,8 @@ const server = createServer(async (request, response) => {
 const host = process.env.WHATSAPP_BRIDGE_HOST ?? '127.0.0.1';
 const port = Number(process.env.WHATSAPP_BRIDGE_PORT ?? 8765);
 
+await connection.resume();
+
 server.listen(port, host, () => {
   process.stdout.write(`WhatsApp bridge listening on ${host}:${port}\n`);
 });

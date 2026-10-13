@@ -114,6 +114,14 @@ export class WhatsAppConnection {
     return this.status;
   }
 
+  async resume(): Promise<void> {
+    const { state } = await createEncryptedAuthState(this.directory, this.encryptionKey);
+
+    if (state.creds.me?.id) {
+      await this.connect();
+    }
+  }
+
   async connect(): Promise<ConnectionStatus> {
     if (this.socket) {
       return this.getStatus();
