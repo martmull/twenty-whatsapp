@@ -1,10 +1,10 @@
 # WhatsApp linked-device app for Twenty
 
-**Status:** Local text messaging MVP implemented; phone end-to-end test pending · **Updated:** 13 October 2026 · **Design preview:** [Open the interactive mockup](./design-preview.html)
+**Status:** Local text messaging MVP implemented and verified with a linked phone · **Updated:** 13 October 2026 · **Design preview:** [Open the interactive mockup](./design-preview.html)
 
 ## Current app inside Twenty
 
-The [WhatsApp app](../README.md) is installed on the local Twenty instance at http://localhost:2020. Its settings component requests a real pairing QR from a persistent Baileys bridge. The bridge encrypts session credentials, Signal keys, queued incoming text, and send receipts at rest. Twenty now stores matched incoming messages and manual replies in app objects, and the inbox and Person widget render the stored threads. A real phone has not yet been linked for an end-to-end transport test.
+The [WhatsApp app](../README.md) is installed on the local Twenty instance at http://localhost:2020. Its settings component requests a real pairing QR from a persistent Baileys bridge. The bridge encrypts session credentials, Signal keys, queued text events, and send receipts at rest. Twenty stores matched incoming and phone-sent messages alongside manual replies in app objects, and the inbox and Person widget render the stored threads. Incoming text, phone-sent text, and a Twenty-sent message received on the contact's phone have been verified with the linked device.
 
 ![Current live WhatsApp inbox inside Twenty](./current-inbox.png)
 

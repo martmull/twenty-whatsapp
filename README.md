@@ -6,9 +6,9 @@ A Twenty app built from the [in-product preview](docs/implementation.md). It use
 
 The settings component has real QR pairing, connection status, reconnect, and disconnect controls. A separate Node bridge keeps the WebSocket alive and encrypts Baileys credentials and Signal keys at rest with AES-256-GCM. Only members with Twenty's APPLICATIONS permission can start or disconnect a session.
 
-The bridge now queues new one-to-one text messages in encrypted local files. A Twenty cron job imports them every minute after matching the sender to exactly one existing Person. The app stores accounts, conversations, and messages in Twenty objects, with unique IDs for replay safety and a Person relation. The inbox and Person widget show stored threads and allow manual text replies. A stable request ID prevents retrying an uncertain send as a new message.
+The bridge now queues new one-to-one incoming and phone-sent text messages in encrypted local files. A Twenty cron job imports them every minute after matching the other participant to exactly one existing Person. The app stores accounts, conversations, and messages in Twenty objects, with unique IDs for replay safety and a Person relation. The inbox and Person widget show stored threads and allow manual text replies. A stable request ID prevents retrying an uncertain send as a new message.
 
-This is a local development implementation synced to `localhost:2020`. Receiving a new text from a matched Person has been verified with a linked phone; live sending still needs an end-to-end test. The first version matches primary Person phone numbers, including LID messages when WhatsApp shares the sender's phone number. It does not import history, group chats, media, unmatched senders, or LID messages without a phone mapping. The inbox currently loads the 50 most recent conversations and 200 most recent messages in a thread.
+This is a local development implementation synced to `localhost:2020`. New incoming and phone-sent texts have been verified in the Twenty inbox, and a message sent from Twenty was received on the contact's phone. The first version matches primary Person phone numbers, including LID messages when WhatsApp shares the sender's phone number or a contact mapping is learned from a new incoming message. It does not import history, group chats, media, unmatched senders, or LID messages without a phone mapping. The inbox currently loads the 50 most recent conversations and 200 most recent messages in a thread.
 
 ![Current WhatsApp inbox inside Twenty](docs/current-inbox.png)
 
@@ -43,4 +43,4 @@ For a transport check that does not link a phone, run node bridge/scripts/check-
 
 ## Remaining before production use
 
-Validate live sending, add indexed phone matching for large workspaces, map LID identities without a shared phone number and additional Person numbers, add message status receipts and media placeholders, and implement operational monitoring for the bridge. The full design and acceptance criteria are in [docs/implementation.md](docs/implementation.md).
+Add indexed phone matching for large workspaces, map LID identities without a shared phone number and additional Person numbers, add message status receipts and media placeholders, and implement operational monitoring for the bridge. The full design and acceptance criteria are in [docs/implementation.md](docs/implementation.md).
