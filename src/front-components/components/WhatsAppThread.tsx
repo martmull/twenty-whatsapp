@@ -146,6 +146,8 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
 
   const selected = data?.conversations.find((conversation) => conversation.id === selectedId);
   const connected = data?.connectionState === 'connected';
+  // The sandbox does not forward imperative scrolling, so remount at the newest message.
+  const latestMessageId = data?.messages[data.messages.length - 1]?.id;
 
   return (
     <section style={{
@@ -195,9 +197,9 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
           <div style={{ borderBottom: `1px solid ${themeCssVariables.border.color.medium}`, padding: themeCssVariables.spacing[3] }}>
             <strong>{selected?.name ?? t('Select a conversation')}</strong>
           </div>
-          <div aria-label={t('Message thread')} style={{ background: themeCssVariables.background.secondary, display: 'flex', flexDirection: 'column', gap: themeCssVariables.spacing[2], overflowY: 'auto', padding: themeCssVariables.spacing[3] }}>
+          <div key={`${selectedId}:${latestMessageId}`} aria-label={t('Message thread')} style={{ background: themeCssVariables.background.secondary, display: 'flex', flexDirection: 'column-reverse', gap: themeCssVariables.spacing[2], overflowY: 'auto', padding: themeCssVariables.spacing[3] }}>
             {selected && data?.messages.length === 0 && <p style={styles.muted}>{t('No messages yet.')}</p>}
-            {data?.messages.map((message) => (
+            {data?.messages.slice().reverse().map((message) => (
               <div key={message.id} style={{ alignSelf: message.direction === 'outbound' ? 'flex-end' : 'flex-start', background: message.direction === 'outbound' ? 'rgba(37, 187, 85, 0.13)' : themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.md, maxWidth: '78%', padding: `${themeCssVariables.spacing[2]} ${themeCssVariables.spacing[3]}` }}>
                 <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>
                 <small style={{ ...styles.label, display: 'block', marginTop: 6 }}>{formatTime(message.sentAt)}{message.direction === 'outbound' ? ` · ${message.deliveryState}` : ''}</small>
@@ -207,9 +209,24 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
           <div style={{ borderTop: `1px solid ${themeCssVariables.border.color.medium}`, display: 'grid', gap: themeCssVariables.spacing[2], padding: themeCssVariables.spacing[3] }}>
             {error && <p role="alert" style={{ color: themeCssVariables.color.red, margin: 0 }}>{error}</p>}
             {notice && <p role="status" style={{ ...styles.muted, margin: 0 }}>{notice}</p>}
-            <textarea aria-label={t('Write a WhatsApp message')} placeholder={selected ? t('Write a message…') : t('Select a conversation first')} value={draft} onChange={(event) => { setDraft(event.target.value); setRequestId(undefined); setNotice(''); }} disabled={!selected || !connected || sending} rows={compact ? 2 : 3} maxLength={4096} style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, padding: themeCssVariables.spacing[2], resize: 'vertical', width: '100%', boxSizing: 'border-box' }} />
+            <textarea
+              aria-label={t('Write a WhatsApp message')}
+              placeholder={selected ? t('Write a message…') : t('Select a conversation first')}
+              value={draft}
+              onChange={(event) => { setDraft(event.target.value); setRequestId(undefined); setNotice(''); }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.repeat && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  void send();
+                }
+              }}
+              disabled={!selected || !connected || sending}
+              rows={compact ? 2 : 3}
+              maxLength={4096}
+              style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, padding: themeCssVariables.spacing[2], resize: 'vertical', width: '100%', boxSizing: 'border-box' }}
+            />
             <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between', gap: themeCssVariables.spacing[2] }}>
-              <small style={styles.label}>{connected ? t('Manual text only') : t('Connect WhatsApp to send')}</small>
+              <small style={styles.label}>{connected ? t('Ctrl/⌘ + Enter to send') : t('Connect WhatsApp to send')}</small>
               <PreviewButton primary disabled={!selected || !connected || !draft.trim() || sending} onClick={() => void send()}>{sending ? t('Sending…') : t('Send')}</PreviewButton>
             </div>
           </div>
