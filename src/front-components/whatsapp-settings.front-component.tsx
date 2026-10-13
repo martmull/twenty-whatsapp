@@ -170,7 +170,7 @@ const WhatsAppSettings = () => {
           <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
             <span>{t('Phone number')}: <strong>{status.phoneNumber ?? t('Connected')}</strong></span>
             <span style={styles.muted}>
-              {t('Message sync is not enabled yet. The connected session is real; inbox and Person messages will be added in the next implementation slice.')}
+              {t('New one-to-one text messages from matched People appear in the shared inbox and on Person records. Other chats are ignored.')}
             </span>
             <div>
               <PreviewButton disabled={working} onClick={() => void perform('disconnect')}>
@@ -225,7 +225,7 @@ const WhatsAppSettings = () => {
             }}>
               <strong>{t('Before you connect')}</strong>
               <p style={styles.muted}>
-                {t('This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. Messages will be shared with permitted workspace members when message sync is enabled.')}
+                {t('This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages from matched People will be shared with permitted workspace members.')}
               </p>
               <a href="https://www.whatsapp.com/legal/terms-of-service" target="_blank" rel="noreferrer">
                 {t('Read WhatsApp terms')}

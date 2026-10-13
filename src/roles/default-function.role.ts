@@ -1,9 +1,13 @@
-import { defineApplicationRole } from 'twenty-sdk/define';
+import { defineApplicationRole, STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS } from 'twenty-sdk/define';
+
+import { WHATSAPP_ACCOUNT_OBJECT_ID } from 'src/objects/whatsapp-account';
+import { WHATSAPP_CONVERSATION_OBJECT_ID } from 'src/objects/whatsapp-conversation';
+import { WHATSAPP_MESSAGE_OBJECT_ID } from 'src/objects/whatsapp-message';
 
 export default defineApplicationRole({
   universalIdentifier: '50589f49-6cc1-414e-83d3-ec54751445ce',
   label: 'WhatsApp function role',
-  description: 'Connection routes do not require workspace record access.',
+  description: 'Matches People and stores WhatsApp accounts, conversations, and messages.',
   canReadAllObjectRecords: false,
   canUpdateAllObjectRecords: false,
   canSoftDeleteAllObjectRecords: false,
@@ -12,7 +16,22 @@ export default defineApplicationRole({
   canBeAssignedToAgents: false,
   canBeAssignedToUsers: false,
   canBeAssignedToApiKeys: false,
-  objectPermissions: [],
+  objectPermissions: [
+    {
+      objectUniversalIdentifier: STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS.person.universalIdentifier,
+      canReadObjectRecords: true,
+      canUpdateObjectRecords: false,
+      canSoftDeleteObjectRecords: false,
+      canDestroyObjectRecords: false,
+    },
+    ...[WHATSAPP_ACCOUNT_OBJECT_ID, WHATSAPP_CONVERSATION_OBJECT_ID, WHATSAPP_MESSAGE_OBJECT_ID].map((objectUniversalIdentifier) => ({
+      objectUniversalIdentifier,
+      canReadObjectRecords: true,
+      canUpdateObjectRecords: true,
+      canSoftDeleteObjectRecords: false,
+      canDestroyObjectRecords: false,
+    })),
+  ],
   fieldPermissions: [],
   permissionFlagUniversalIdentifiers: [],
 });

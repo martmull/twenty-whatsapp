@@ -6,7 +6,11 @@ A Twenty app built from the [in-product preview](docs/implementation.md). It use
 
 The settings component has real QR pairing, connection status, reconnect, and disconnect controls. A separate Node bridge keeps the WebSocket alive and encrypts Baileys credentials and Signal keys at rest with AES-256-GCM. Only members with Twenty's APPLICATIONS permission can start or disconnect a session.
 
-The inbox and Person widget retain the preview's Twenty layout but show honest empty states. **Message receive, CRM matching, record storage, and send are not implemented yet.** No phone has been linked by the repository or local setup scripts.
+The bridge now queues new one-to-one text messages in encrypted local files. A Twenty cron job imports them every minute after matching the sender to exactly one existing Person. The app stores accounts, conversations, and messages in Twenty objects, with unique IDs for replay safety and a Person relation. The inbox and Person widget show stored threads and allow manual text replies. A stable request ID prevents retrying an uncertain send as a new message.
+
+This is a local development implementation. It has been synced to `localhost:2020` and tested without linking a phone. Live receive and send still need a deliberate end-to-end test with a number you control. The first version matches primary Person phone numbers; it does not import history, group chats, media, or unmatched senders. The inbox currently loads the 50 most recent conversations and 200 most recent messages in a thread.
+
+![Current WhatsApp inbox inside Twenty](docs/current-inbox.png)
 
 This is a single-workspace local development slice. Do not deploy the bridge as a public service or connect a production number. WhatsApp may restrict or disconnect unofficial clients.
 
@@ -24,7 +28,7 @@ Requirements: Node 24.5+, Twenty 2.45+, a running local Twenty instance at http:
     cd bridge
     npm run dev
 
-The configure-local.mjs script generates bridge/.env (ignored by Git) with a random bridge token and encryption key, then sets the corresponding application variables **only** on the local Twenty remote at http://localhost:2020. The script reuses an existing .env; keep that file and the encrypted bridge/data directory together or the session cannot be restored. The bridge listens on 127.0.0.1:8765; Docker Desktop's host.docker.internal lets the local Twenty container reach it.
+The configure-local.mjs script generates bridge/.env (ignored by Git) with a random bridge token and encryption key, then sets the corresponding application variables **only** on the local Twenty remote at http://localhost:2020. The script reuses an existing .env; keep that file and the encrypted bridge/data directory together or the session and queued events cannot be restored. The bridge listens on 127.0.0.1:8765; Docker Desktop's host.docker.internal lets the local Twenty container reach it.
 
 Open **Settings → Apps → WhatsApp → WhatsApp**, read the disclosure, check both acknowledgements, and choose **Show QR code**. Scan with a test phone under **WhatsApp → Linked devices → Link a device**. Disconnect in the same settings panel to remove the local auth state.
 
@@ -32,11 +36,11 @@ For a transport check that does not link a phone, run node bridge/scripts/check-
 
 ## Repository layout
 
-- src/: Twenty application manifest, settings and inbox front components, Person widget, and authenticated connection routes.
-- bridge/: persistent Baileys process and encrypted auth store.
+- src/: Twenty objects, Person relation, settings and inbox front components, Person widget, and authenticated message routes.
+- bridge/: persistent Baileys process with encrypted auth, event queue, and send receipts.
 - docs/: implementation design, interactive design preview, and screenshots from the earlier in-product preview.
 - scripts/configure-local.mjs: local credential and application-variable setup.
 
-## Next implementation slice
+## Remaining before production use
 
-Add WhatsAppAccount, WhatsAppConversation, and WhatsAppMessage app objects and unique provider IDs; match incoming phone identities to existing People; ingest and deduplicate text messages; expose real inbox and Person threads; then add idempotent manual replies. The full design and acceptance criteria are in [docs/implementation.md](docs/implementation.md).
+Validate a real linked number end to end, add indexed phone matching for large workspaces, handle WhatsApp LID identities and additional Person numbers, add message status receipts and media placeholders, and implement operational monitoring for the bridge. The full design and acceptance criteria are in [docs/implementation.md](docs/implementation.md).

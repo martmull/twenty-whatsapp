@@ -5,9 +5,10 @@ type BridgeStatus = {
   phoneNumber?: string;
 };
 
-export const bridgeRequest = async (
-  path: '/status' | '/connect' | '/disconnect',
-): Promise<BridgeStatus> => {
+export const bridgeJsonRequest = async <TResponse>(
+  path: '/status' | '/connect' | '/disconnect' | '/events' | '/events/ack' | '/send',
+  body?: Record<string, unknown>,
+): Promise<TResponse> => {
   const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;
   const bridgeToken = process.env.WHATSAPP_BRIDGE_TOKEN;
 
@@ -16,8 +17,12 @@ export const bridgeRequest = async (
   }
 
   const response = await fetch(new URL(path, bridgeUrl), {
-    method: path === '/status' ? 'GET' : 'POST',
-    headers: { authorization: `Bearer ${bridgeToken}` },
+    method: path === '/status' || path === '/events' ? 'GET' : 'POST',
+    headers: {
+      authorization: `Bearer ${bridgeToken}`,
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
     signal: AbortSignal.timeout(10_000),
   });
 
@@ -25,5 +30,8 @@ export const bridgeRequest = async (
     throw new Error(`WhatsApp bridge returned ${response.status}`);
   }
 
-  return (await response.json()) as BridgeStatus;
+  return (await response.json()) as TResponse;
 };
+
+export const bridgeRequest = (path: '/status' | '/connect' | '/disconnect') =>
+  bridgeJsonRequest<BridgeStatus>(path);

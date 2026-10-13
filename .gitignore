@@ -1,4 +1,5 @@
 /node_modules
+/bridge/node_modules
 /.twenty
 /dist
 /.yarn/install-state.gz

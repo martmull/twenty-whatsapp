@@ -2,6 +2,7 @@ import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
 import { bridgeRequest } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
+import { applicationClient } from 'src/logic-functions/message-data';
 
 const handler = async (event: RoutePayload) => {
   if (!event.userWorkspaceId) {
@@ -12,7 +13,28 @@ const handler = async (event: RoutePayload) => {
     throw new Error('Only workspace administrators can disconnect WhatsApp');
   }
 
-  return bridgeRequest('/disconnect');
+  const status = await bridgeRequest('/status');
+  const result = await bridgeRequest('/disconnect');
+  const phoneNumber = status.phoneNumber ? `+${status.phoneNumber.replace(/\D/g, '')}` : undefined;
+
+  if (phoneNumber) {
+    const client = applicationClient();
+    const accounts = await client.query({
+      whatsappAccounts: {
+        __args: { filter: { phoneNumber: { eq: phoneNumber } }, first: 1 },
+        edges: { node: { id: true } },
+      },
+    });
+    const accountId = accounts.whatsappAccounts?.edges?.[0]?.node?.id;
+
+    if (accountId) {
+      await client.mutation({
+        updateWhatsappAccount: { __args: { id: accountId, data: { state: 'disconnected' } }, id: true },
+      });
+    }
+  }
+
+  return result;
 };
 
 export default defineLogicFunction({
