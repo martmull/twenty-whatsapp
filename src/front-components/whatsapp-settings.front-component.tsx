@@ -4,11 +4,12 @@ import { defineSettingsFrontComponent } from 'twenty-sdk/define';
 import { t } from 'twenty-sdk/front-component';
 import { Callout } from 'twenty-ui/components';
 import { Tag } from 'twenty-ui/primitives/data-display';
-import { Button, Checkbox } from 'twenty-ui/primitives/input';
+import { Button } from 'twenty-ui/primitives/input';
 import { themeCssVariables } from 'twenty-ui/theme';
 import 'twenty-ui/style.css';
 
 import { SETTINGS_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
+import { FrontComponentCheckbox } from 'src/front-components/components/FrontComponentCheckbox';
 import { WhatsAppHistoryImport } from 'src/front-components/components/WhatsAppHistoryImport';
 import { getPreviewStyles } from 'src/front-components/components/PreviewUi';
 
@@ -233,11 +234,11 @@ const WhatsAppSettings = () => {
               </a>
             </div>
             <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
-              <Checkbox checked={ownsNumber} onCheckedChange={(checked) => setOwnsNumber(checked === true)} aria-label={t('I control this WhatsApp number')} />
+              <FrontComponentCheckbox checked={ownsNumber} onChange={(event) => setOwnsNumber(event.target.checked)} aria-label={t('I control this WhatsApp number')} />
               {t('I control this WhatsApp number and can authorize its connection.')}
             </label>
             <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
-              <Checkbox checked={acceptsRisk} onCheckedChange={(checked) => setAcceptsRisk(checked === true)} aria-label={t('I understand the unofficial connection risk')} />
+              <FrontComponentCheckbox checked={acceptsRisk} onChange={(event) => setAcceptsRisk(event.target.checked)} aria-label={t('I understand the unofficial connection risk')} />
               {t('I understand an unofficial linked-device connection may be restricted or disconnected.')}
             </label>
             <div>
