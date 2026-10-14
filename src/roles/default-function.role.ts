@@ -7,7 +7,7 @@ import { WHATSAPP_MESSAGE_OBJECT_ID } from 'src/objects/whatsapp-message';
 export default defineApplicationRole({
   universalIdentifier: '50589f49-6cc1-414e-83d3-ec54751445ce',
   label: 'WhatsApp function role',
-  description: 'Matches People and stores WhatsApp accounts, conversations, and messages.',
+  description: 'Matches or creates selected People and stores WhatsApp accounts, conversations, and messages.',
   canReadAllObjectRecords: false,
   canUpdateAllObjectRecords: false,
   canSoftDeleteAllObjectRecords: false,
@@ -20,7 +20,7 @@ export default defineApplicationRole({
     {
       objectUniversalIdentifier: STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS.person.universalIdentifier,
       canReadObjectRecords: true,
-      canUpdateObjectRecords: false,
+      canUpdateObjectRecords: true,
       canSoftDeleteObjectRecords: false,
       canDestroyObjectRecords: false,
     },

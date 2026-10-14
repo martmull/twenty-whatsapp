@@ -6,7 +6,7 @@ import {
   applicationClient,
   ensureAccount,
   findPeopleByPhone,
-  importMessageForPerson,
+  importHistoryMessagesForPerson,
   userClient,
   type BridgeMessageEvent,
   type Person,
@@ -141,17 +141,13 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
   }
 
   const accountId = await ensureAccount(client, `+${status.phoneNumber.replace(/\D/g, '')}`);
-  let imported = 0;
-
   for (const message of history.messages) {
     if (message.chatId !== request.chatId) {
       throw new Error('History message belongs to another chat');
     }
-
-    if (await importMessageForPerson(client, accountId, message, person)) {
-      imported += 1;
-    }
   }
+
+  const imported = await importHistoryMessagesForPerson(client, accountId, history.messages, person);
 
   return { imported, total: history.total, nextOffset: history.nextOffset, createdPerson };
 };

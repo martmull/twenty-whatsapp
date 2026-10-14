@@ -203,6 +203,87 @@ export const importMessageForPerson = async (client: CoreApiClient, accountId: s
   return !existing;
 };
 
+export const importHistoryMessagesForPerson = async (client: CoreApiClient, accountId: string, events: BridgeMessageEvent[], person: Person): Promise<number> => {
+  if (events.length === 0) {
+    return 0;
+  }
+
+  const chatId = events[0].chatId;
+
+  for (const event of events) {
+    if (event.chatId !== chatId || !/^[a-f\d]{64}$/.test(event.eventId) || !/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound') || !Number.isFinite(Date.parse(event.sentAt))) {
+      throw new Error('Invalid bridge event');
+    }
+  }
+
+  let conversation = await findConversation(client, accountId, chatId);
+
+  if (!conversation) {
+    const name = [person.name.firstName, person.name.lastName].filter(Boolean).join(' ') || chatId.split('@')[0];
+    const created = await client.mutation({
+      createWhatsappConversation: {
+        __args: { data: { name, chatId, personId: person.id, linkedPersonId: person.id, accountId } },
+        id: true,
+      },
+    });
+    const id = created.createWhatsappConversation?.id;
+
+    if (!id) {
+      throw new Error('Could not create WhatsApp conversation');
+    }
+
+    conversation = { id, name, chatId, personId: person.id, accountId };
+  }
+
+  const existing = await client.query({
+    whatsappMessages: {
+      __args: { filter: { externalId: { in: events.map((event) => event.eventId) } }, first: events.length },
+      edges: { node: { externalId: true } },
+    },
+  });
+
+  if (!existing.whatsappMessages) {
+    throw new Error('Could not check existing WhatsApp messages');
+  }
+
+  const existingIds = new Set(existing.whatsappMessages.edges.map(({ node }) => node.externalId));
+  const missing = events.filter((event) => !existingIds.has(event.eventId));
+
+  if (missing.length > 0) {
+    const created = await client.mutation({
+      createWhatsappMessages: {
+        __args: { data: missing.map((event) => ({
+          name: event.text.slice(0, 80),
+          conversationId: conversation.id,
+          externalId: event.eventId,
+          direction: event.direction ?? 'inbound',
+          text: event.text,
+          sentAt: event.sentAt,
+          deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
+        })) },
+        id: true,
+      },
+    });
+
+    if (created.createWhatsappMessages?.length !== missing.length) {
+      throw new Error('Could not create WhatsApp messages');
+    }
+  }
+
+  const latest = events.reduce((current, event) => event.sentAt > current.sentAt ? event : current);
+
+  if (!conversation.lastMessageAt || latest.sentAt >= conversation.lastMessageAt) {
+    await client.mutation({
+      updateWhatsappConversation: {
+        __args: { id: conversation.id, data: { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } },
+        id: true,
+      },
+    });
+  }
+
+  return missing.length;
+};
+
 export const findMessageByRequestId = async (client: CoreApiClient, requestId: string): Promise<Message | undefined> => {
   const result = await client.query({
     whatsappMessages: {

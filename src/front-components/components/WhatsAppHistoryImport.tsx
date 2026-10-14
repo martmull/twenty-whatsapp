@@ -130,6 +130,7 @@ export const WhatsAppHistoryImport = () => {
       await load(rangeDays, 0);
       setNotice(`${t('Import complete')}: ${imported} ${t('messages')}, ${createdPeople} ${t('new People')}.`);
     } catch {
+      setNotice('');
       setError(t('Import stopped. Completed records were saved. Review and retry; duplicate messages will be skipped.'));
     } finally {
       setWorking(false);
