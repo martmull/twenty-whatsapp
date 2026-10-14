@@ -8,7 +8,7 @@ const WhatsAppPerson = () => {
   const selectedRecordIds = useSelectedRecordIds();
   const personId = selectedRecordIds.length === 1 ? selectedRecordIds[0] : undefined;
 
-  return personId ? <WhatsAppThread personId={personId} compact /> : null;
+  return personId ? <WhatsAppThread personId={personId} /> : null;
 };
 
 export default defineFrontComponent({

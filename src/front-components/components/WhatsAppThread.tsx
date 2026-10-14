@@ -30,13 +30,13 @@ type InboxData = {
   connectionState: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
 };
 
-type WhatsAppThreadProps = { personId?: string; compact?: boolean };
+type WhatsAppThreadProps = { personId?: string };
 
 const formatTime = (value?: string | null) => value
   ? new Date(value).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
   : '';
 
-export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProps) => {
+export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const styles = getPreviewStyles();
   const [data, setData] = useState<InboxData>();
   const [selectedId, setSelectedId] = useState<string>();
@@ -156,22 +156,22 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
       display: 'grid',
       gridTemplateRows: 'auto minmax(0, 1fr)',
       gap: themeCssVariables.spacing[3],
-      height: compact ? 420 : '100%',
-      minHeight: compact ? 420 : 560,
-      padding: compact ? 0 : themeCssVariables.spacing[3],
+      height: personId ? 'calc(100dvh - 140px)' : '100%',
+      minHeight: personId ? 420 : 560,
+      padding: personId ? 0 : themeCssVariables.spacing[3],
     }}>
       <header style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between', gap: themeCssVariables.spacing[2] }}>
         <div>
-          <h2 style={{ margin: 0, fontSize: compact ? 16 : 20 }}>{compact ? t('WhatsApp conversations') : t('WhatsApp inbox')}</h2>
-          {!compact && <p style={styles.muted}>{t('Shared conversations with People in this workspace.')}</p>}
+          <h2 style={{ margin: 0, fontSize: personId ? 16 : 20 }}>{personId ? t('WhatsApp') : t('WhatsApp inbox')}</h2>
+          {!personId && <p style={styles.muted}>{t('Shared conversations with People in this workspace.')}</p>}
         </div>
         <div style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2] }}>
           <PreviewBadge tone={connected ? 'green' : 'neutral'}>{connected ? t('Connected') : t('Offline')}</PreviewBadge>
           <PreviewButton onClick={() => void load(selectedId)}>{t('Refresh')}</PreviewButton>
         </div>
       </header>
-      <div style={{ ...styles.card, display: 'grid', gridTemplateColumns: compact ? 'minmax(130px, 36%) minmax(0, 1fr)' : 'minmax(200px, 30%) minmax(0, 1fr)', minHeight: 0, overflow: 'hidden' }}>
-        <aside aria-label={t('Conversations')} style={{ borderRight: `1px solid ${themeCssVariables.border.color.medium}`, overflowY: 'auto' }}>
+      <div style={{ ...styles.card, display: 'grid', gridTemplateColumns: personId ? 'minmax(0, 1fr)' : 'minmax(200px, 30%) minmax(0, 1fr)', minHeight: 0, overflow: 'hidden' }}>
+        {!personId && <aside aria-label={t('Conversations')} style={{ borderRight: `1px solid ${themeCssVariables.border.color.medium}`, overflowY: 'auto' }}>
           {loading && !data && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('Loading conversations…')}</p>}
           {!loading && data?.conversations.length === 0 && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('No conversations with matched People yet.')}</p>}
           {data?.conversations.map((conversation) => (
@@ -193,12 +193,14 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
               <small style={styles.label}>{formatTime(conversation.lastMessageAt)}</small>
             </button>
           ))}
-        </aside>
-        <div style={{ display: 'grid', gridTemplateRows: 'auto minmax(0, 1fr) auto', minWidth: 0, minHeight: 0 }}>
-          <div style={{ borderBottom: `1px solid ${themeCssVariables.border.color.medium}`, padding: themeCssVariables.spacing[3] }}>
+        </aside>}
+        <div style={{ display: 'grid', gridTemplateRows: personId ? 'minmax(0, 1fr) auto' : 'auto minmax(0, 1fr) auto', minWidth: 0, minHeight: 0 }}>
+          {!personId && <div style={{ borderBottom: `1px solid ${themeCssVariables.border.color.medium}`, padding: themeCssVariables.spacing[3] }}>
             <strong>{selected?.name ?? t('Select a conversation')}</strong>
-          </div>
+          </div>}
           <div key={`${selectedId}:${latestMessageId}`} aria-label={t('Message thread')} style={{ backgroundColor: '#faf7f2', backgroundImage: `url("${getPublicAssetUrl('whatsapp-wallpaper.png')}")`, backgroundRepeat: 'repeat', backgroundSize: '485px auto', display: 'flex', flexDirection: 'column-reverse', gap: themeCssVariables.spacing[2], overflowY: 'auto', padding: themeCssVariables.spacing[3] }}>
+            {personId && loading && !data && <p style={{ color: '#667781' }}>{t('Loading conversation…')}</p>}
+            {personId && !loading && !selected && <p style={{ color: '#667781' }}>{t('No WhatsApp conversation for this Person yet.')}</p>}
             {selected && data?.messages.length === 0 && <p style={styles.muted}>{t('No messages yet.')}</p>}
             {data?.messages.slice().reverse().map((message) => (
               <div key={message.id} style={{ alignSelf: message.direction === 'outbound' ? 'flex-end' : 'flex-start', background: message.direction === 'outbound' ? '#d9fdd3' : '#fff', border: '1px solid #e9e7e3', borderRadius: themeCssVariables.border.radius.md, color: '#202c33', maxWidth: '78%', padding: `${themeCssVariables.spacing[2]} ${themeCssVariables.spacing[3]}` }}>
@@ -212,7 +214,7 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
             {notice && <p role="status" style={{ ...styles.muted, margin: 0 }}>{notice}</p>}
             <textarea
               aria-label={t('Write a WhatsApp message')}
-              placeholder={selected ? t('Write a message…') : t('Select a conversation first')}
+              placeholder={selected ? t('Write a message…') : personId ? t('No conversation yet') : t('Select a conversation first')}
               value={draft}
               onChange={(event) => { setDraft(event.target.value); setRequestId(undefined); setNotice(''); }}
               onKeyDown={(event) => {
@@ -222,7 +224,7 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
                 }
               }}
               disabled={!selected || !connected || sending}
-              rows={compact ? 2 : 3}
+              rows={personId ? 2 : 3}
               maxLength={4096}
               style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, padding: themeCssVariables.spacing[2], resize: 'vertical', width: '100%', boxSizing: 'border-box' }}
             />
