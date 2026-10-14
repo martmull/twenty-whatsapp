@@ -274,7 +274,6 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
             }}>
               <span style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2], justifyContent: 'space-between' }}>
                 <strong style={{ fontWeight: conversation.unread ? 700 : 600 }}>{conversation.name}</strong>
-                {conversation.unread && <span title={t('Unread messages')} style={{ background: themeCssVariables.color.blue, borderRadius: 999, color: '#fff', flexShrink: 0, fontSize: themeCssVariables.font.size.sm, fontWeight: 700, padding: '2px 8px' }}>{t('Unread')}</span>}
               </span>
               <span style={{ ...styles.muted, color: conversation.unread ? themeCssVariables.font.color.primary : styles.muted.color, fontWeight: conversation.unread ? 600 : undefined }}>{conversation.lastPreview ?? t('No messages yet')}</span>
               <small style={{ ...styles.label, color: conversation.unread ? themeCssVariables.color.blue : styles.label.color, fontWeight: conversation.unread ? 600 : undefined }}>{formatTime(conversation.lastMessageAt)}</small>
