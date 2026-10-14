@@ -399,53 +399,59 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
     return { imported: 0, ignored: 0 };
   }
 
-  const events = await bridgeJsonRequest<BridgeMessageEvent[]>('/events');
+  const { leaseId, events } = await bridgeJsonRequest<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
 
-  if (events.length === 0) {
+  if (!leaseId || events.length === 0) {
     return { imported: 0, ignored: 0 };
   }
 
-  const client = applicationClient();
-  const accountId = await ensureAccount(client, phoneNumber);
-  const peopleByPhone = await findPeopleByPhone(client);
+  let completed = false;
+  try {
+    const client = applicationClient();
+    const accountId = await ensureAccount(client, phoneNumber);
+    const peopleByPhone = await findPeopleByPhone(client);
 
-  let imported = 0;
-  let ignored = 0;
+    let imported = 0;
+    let ignored = 0;
 
-  const firstMediaIndex = events.findIndex((event) => event.media);
-  for (const event of firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1)) {
-    const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(event.chatId);
-    if (!/^[a-f\d]{64}$/.test(event.eventId) || (!/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) && !isGroup) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
-      throw new Error('Invalid bridge event');
-    }
+    const firstMediaIndex = events.findIndex((event) => event.media);
+    for (const event of firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1)) {
+      const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(event.chatId);
+      if (!/^[a-f\d]{64}$/.test(event.eventId) || (!/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) && !isGroup) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
+        throw new Error('Invalid bridge event');
+      }
 
-    if (isGroup) {
-      const conversation = await findConversation(client, accountId, event.chatId);
+      if (isGroup) {
+        const conversation = await findConversation(client, accountId, event.chatId);
 
-      if (conversation) {
-        imported += await importHistoryMessages(client, accountId, event.chatId, conversation.name, [event]);
-      } else {
+        if (conversation) {
+          imported += await importHistoryMessages(client, accountId, event.chatId, conversation.name, [event]);
+        } else {
+          ignored += 1;
+        }
+
+        await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+        continue;
+      }
+
+      const candidates = peopleByPhone.get(event.chatId.split('@')[0]) ?? [];
+
+      if (candidates.length !== 1) {
         ignored += 1;
+        await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+        continue;
+      }
+
+      if (await importMessageForPerson(client, accountId, event, candidates[0])) {
+        imported += 1;
       }
 
       await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
-      continue;
     }
 
-    const candidates = peopleByPhone.get(event.chatId.split('@')[0]) ?? [];
-
-    if (candidates.length !== 1) {
-      ignored += 1;
-      await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
-      continue;
-    }
-
-    if (await importMessageForPerson(client, accountId, event, candidates[0])) {
-      imported += 1;
-    }
-
-    await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+    completed = true;
+    return { imported, ignored };
+  } finally {
+    await bridgeJsonRequest('/events/release', { leaseId, completed }).catch(() => undefined);
   }
-
-  return { imported, ignored };
 };

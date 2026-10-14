@@ -89,6 +89,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
         id: true,
       },
     });
+    await bridgeJsonRequest('/events/notify').catch(() => undefined);
   }
 
   return { messageId: message.id, state: receipt.state };

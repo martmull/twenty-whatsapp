@@ -137,11 +137,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
 
   useEffect(() => {
     let active = true;
-    let refreshing = false;
     const refresh = async (sync = false) => {
-      if (refreshing) return;
-      refreshing = true;
-
       try {
         if (sync) {
           await new RestApiClient().post('/s/whatsapp/messages/sync', {}).catch(() => undefined);
@@ -165,17 +161,35 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
           setLoading(false);
           setError(t('Could not load WhatsApp messages. Check your access and connection.'));
         }
-      } finally {
-        refreshing = false;
       }
     };
 
-    void refresh();
-    const timer = setInterval(() => void refresh(true), 15_000);
+    const watch = async () => {
+      await refresh();
+      let cursor = '';
+
+      while (active) {
+        try {
+          const update = await new RestApiClient().post<{ cursor: string; changed: boolean }>('/s/whatsapp/messages/updates', { cursor });
+          if (!active) break;
+          cursor = update.cursor;
+          if (update.changed) {
+            await refresh(true);
+          }
+        } catch {
+          if (!active) break;
+          await new Promise((resolve) => setTimeout(resolve, 15_000));
+          if (active) {
+            await refresh(true);
+          }
+        }
+      }
+    };
+
+    void watch();
 
     return () => {
       active = false;
-      clearInterval(timer);
     };
   }, [personId]);
 

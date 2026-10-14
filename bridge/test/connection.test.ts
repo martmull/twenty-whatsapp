@@ -9,6 +9,7 @@ import type { Chat, WAMessage } from '@whiskeysockets/baileys';
 
 import { WhatsAppConnection, type ConnectionStatus } from '../src/connection.js';
 import { createEncryptedAuthState } from '../src/encrypted-auth-state.js';
+import type { MessageEvent } from '../src/message-event.js';
 
 class RecordingConnection extends WhatsAppConnection {
   connectCount = 0;
@@ -18,6 +19,41 @@ class RecordingConnection extends WhatsAppConnection {
     return { state: 'connected' };
   }
 }
+
+test('bridge waiters wake when new data is available', async () => {
+  const connection = new WhatsAppConnection(join(tmpdir(), 'twenty-whatsapp-updates-test'), randomBytes(32));
+  const initial = await connection.waitForChange('');
+  assert.equal(initial.changed, true);
+
+  const waiting = connection.waitForChange(initial.cursor);
+  connection.notifyChange();
+  const update = await waiting;
+  assert.equal(update.changed, true);
+  assert.notEqual(update.cursor, initial.cursor);
+});
+
+test('only one importer claims a queued batch and completion wakes other viewers', async () => {
+  class QueuedConnection extends WhatsAppConnection {
+    override async getEvents(): Promise<MessageEvent[]> {
+      return [{
+        eventId: 'a'.repeat(64), chatId: '15551234567@s.whatsapp.net',
+        providerMessageId: 'message-1', direction: 'inbound', text: 'Hello', sentAt: new Date().toISOString(),
+      }];
+    }
+  }
+
+  const connection = new QueuedConnection(join(tmpdir(), 'twenty-whatsapp-claim-test'), randomBytes(32));
+  const claimed = await connection.claimEvents();
+  assert.equal(claimed.events.length, 1);
+  assert.ok(claimed.leaseId);
+  assert.deepEqual(await connection.claimEvents(), { events: [] });
+
+  const cursor = (await connection.waitForChange('')).cursor;
+  const waiting = connection.waitForChange(cursor);
+  assert.deepEqual(connection.releaseEvents(claimed.leaseId, true), { released: true });
+  assert.equal((await waiting).changed, true);
+  assert.ok((await connection.claimEvents()).leaseId);
+});
 
 test('bridge startup resumes only a saved linked device', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-resume-'));

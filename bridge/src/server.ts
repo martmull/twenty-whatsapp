@@ -74,6 +74,26 @@ const server = createServer(async (request, response) => {
         ? connection.getStatus()
         : request.method === 'GET' && path === '/events'
           ? await connection.getEvents()
+          : request.method === 'POST' && path === '/events/claim'
+            ? await connection.claimEvents()
+          : request.method === 'POST' && path === '/events/release'
+            ? await (async () => {
+              const body = await readBody(request);
+              if (typeof body.leaseId !== 'string' || !/^[a-f\d-]{36}$/i.test(body.leaseId) || typeof body.completed !== 'boolean') {
+                throw new Error('Invalid sync lease');
+              }
+              return connection.releaseEvents(body.leaseId, body.completed);
+            })()
+          : request.method === 'POST' && path === '/events/wait'
+            ? await (async () => {
+              const body = await readBody(request);
+              if (typeof body.cursor !== 'string' || (body.cursor !== '' && !/^[a-f\d-]{36}$/i.test(body.cursor))) {
+                throw new Error('Invalid cursor');
+              }
+              return connection.waitForChange(body.cursor);
+            })()
+          : request.method === 'POST' && path === '/events/notify'
+            ? (connection.notifyChange(), { notified: true })
           : request.method === 'POST' && path === '/events/ack'
             ? await (async () => {
               const body = await readBody(request);

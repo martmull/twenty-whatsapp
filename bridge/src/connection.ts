@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -64,6 +65,9 @@ export class WhatsAppConnection {
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
+  private changeCursor = randomUUID();
+  private readonly changeListeners = new Set<() => void>();
+  private syncLease: { id: string; expiresAt: number } | undefined;
 
   constructor(
     private readonly directory: string,
@@ -339,6 +343,61 @@ export class WhatsAppConnection {
     return this.events.list(100);
   }
 
+  async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[] }> {
+    if (this.syncLease && this.syncLease.expiresAt > Date.now()) {
+      return { events: [] };
+    }
+
+    const leaseId = randomUUID();
+    this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000 };
+    try {
+      const events = await this.getEvents();
+      if (events.length === 0) {
+        if (this.syncLease?.id === leaseId) this.syncLease = undefined;
+        return { events };
+      }
+      return { leaseId, events };
+    } catch (error) {
+      if (this.syncLease?.id === leaseId) this.syncLease = undefined;
+      throw error;
+    }
+  }
+
+  releaseEvents(leaseId: string, completed: boolean): { released: boolean } {
+    if (this.syncLease?.id !== leaseId) {
+      return { released: false };
+    }
+
+    this.syncLease = undefined;
+    if (completed) {
+      this.notifyChange();
+    }
+    return { released: true };
+  }
+
+  notifyChange(): void {
+    this.changeCursor = randomUUID();
+    for (const listener of this.changeListeners) {
+      listener();
+    }
+  }
+
+  async waitForChange(cursor: string): Promise<{ cursor: string; changed: boolean }> {
+    if (cursor !== this.changeCursor) {
+      return { cursor: this.changeCursor, changed: true };
+    }
+
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timeout);
+        this.changeListeners.delete(finish);
+        resolve({ cursor: this.changeCursor, changed: cursor !== this.changeCursor });
+      };
+      const timeout = setTimeout(finish, 20_000);
+      this.changeListeners.add(finish);
+    });
+  }
+
   async ackEvents(eventIds: string[]): Promise<{ acknowledged: number }> {
     for (const eventId of eventIds) {
       if (!/^[a-f\d]{64}$/.test(eventId)) {
@@ -459,6 +518,7 @@ export class WhatsAppConnection {
             await this.phoneNumbers.write(remoteJid, { chatId: event.chatId });
           }
           await this.events.write(event.eventId, event);
+          this.notifyChange();
         }
       }
     });
@@ -507,6 +567,7 @@ export class WhatsAppConnection {
           state: 'connected',
           phoneNumber: socket.user?.id?.split(':')[0],
         };
+        this.notifyChange();
         void socket.groupFetchAllParticipating().then((groups) => {
           if (generation === this.generation) {
             return this.recordHistory(Object.values(groups).map((group) => ({ id: group.id, name: group.subject })), []);
@@ -522,10 +583,12 @@ export class WhatsAppConnection {
 
         if (this.intentionallyDisconnected || statusCode === DisconnectReason.loggedOut) {
           this.status = { state: 'disconnected' };
+          this.notifyChange();
           return;
         }
 
         this.status = { state: 'reconnecting' };
+        this.notifyChange();
         this.reconnectTimer = setTimeout(() => void this.connect(), 5_000);
       }
     });
@@ -541,6 +604,7 @@ export class WhatsAppConnection {
     this.socket = undefined;
     this.groupMembersCache.clear();
     this.status = { state: 'disconnected' };
+    this.notifyChange();
 
     try {
       await socket?.logout();
