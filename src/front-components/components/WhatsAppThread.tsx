@@ -215,7 +215,7 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
               value={draft}
               onChange={(event) => { setDraft(event.target.value); setRequestId(undefined); setNotice(''); }}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.repeat && !event.nativeEvent.isComposing) {
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.repeat && !('isComposing' in event && event.isComposing)) {
                   event.preventDefault();
                   void send();
                 }
@@ -226,7 +226,7 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
               style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, padding: themeCssVariables.spacing[2], resize: 'vertical', width: '100%', boxSizing: 'border-box' }}
             />
             <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between', gap: themeCssVariables.spacing[2] }}>
-              <small style={styles.label}>{connected ? t('Ctrl/⌘ + Enter to send') : t('Connect WhatsApp to send')}</small>
+              <small style={styles.label}>{connected ? t('Send ⌘↵') : t('Connect WhatsApp to send')}</small>
               <PreviewButton primary disabled={!selected || !connected || !draft.trim() || sending} onClick={() => void send()}>{sending ? t('Sending…') : t('Send')}</PreviewButton>
             </div>
           </div>
