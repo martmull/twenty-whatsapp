@@ -47,7 +47,6 @@ export class WhatsAppConnection {
   private readonly phoneNumbers: EncryptedJsonStore<{ chatId: string }>;
   private readonly historyChats: EncryptedJsonStore<HistoryChat>;
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
-  private readonly browserProfile: EncryptedJsonStore<{ name: 'desktop' }>;
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
 
@@ -60,7 +59,6 @@ export class WhatsAppConnection {
     this.phoneNumbers = new EncryptedJsonStore(join(directory, 'phone-numbers'), encryptionKey);
     this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
     this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
-    this.browserProfile = new EncryptedJsonStore(join(directory, 'browser-profile'), encryptionKey);
   }
 
   async recordHistory(contacts: Contact[], messages: WAMessage[], fromHistorySync = false): Promise<void> {
@@ -272,19 +270,13 @@ export class WhatsAppConnection {
       this.directory,
       this.encryptionKey,
     );
-    // Saved sessions must reconnect with the same browser identity used at pairing.
-    const useDesktopProfile = (await this.browserProfile.read('current'))?.name === 'desktop' || !state.creds.me?.id;
-
-    if (useDesktopProfile) {
-      await this.browserProfile.write('current', { name: 'desktop' });
-    }
-
     const socket = makeWASocket({
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
       markOnlineOnConnect: false,
-      ...(useDesktopProfile ? { browser: Browsers.macOS('Desktop') } : {}),
+      // WhatsApp rejects Baileys' Desktop identity before it can emit a pairing QR.
+      browser: Browsers.ubuntu('Chrome'),
       syncFullHistory: true,
       shouldSyncHistoryMessage: () => true,
       emitOwnEvents: false,
