@@ -49,12 +49,13 @@ export const WhatsAppHistoryImport = () => {
   const [historyReceivedAt, setHistoryReceivedAt] = useState<string>();
   const [selected, setSelected] = useState<string[]>([]);
   const [acknowledged, setAcknowledged] = useState(false);
-  const [working, setWorking] = useState(false);
+  const [workingAction, setWorkingAction] = useState<'review' | 'load-more' | 'import' | null>(null);
+  const working = workingAction !== null;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const load = async (range: RangeDays, offset: number) => {
-    setWorking(true);
+  const load = async (range: RangeDays, offset: number, action: 'review' | 'load-more' | 'import' = 'review') => {
+    setWorkingAction(action);
     setError('');
     setNotice('');
 
@@ -70,7 +71,7 @@ export const WhatsAppHistoryImport = () => {
     } catch {
       setError(t('Could not load WhatsApp history. Check the bridge and retry.'));
     } finally {
-      setWorking(false);
+      setWorkingAction(null);
     }
   };
 
@@ -92,7 +93,7 @@ export const WhatsAppHistoryImport = () => {
   const someShownSelected = selectedConversations.length > 0 && !allShownSelected;
 
   const importSelected = async () => {
-    setWorking(true);
+    setWorkingAction('import');
     setError('');
     setNotice('');
     let imported = 0;
@@ -127,13 +128,13 @@ export const WhatsAppHistoryImport = () => {
 
       setSelected([]);
       setAcknowledged(false);
-      await load(rangeDays, 0);
+      await load(rangeDays, 0, 'import');
       setNotice(`${t('Import complete')}: ${imported} ${t('messages')}, ${createdPeople} ${t('new People')}.`);
     } catch {
       setNotice('');
       setError(t('Import stopped. Completed records were saved. Review and retry; duplicate messages will be skipped.'));
     } finally {
-      setWorking(false);
+      setWorkingAction(null);
     }
   };
 
@@ -149,7 +150,7 @@ export const WhatsAppHistoryImport = () => {
       </p>
       {!reviewing && (
         <div>
-          <Button type="button" variant="solid" color="accent" size="sm" onClick={() => void load(rangeDays, 0)} loading={working}>
+          <Button type="button" variant="solid" color="accent" size="sm" onClick={() => void load(rangeDays, 0)} loading={workingAction === 'review'}>
             {t('Review available history')}
           </Button>
         </div>
@@ -196,7 +197,7 @@ export const WhatsAppHistoryImport = () => {
                 </label>
               ))}
               {items.length < total && (
-                <div><Button type="button" variant="outline" size="sm" onClick={() => void load(rangeDays, items.length)} loading={working}>{t('Load more conversations')}</Button></div>
+                <div><Button type="button" variant="outline" size="sm" onClick={() => void load(rangeDays, items.length, 'load-more')} disabled={working} loading={workingAction === 'load-more'}>{t('Load more conversations')}</Button></div>
               )}
             </div>
           )}
@@ -208,7 +209,7 @@ export const WhatsAppHistoryImport = () => {
             </label>
           )}
           <div style={{ display: 'flex', gap: themeCssVariables.spacing[2], alignItems: 'center' }}>
-            <Button type="button" variant="solid" color="accent" size="sm" disabled={selected.length === 0 || !acknowledged} loading={working} onClick={() => void importSelected()}>{t('Import selected')}</Button>
+            <Button type="button" variant="solid" color="accent" size="sm" disabled={working || selected.length === 0 || !acknowledged} loading={workingAction === 'import'} onClick={() => void importSelected()}>{t('Import selected')}</Button>
             <span style={styles.label}>{selected.length} {t('selected')}</span>
           </div>
         </>
