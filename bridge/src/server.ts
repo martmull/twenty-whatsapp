@@ -130,6 +130,14 @@ const server = createServer(async (request, response) => {
                   }
                   return connection.getHistoryMessages(body.chatId, body.rangeDays, body.offset as number, body.limit as number);
                 })()
+                : request.method === 'POST' && path === '/history/names'
+                  ? await (async () => {
+                    const body = await readBody(request);
+                    if (connection.getStatus().state !== 'connected' || !Array.isArray(body.chatIds) || body.chatIds.length > 100 || !body.chatIds.every((id) => typeof id === 'string')) {
+                      throw new Error('Invalid history names request');
+                    }
+                    return connection.getHistoryNames(body.chatIds);
+                  })()
                 : request.method === 'POST' && path === '/history/members'
                   ? await (async () => {
                     const body = await readBody(request);

@@ -4,7 +4,7 @@ import { t, useColorScheme } from 'twenty-sdk/front-component';
 import { getPublicAssetUrl } from 'twenty-sdk/utils';
 import { themeCssVariables } from 'twenty-ui/theme';
 
-import { PreviewBadge, PreviewButton, getPreviewStyles } from 'src/front-components/components/PreviewUi';
+import { PreviewButton, getPreviewStyles } from 'src/front-components/components/PreviewUi';
 import { createRequestId } from 'src/front-components/components/createRequestId';
 
 type Conversation = {
@@ -61,7 +61,6 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const [draft, setDraft] = useState('');
   const [requestId, setRequestId] = useState<string>();
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -112,27 +111,6 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     } finally {
       setLoading(false);
     }
-  };
-
-  const refreshNow = async () => {
-    if (refreshing) {
-      return;
-    }
-
-    setRefreshing(true);
-    let syncFailed = false;
-
-    try {
-      await new RestApiClient().post('/s/whatsapp/messages/sync', {});
-    } catch {
-      syncFailed = true;
-    }
-
-    await load(selectedIdRef.current, true);
-    if (syncFailed) {
-      setError(t('Could not sync new WhatsApp messages. Check the bridge connection and try again.'));
-    }
-    setRefreshing(false);
   };
 
   useEffect(() => {
@@ -240,10 +218,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
 
   const selected = data?.conversations.find((conversation) => conversation.id === selectedId);
   const connected = data?.connectionState === 'connected';
-  const connectionLabel = data?.connectionState === 'connected' ? t('Connected')
-    : data?.connectionState === 'reconnecting' ? t('Reconnecting')
-    : data?.connectionState === 'unavailable' ? t('Bridge unavailable')
-    : data?.connectionState === 'pairing' ? t('Pairing') : t('Disconnected');
+  const connectionWarning = data?.connectionState === 'reconnecting' ? t('WhatsApp is reconnecting.')
+    : data?.connectionState === 'unavailable' ? t('WhatsApp connection is unavailable.')
+    : data?.connectionState === 'pairing' ? t('WhatsApp is waiting for a QR scan.')
+    : data?.connectionState === 'disconnected' ? t('WhatsApp is disconnected.') : undefined;
   const isGroup = selected?.chatId.endsWith('@g.us');
   const memberNameById = new Map<string, string>();
   for (const member of data?.groupMembers ?? []) {
@@ -261,7 +239,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     <section style={{
       ...styles.root,
       display: 'grid',
-      gridTemplateRows: data?.connectionState === 'unavailable' ? 'auto auto minmax(0, 1fr)' : 'auto minmax(0, 1fr)',
+      gridTemplateRows: 'auto minmax(0, 1fr)',
       gap: themeCssVariables.spacing[3],
       height: personId ? 'calc(100dvh - 140px)' : '100%',
       minHeight: personId ? 420 : 560,
@@ -272,12 +250,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
           <h2 style={{ margin: 0, fontSize: personId ? 16 : 20 }}>{personId ? t('WhatsApp') : t('WhatsApp inbox')}</h2>
           {!personId && <p style={styles.muted}>{t('Shared direct and group conversations in this workspace.')}</p>}
         </div>
-        <div style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2] }}>
-          <PreviewBadge tone={connected ? 'green' : data?.connectionState === 'unavailable' ? 'red' : 'neutral'}>{connectionLabel}</PreviewBadge>
-          <PreviewButton disabled={refreshing} onClick={() => void refreshNow()}>{refreshing ? t('Refreshing…') : t('Refresh')}</PreviewButton>
-        </div>
+        {connectionWarning && <span role="alert" style={{ color: themeCssVariables.color.red, fontSize: themeCssVariables.font.size.sm, textAlign: 'right' }}>
+          {connectionWarning} <a href="/settings/applications" style={{ color: 'inherit', textDecoration: 'underline' }}>{t('App settings')}</a>
+        </span>}
       </header>
-      {data?.connectionState === 'unavailable' && <p role="alert" style={{ color: themeCssVariables.color.red, margin: 0 }}>{t('The WhatsApp bridge is unavailable. Check the bridge process in app settings, then refresh.')}</p>}
       <div style={{ ...styles.card, display: 'grid', gridTemplateColumns: personId ? 'minmax(0, 1fr)' : 'minmax(200px, 30%) minmax(0, 1fr)', minHeight: 0, overflow: 'hidden' }}>
         {!personId && <aside aria-label={t('Conversations')} style={{ borderRight: `1px solid ${themeCssVariables.border.color.medium}`, overflowY: 'auto' }}>
           {loading && !data && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('Loading conversations…')}</p>}

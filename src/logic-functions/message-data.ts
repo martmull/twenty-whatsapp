@@ -391,6 +391,53 @@ export const findMessageByRequestId = async (client: CoreApiClient, requestId: s
   return result.whatsappMessages?.edges?.[0]?.node as Message | undefined;
 };
 
+const syncConversationNames = async (client: CoreApiClient, accountId: string): Promise<void> => {
+  let after: string | undefined;
+
+  for (let page = 0; page < 100; page += 1) {
+    const result = await client.query({
+      whatsappConversations: {
+        __args: { filter: { accountId: { eq: accountId } }, first: 100, after },
+        edges: { node: { id: true, chatId: true, name: true } },
+        pageInfo: { hasNextPage: true, endCursor: true },
+      },
+    });
+    const connection = result.whatsappConversations;
+    const conversations = (connection?.edges ?? []).map(({ node }) => node);
+    if (conversations.length > 0) {
+      const names = await bridgeJsonRequest<{ chatId: string; name: string }[]>('/history/names', {
+        chatIds: conversations.map((conversation) => conversation.chatId).filter((chatId): chatId is string => typeof chatId === 'string'),
+      });
+      const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name]));
+
+      for (const conversation of conversations) {
+        if (!conversation.chatId) {
+          continue;
+        }
+        const name = nameByChatId.get(conversation.chatId)?.trim().slice(0, 120);
+        if (name && !/^\+?\d+$/.test(name) && name !== conversation.name) {
+          await client.mutation({
+            updateWhatsappConversation: {
+              __args: { id: conversation.id, data: { name } },
+              id: true,
+            },
+          });
+        }
+      }
+    }
+
+    if (!connection?.pageInfo?.hasNextPage) {
+      return;
+    }
+    after = connection.pageInfo.endCursor ?? undefined;
+    if (!after) {
+      throw new Error('Conversation pagination stopped unexpectedly');
+    }
+  }
+
+  throw new Error('Conversation name sync limit reached');
+};
+
 export const syncMessages = async (): Promise<{ imported: number; ignored: number }> => {
   const status = await bridgeRequest('/status');
   const phoneNumber = status.phoneNumber ? `+${digits(status.phoneNumber)}` : undefined;
@@ -399,20 +446,21 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
     return { imported: 0, ignored: 0 };
   }
 
+  const client = applicationClient();
+  const accountId = await ensureAccount(client, phoneNumber);
+
   const { leaseId, events } = await bridgeJsonRequest<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
 
   if (!leaseId || events.length === 0) {
+    await syncConversationNames(client, accountId).catch(() => undefined);
     return { imported: 0, ignored: 0 };
   }
 
   let completed = false;
+  let imported = 0;
+  let ignored = 0;
   try {
-    const client = applicationClient();
-    const accountId = await ensureAccount(client, phoneNumber);
     const peopleByPhone = await findPeopleByPhone(client);
-
-    let imported = 0;
-    let ignored = 0;
 
     const firstMediaIndex = events.findIndex((event) => event.media);
     for (const event of firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1)) {
@@ -450,8 +498,9 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
     }
 
     completed = true;
-    return { imported, ignored };
   } finally {
     await bridgeJsonRequest('/events/release', { leaseId, completed }).catch(() => undefined);
   }
+  await syncConversationNames(client, accountId).catch(() => undefined);
+  return { imported, ignored };
 };

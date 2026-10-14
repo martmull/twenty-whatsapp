@@ -63,20 +63,6 @@ const handler = async (event: RoutePayload<ListRequest>) => {
   }
 
   const status = await bridgeRequest('/status').catch(() => ({ state: 'unavailable' as const }));
-  if (selected?.chatId.endsWith('@g.us') && /^\d+$/.test(selected.name) && status.state === 'connected') {
-    const history = await bridgeJsonRequest<{ name: string }>('/history/messages', {
-      chatId: selected.chatId, rangeDays: 0, offset: 0, limit: 1,
-    }).catch(() => undefined);
-    if (history?.name && !/^\d+$/.test(history.name)) {
-      await applicationClient().mutation({
-        updateWhatsappConversation: {
-          __args: { id: selected.id, data: { name: history.name.slice(0, 120) } },
-          id: true,
-        },
-      }).catch(() => undefined);
-      selected.name = history.name.slice(0, 120);
-    }
-  }
   const groupMembers = selected?.chatId.endsWith('@g.us') && status.state === 'connected'
     ? await bridgeJsonRequest<GroupMember[]>('/history/members', { chatId: selected.chatId }).catch(() => undefined)
     : undefined;

@@ -63,6 +63,9 @@ export class WhatsAppConnection {
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
+  private readonly pendingGroupNameLookups = new Set<string>();
+  private readonly groupNameLookupQueue: string[] = [];
+  private activeGroupNameLookups = 0;
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
   private changeCursor = randomUUID();
@@ -84,6 +87,7 @@ export class WhatsAppConnection {
 
   async recordHistory(contacts: Contact[], messages: WAMessage[], fromHistorySync = false, chats: Chat[] = []): Promise<void> {
     const write = async () => {
+      let namesChanged = false;
       for (const contact of contacts) {
         if (contact.lid && contact.jid && /^\d{7,15}@lid$/.test(contact.lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)) {
           await this.phoneNumbers.write(contact.lid, { chatId: contact.jid });
@@ -91,7 +95,10 @@ export class WhatsAppConnection {
         const name = (contact.name || contact.notify || contact.verifiedName)?.trim().slice(0, 120);
         if (name) {
           for (const id of [contact.id, contact.lid, contact.jid].filter((value): value is string => Boolean(value))) {
-            await this.contactNames.write(id, { name });
+            if ((await this.contactNames.read(id))?.name !== name) {
+              await this.contactNames.write(id, { name });
+              namesChanged = true;
+            }
           }
         }
       }
@@ -128,9 +135,15 @@ export class WhatsAppConnection {
         const remoteJid = message.key.remoteJid;
         if (remoteJid && isGroupChatId(remoteJid) && message.key.participant && message.pushName?.trim()) {
           const name = message.pushName.trim().slice(0, 120);
-          await this.contactNames.write(message.key.participant, { name });
+          if ((await this.contactNames.read(message.key.participant))?.name !== name) {
+            await this.contactNames.write(message.key.participant, { name });
+            namesChanged = true;
+          }
           if (message.key.participantPn && isDirectChatId(message.key.participantPn)) {
-            await this.contactNames.write(message.key.participantPn, { name });
+            if ((await this.contactNames.read(message.key.participantPn))?.name !== name) {
+              await this.contactNames.write(message.key.participantPn, { name });
+              namesChanged = true;
+            }
             if (message.key.participant.endsWith('@lid')) {
               await this.phoneNumbers.write(message.key.participant, { chatId: message.key.participantPn });
             }
@@ -177,9 +190,13 @@ export class WhatsAppConnection {
           messagesById.set(message.eventId, message);
         }
 
+        const name = candidate.name ?? existing?.name;
+        if (name && name !== existing?.name) {
+          namesChanged = true;
+        }
         await this.historyChats.write(chatId, {
           chatId,
-          name: candidate.name ?? existing?.name,
+          name,
           lastMessageAt: [candidate.lastMessageAt, existing?.lastMessageAt, existing?.messages.at(-1)?.sentAt].filter((value): value is string => Boolean(value)).sort().at(-1),
           messages: [...messagesById.values()].sort((left, right) => left.sentAt.localeCompare(right.sentAt) || left.eventId.localeCompare(right.eventId)),
         });
@@ -188,10 +205,67 @@ export class WhatsAppConnection {
       if (fromHistorySync && messages.length > 0) {
         await this.historyState.write('latest', { receivedAt: new Date().toISOString() });
       }
+      if (namesChanged) {
+        this.groupMembersCache.clear();
+        this.notifyChange();
+      }
     };
 
     this.historyWrites = this.historyWrites.then(write, write);
     await this.historyWrites;
+  }
+
+  async getHistoryNames(chatIds: string[]): Promise<{ chatId: string; name: string }[]> {
+    await this.historyWrites;
+    const names: { chatId: string; name: string }[] = [];
+
+    for (const chatId of chatIds) {
+      if (!isSupportedChatId(chatId)) {
+        throw new Error('Invalid chat ID');
+      }
+      const saved = await this.historyChats.read(chatId);
+      if (!saved) {
+        continue;
+      }
+      const name = saved.name || (isGroupChatId(chatId) ? chatId.split('@')[0] : `+${chatId.split('@')[0]}`);
+      if (isGroupChatId(chatId) && /^\+?\d+$/.test(name)) {
+        this.scheduleGroupNameLookup(chatId);
+      }
+      names.push({ chatId, name });
+    }
+
+    return names;
+  }
+
+  private scheduleGroupNameLookup(chatId: string): void {
+    if (this.status.state !== 'connected' || !this.socket || this.pendingGroupNameLookups.has(chatId)) {
+      return;
+    }
+    this.pendingGroupNameLookups.add(chatId);
+    this.groupNameLookupQueue.push(chatId);
+    this.drainGroupNameLookups();
+  }
+
+  private drainGroupNameLookups(): void {
+    while (this.activeGroupNameLookups < 3 && this.groupNameLookupQueue.length > 0) {
+      const chatId = this.groupNameLookupQueue.shift()!;
+      const socket = this.socket;
+      const generation = this.generation;
+      if (!socket) {
+        this.pendingGroupNameLookups.delete(chatId);
+        continue;
+      }
+      this.activeGroupNameLookups += 1;
+      void socket.groupMetadata(chatId).then(async (metadata) => {
+        if (generation === this.generation && metadata.subject?.trim()) {
+          await this.recordHistory([{ id: chatId, name: metadata.subject }], []);
+        }
+      }).catch(() => undefined).finally(() => {
+        this.pendingGroupNameLookups.delete(chatId);
+        this.activeGroupNameLookups -= 1;
+        this.drainGroupNameLookups();
+      });
+    }
   }
 
   async getHistoryCandidates(rangeDays: 0 | 30 | 90, offset: number, limit: number, kind: 'all' | 'direct' | 'group' = 'all'): Promise<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }> {
@@ -532,6 +606,16 @@ export class WhatsAppConnection {
         await this.recordHistory([], [], false, chats);
       }
     });
+    socket.ev.on('chats.update', async (chats) => {
+      if (generation === this.generation) {
+        await this.recordHistory([], [], false, chats.filter((chat) => chat.id && chat.name).map((chat) => ({ id: chat.id!, name: chat.name ?? undefined })));
+      }
+    });
+    socket.ev.on('groups.update', async (groups) => {
+      if (generation === this.generation) {
+        await this.recordHistory(groups.filter((group) => group.id && group.subject).map((group) => ({ id: group.id!, name: group.subject })), []);
+      }
+    });
     socket.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
       if (generation === this.generation && /^\d{7,15}@lid$/.test(lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(jid)) {
         await this.phoneNumbers.write(lid, { chatId: jid });
@@ -548,6 +632,11 @@ export class WhatsAppConnection {
         }
       }
       await this.recordHistory(contacts, []);
+    });
+    socket.ev.on('contacts.update', async (contacts) => {
+      if (generation === this.generation) {
+        await this.recordHistory(contacts.filter((contact) => contact.id).map((contact) => ({ ...contact, id: contact.id! })), []);
+      }
     });
     socket.ev.on('connection.update', async ({ connection, qr, lastDisconnect }) => {
       if (generation !== this.generation) {

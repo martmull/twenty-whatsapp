@@ -131,6 +131,44 @@ test('history uses the sender profile name when no saved contact name is availab
   }
 });
 
+test('contact name changes wake viewers and replace saved names', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-name-updates-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const chatId = '15551234567@s.whatsapp.net';
+
+  try {
+    await connection.recordHistory([{ id: chatId, name: 'Alex' }], []);
+    const cursor = (await connection.waitForChange('')).cursor;
+    const waiting = connection.waitForChange(cursor);
+    await connection.recordHistory([{ id: chatId, name: 'Alex Martin' }], []);
+
+    assert.equal((await waiting).changed, true);
+    assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: 'Alex Martin' }]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('numeric group titles resolve in the background and wake viewers', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-group-name-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const chatId = '120363123456789012@g.us';
+
+  try {
+    await connection.recordHistory([], [], false, [{ id: chatId, name: chatId.split('@')[0] }]);
+    Object.defineProperty(connection, 'socket', { value: { groupMetadata: async () => ({ subject: 'Family group' }) } });
+    Object.defineProperty(connection, 'status', { value: { state: 'connected' } });
+    const cursor = (await connection.waitForChange('')).cursor;
+    const waiting = connection.waitForChange(cursor);
+
+    assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: chatId.split('@')[0] }]);
+    assert.equal((await waiting).changed, true);
+    assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: 'Family group' }]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('group history keeps the group title and message sender', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-group-'));
   const connection = new WhatsAppConnection(directory, randomBytes(32));
