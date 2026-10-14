@@ -1,7 +1,7 @@
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import makeWASocket, { DisconnectReason, type WASocket } from '@whiskeysockets/baileys';
+import makeWASocket, { Browsers, DisconnectReason, type Contact, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
@@ -23,6 +23,19 @@ export type SendReceipt = {
   eventId?: string;
 };
 
+export type HistoryChat = {
+  chatId: string;
+  name?: string;
+  messages: MessageEvent[];
+};
+
+export type HistoryCandidate = {
+  chatId: string;
+  name: string;
+  messageCount: number;
+  lastMessageAt?: string;
+};
+
 export class WhatsAppConnection {
   private socket: WASocket | undefined;
   private status: ConnectionStatus = { state: 'disconnected' };
@@ -32,6 +45,10 @@ export class WhatsAppConnection {
   private readonly events: EncryptedJsonStore<MessageEvent>;
   private readonly sends: EncryptedJsonStore<SendReceipt>;
   private readonly phoneNumbers: EncryptedJsonStore<{ chatId: string }>;
+  private readonly historyChats: EncryptedJsonStore<HistoryChat>;
+  private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
+  private readonly browserProfile: EncryptedJsonStore<{ name: 'desktop' }>;
+  private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
 
   constructor(
@@ -41,6 +58,127 @@ export class WhatsAppConnection {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
     this.phoneNumbers = new EncryptedJsonStore(join(directory, 'phone-numbers'), encryptionKey);
+    this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
+    this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
+    this.browserProfile = new EncryptedJsonStore(join(directory, 'browser-profile'), encryptionKey);
+  }
+
+  async recordHistory(contacts: Contact[], messages: WAMessage[], fromHistorySync = false): Promise<void> {
+    const write = async () => {
+      for (const contact of contacts) {
+        if (contact.lid && contact.jid && /^\d{7,15}@lid$/.test(contact.lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)) {
+          await this.phoneNumbers.write(contact.lid, { chatId: contact.jid });
+        }
+      }
+
+      const byChat = new Map<string, { name?: string; messages: MessageEvent[] }>();
+
+      for (const contact of contacts) {
+        const chatId = contact.jid ?? (contact.id.endsWith('@lid') ? (await this.phoneNumbers.read(contact.id))?.chatId : contact.id);
+
+        if (/^\d{7,15}@s\.whatsapp\.net$/.test(chatId ?? '')) {
+          const candidate = byChat.get(chatId!) ?? { messages: [] };
+          candidate.name = (contact.name || contact.notify || contact.verifiedName || candidate.name)?.slice(0, 120);
+          byChat.set(chatId!, candidate);
+        }
+      }
+
+      for (const message of messages) {
+        const timestamp = Number(message.messageTimestamp ?? 0);
+
+        if (!Number.isFinite(timestamp) || timestamp <= 0) {
+          continue;
+        }
+
+        const remoteJid = message.key.remoteJid;
+        const mappedChatId = remoteJid?.endsWith('@lid') ? (await this.phoneNumbers.read(remoteJid))?.chatId : undefined;
+        const item = toMessageEvent(message, mappedChatId);
+
+        if (!item || item.chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')) {
+          continue;
+        }
+
+        const candidate = byChat.get(item.chatId) ?? { messages: [] };
+        candidate.messages.push(item);
+        byChat.set(item.chatId, candidate);
+      }
+
+      for (const [chatId, candidate] of byChat) {
+        const existing = await this.historyChats.read(chatId);
+        const messagesById = new Map((existing?.messages ?? []).map((message) => [message.eventId, message]));
+
+        for (const message of candidate.messages) {
+          messagesById.set(message.eventId, message);
+        }
+
+        await this.historyChats.write(chatId, {
+          chatId,
+          name: candidate.name ?? existing?.name,
+          messages: [...messagesById.values()].sort((left, right) => left.sentAt.localeCompare(right.sentAt) || left.eventId.localeCompare(right.eventId)),
+        });
+      }
+
+      if (fromHistorySync && messages.length > 0) {
+        await this.historyState.write('latest', { receivedAt: new Date().toISOString() });
+      }
+    };
+
+    this.historyWrites = this.historyWrites.then(write, write);
+    await this.historyWrites;
+  }
+
+  async getHistoryCandidates(rangeDays: 0 | 30 | 90, offset: number, limit: number): Promise<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }> {
+    await this.historyWrites;
+    const since = rangeDays ? Date.now() - rangeDays * 86_400_000 : 0;
+    const chats = await this.historyChats.list();
+    const candidates = chats.flatMap((chat) => {
+      if (chat.chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')) {
+        return [];
+      }
+
+      const messages = chat.messages.filter((message) => Date.parse(message.sentAt) >= since);
+
+      if (chat.messages.length > 0 && messages.length === 0) {
+        return [];
+      }
+
+      return [{
+        chatId: chat.chatId,
+        name: chat.name || `+${chat.chatId.split('@')[0]}`,
+        messageCount: messages.length,
+        lastMessageAt: messages.at(-1)?.sentAt,
+      }];
+    }).sort((left, right) => (right.lastMessageAt ?? '').localeCompare(left.lastMessageAt ?? '') || left.chatId.localeCompare(right.chatId));
+
+    return {
+      items: candidates.slice(offset, offset + limit),
+      total: candidates.length,
+      historyReceivedAt: (await this.historyState.read('latest'))?.receivedAt,
+    };
+  }
+
+  async getHistoryMessages(chatId: string, rangeDays: 0 | 30 | 90, offset: number, limit: number): Promise<{ name: string; messages: MessageEvent[]; total: number; nextOffset?: number }> {
+    if (!/^\d{7,15}@s\.whatsapp\.net$/.test(chatId)) {
+      throw new Error('Invalid chat ID');
+    }
+
+    await this.historyWrites;
+    const chat = await this.historyChats.read(chatId);
+
+    if (!chat) {
+      throw new Error('History chat unavailable');
+    }
+
+    const since = rangeDays ? Date.now() - rangeDays * 86_400_000 : 0;
+    const messages = chat.messages.filter((message) => Date.parse(message.sentAt) >= since);
+    const nextOffset = offset + limit < messages.length ? offset + limit : undefined;
+
+    return {
+      name: chat.name || `+${chatId.split('@')[0]}`,
+      messages: messages.slice(offset, offset + limit),
+      total: messages.length,
+      nextOffset,
+    };
   }
 
   async getEvents(): Promise<MessageEvent[]> {
@@ -134,13 +272,21 @@ export class WhatsAppConnection {
       this.directory,
       this.encryptionKey,
     );
+    // Saved sessions must reconnect with the same browser identity used at pairing.
+    const useDesktopProfile = (await this.browserProfile.read('current'))?.name === 'desktop' || !state.creds.me?.id;
+
+    if (useDesktopProfile) {
+      await this.browserProfile.write('current', { name: 'desktop' });
+    }
+
     const socket = makeWASocket({
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
       markOnlineOnConnect: false,
-      syncFullHistory: false,
-      shouldSyncHistoryMessage: () => false,
+      ...(useDesktopProfile ? { browser: Browsers.macOS('Desktop') } : {}),
+      syncFullHistory: true,
+      shouldSyncHistoryMessage: () => true,
       emitOwnEvents: false,
     });
 
@@ -165,6 +311,12 @@ export class WhatsAppConnection {
           await this.events.write(event.eventId, event);
         }
       }
+      await this.recordHistory([], messages);
+    });
+    socket.ev.on('messaging-history.set', async ({ contacts, messages }) => {
+      if (generation === this.generation) {
+        await this.recordHistory(contacts, messages, true);
+      }
     });
     socket.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
       if (generation === this.generation && /^\d{7,15}@lid$/.test(lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(jid)) {
@@ -181,6 +333,7 @@ export class WhatsAppConnection {
           await this.phoneNumbers.write(contact.lid, { chatId: contact.jid });
         }
       }
+      await this.recordHistory(contacts, []);
     });
     socket.ev.on('connection.update', async ({ connection, qr, lastDisconnect }) => {
       if (generation !== this.generation) {
@@ -234,6 +387,7 @@ export class WhatsAppConnection {
       // Local credentials still need deletion when the remote logout fails.
     }
 
+    await this.historyWrites.catch(() => undefined);
     await rm(this.directory, { recursive: true, force: true });
 
     return this.status;

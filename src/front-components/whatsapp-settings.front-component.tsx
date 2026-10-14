@@ -2,14 +2,15 @@ import { useEffect, useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
 import { defineSettingsFrontComponent } from 'twenty-sdk/define';
 import { t } from 'twenty-sdk/front-component';
+import { Callout } from 'twenty-ui/components';
+import { Tag } from 'twenty-ui/primitives/data-display';
+import { Button, Checkbox } from 'twenty-ui/primitives/input';
 import { themeCssVariables } from 'twenty-ui/theme';
+import 'twenty-ui/style.css';
 
 import { SETTINGS_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
-import {
-  PreviewBadge,
-  PreviewButton,
-  getPreviewStyles,
-} from 'src/front-components/components/PreviewUi';
+import { WhatsAppHistoryImport } from 'src/front-components/components/WhatsAppHistoryImport';
+import { getPreviewStyles } from 'src/front-components/components/PreviewUi';
 
 type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
@@ -129,12 +130,12 @@ const WhatsAppSettings = () => {
   };
 
   const badge = status?.state === 'connected'
-    ? { label: t('Connected'), tone: 'green' as const }
+    ? { label: t('Connected'), color: 'green' as const }
     : status?.state === 'pairing'
-      ? { label: t('Waiting for scan'), tone: 'orange' as const }
+      ? { label: t('Waiting for scan'), color: 'orange' as const }
       : status?.state === 'reconnecting'
-        ? { label: t('Reconnecting'), tone: 'orange' as const }
-        : { label: t('Not connected'), tone: 'neutral' as const };
+        ? { label: t('Reconnecting'), color: 'orange' as const }
+        : { label: t('Not connected'), color: 'gray' as const };
 
   return (
     <main style={{
@@ -158,14 +159,14 @@ const WhatsAppSettings = () => {
       }}>
         <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between' }}>
           <strong>{t('Linked device')}</strong>
-          <PreviewBadge tone={badge.tone}>{badge.label}</PreviewBadge>
+          <Tag color={badge.color} variant="soft">{badge.label}</Tag>
         </div>
         <div>
-          <PreviewButton disabled={working} onClick={() => void refreshStatus()}>
+          <Button type="button" variant="outline" size="sm" loading={working} onClick={() => void refreshStatus()}>
             {t('Check connection')}
-          </PreviewButton>
+          </Button>
         </div>
-        {error && <p role="alert" style={{ color: themeCssVariables.color.red }}>{error}</p>}
+        {error && <Callout variant="error" title={t('Connection unavailable')} description={error} />}
         {status?.state === 'connected' && (
           <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
             <span>{t('Phone number')}: <strong>{status.phoneNumber ?? t('Connected')}</strong></span>
@@ -173,9 +174,9 @@ const WhatsAppSettings = () => {
               {t('New one-to-one text messages from matched People appear in the shared inbox and on Person records. Other chats are ignored.')}
             </span>
             <div>
-              <PreviewButton disabled={working} onClick={() => void perform('disconnect')}>
+              <Button type="button" variant="outline" color="danger" size="sm" disabled={working} onClick={() => void perform('disconnect')}>
                 {t('Disconnect and remove session')}
-              </PreviewButton>
+              </Button>
             </div>
           </div>
         )}
@@ -204,9 +205,9 @@ const WhatsAppSettings = () => {
                 </span>
               )}
               <div>
-                <PreviewButton disabled={working} onClick={() => void perform('disconnect')}>
+                <Button type="button" variant="outline" size="sm" disabled={working} onClick={() => void perform('disconnect')}>
                   {t('Cancel pairing')}
-                </PreviewButton>
+                </Button>
               </div>
             </div>
           </div>
@@ -225,32 +226,36 @@ const WhatsAppSettings = () => {
             }}>
               <strong>{t('Before you connect')}</strong>
               <p style={styles.muted}>
-                {t('This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages from matched People will be shared with permitted workspace members.')}
+                {t('This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages from matched People are shared with permitted workspace members. Available earlier history is stored encrypted on the bridge for optional review and is shared only if you import it.')}
               </p>
               <a href="https://www.whatsapp.com/legal/terms-of-service" target="_blank" rel="noreferrer">
                 {t('Read WhatsApp terms')}
               </a>
             </div>
             <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
-              <input type="checkbox" checked={ownsNumber} onChange={(event) => setOwnsNumber(event.target.checked)} />
+              <Checkbox checked={ownsNumber} onCheckedChange={(checked) => setOwnsNumber(checked === true)} aria-label={t('I control this WhatsApp number')} />
               {t('I control this WhatsApp number and can authorize its connection.')}
             </label>
             <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
-              <input type="checkbox" checked={acceptsRisk} onChange={(event) => setAcceptsRisk(event.target.checked)} />
+              <Checkbox checked={acceptsRisk} onCheckedChange={(checked) => setAcceptsRisk(checked === true)} aria-label={t('I understand the unofficial connection risk')} />
               {t('I understand an unofficial linked-device connection may be restricted or disconnected.')}
             </label>
             <div>
-              <PreviewButton
-                primary
+              <Button
+                type="button"
+                variant="solid"
+                color="accent"
+                size="sm"
                 disabled={working || !ownsNumber || !acceptsRisk}
                 onClick={() => void perform('start')}
               >
                 {t('Show QR code')}
-              </PreviewButton>
+              </Button>
             </div>
           </div>
         )}
       </div>
+      {status?.state === 'connected' && <WhatsAppHistoryImport />}
     </main>
   );
 };

@@ -8,9 +8,9 @@ The settings component has real QR pairing, connection status, reconnect, and di
 
 The bridge now queues new one-to-one incoming and phone-sent text messages in encrypted local files. A Twenty cron job imports them every minute after matching the other participant to exactly one existing Person. The app stores accounts, conversations, and messages in Twenty objects, with unique IDs for replay safety and a Person relation. The inbox and Person widget show stored threads and allow manual text replies. A stable request ID prevents retrying an uncertain send as a new message.
 
-This is a local development implementation synced to `localhost:2020`. New incoming and phone-sent texts have been verified in the Twenty inbox, and a message sent from Twenty was received on the contact's phone. The first version matches primary Person phone numbers, including LID messages when WhatsApp shares the sender's phone number or a contact mapping is learned from a new incoming message. It does not import history, group chats, media, unmatched senders, or LID messages without a phone mapping. The inbox currently loads the 50 most recent conversations and 200 most recent messages in a thread.
+This is a local development implementation synced to `localhost:2020`. New incoming and phone-sent texts have been verified in the Twenty inbox, and a message sent from Twenty was received on the contact's phone. The app matches primary Person phone numbers, including LID messages when WhatsApp shares the sender's phone number or a contact mapping is learned from a new incoming message. It does not import group chats, media, calls, or LID messages without a phone mapping. The inbox currently loads the 50 most recent conversations and 200 most recent messages in a thread.
 
-The [history import settings preview](docs/import-history-settings-preview.html) shows a proposed opt-in review flow beneath the connected-device card. It uses sample contacts and does not import data.
+Once connected, the settings panel can review available one-to-one text history and contacts. Choose a 30-day, 90-day, or all-available range, load more candidates, select chats or contacts, and confirm before importing. History remains encrypted in the local bridge until selected. Existing People are matched by primary phone; selected unmatched contacts are created through the administrator's Twenty permissions. Message IDs prevent duplicates on retries. Fresh pairings request full history with a desktop browser identity; existing linked sessions retain their original identity so they can reconnect. WhatsApp may send only part of the old history, and an already-linked device may need a fresh QR pairing before older chats become available. The [design preview](docs/import-history-settings-preview.html) still uses sample data.
 
 ![Current WhatsApp inbox inside Twenty](docs/current-inbox.png)
 
@@ -41,7 +41,7 @@ For a transport check that does not link a phone, run node bridge/scripts/check-
 ## Repository layout
 
 - src/: Twenty objects, Person relation, settings and inbox front components, Person widget, and authenticated message routes.
-- bridge/: persistent Baileys process with encrypted auth, event queue, and send receipts.
+- bridge/: persistent Baileys process with encrypted auth, event queue, selectable history cache, and send receipts.
 - docs/: implementation design, interactive design previews, and screenshots from the earlier in-product preview.
 - scripts/configure-local.mjs: local credential and application-variable setup.
 

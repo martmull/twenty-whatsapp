@@ -6,7 +6,7 @@ type BridgeStatus = {
 };
 
 export const bridgeJsonRequest = async <TResponse>(
-  path: '/status' | '/connect' | '/disconnect' | '/events' | '/events/ack' | '/send',
+  path: '/status' | '/connect' | '/disconnect' | '/events' | '/events/ack' | '/send' | '/history/list' | '/history/messages',
   body?: Record<string, unknown>,
 ): Promise<TResponse> => {
   const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;
@@ -23,7 +23,7 @@ export const bridgeJsonRequest = async <TResponse>(
       ...(body ? { 'content-type': 'application/json' } : {}),
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(path.startsWith('/history/') ? 30_000 : 10_000),
   });
 
   if (!response.ok) {

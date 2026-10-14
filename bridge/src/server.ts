@@ -84,6 +84,22 @@ const server = createServer(async (request, response) => {
           ? await connection.connect()
           : request.method === 'POST' && path === '/disconnect'
             ? await connection.disconnect()
+            : request.method === 'POST' && path === '/history/list'
+              ? await (async () => {
+                const body = await readBody(request);
+                if (connection.getStatus().state !== 'connected' || (body.rangeDays !== 0 && body.rangeDays !== 30 && body.rangeDays !== 90) || !Number.isInteger(body.offset) || !Number.isInteger(body.limit) || (body.offset as number) < 0 || (body.limit as number) < 1 || (body.limit as number) > 50) {
+                  throw new Error('Invalid history list request');
+                }
+                return connection.getHistoryCandidates(body.rangeDays, body.offset as number, body.limit as number);
+              })()
+              : request.method === 'POST' && path === '/history/messages'
+                ? await (async () => {
+                  const body = await readBody(request);
+                  if (connection.getStatus().state !== 'connected' || typeof body.chatId !== 'string' || (body.rangeDays !== 0 && body.rangeDays !== 30 && body.rangeDays !== 90) || !Number.isInteger(body.offset) || !Number.isInteger(body.limit) || (body.offset as number) < 0 || (body.limit as number) < 1 || (body.limit as number) > 100) {
+                    throw new Error('Invalid history messages request');
+                  }
+                  return connection.getHistoryMessages(body.chatId, body.rangeDays, body.offset as number, body.limit as number);
+                })()
             : undefined;
 
     if (result === undefined) {

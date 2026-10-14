@@ -41,7 +41,7 @@ export class EncryptedJsonStore<TValue> {
     await rename(temporary, destination);
   }
 
-  async list(limit: number): Promise<TValue[]> {
+  async list(limit = Number.MAX_SAFE_INTEGER): Promise<TValue[]> {
     let names: string[];
 
     try {

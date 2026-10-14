@@ -1,6 +1,6 @@
 # WhatsApp linked-device app for Twenty
 
-**Status:** Local text messaging MVP implemented and verified with a linked phone · **Updated:** 13 October 2026 · **Design preview:** [Open the interactive mockup](./design-preview.html)
+**Status:** Local text messaging verified; selective history import implemented, awaiting a fresh history sync for live verification · **Updated:** 14 October 2026 · **Design preview:** [Open the import settings mockup](./import-history-settings-preview.html)
 
 ## Current app inside Twenty
 
@@ -211,7 +211,7 @@ Release acceptance: an admin can pair and reconnect one test number; a known Per
 | Decision | Proposed v1 answer |
 | --- | --- |
 | Sharing | Workspace-shared inbox, connected by an admin; no personal account privacy promise. |
-| Initial history | New messages from connection time only; no bulk history import. |
+| Initial history | Available one-to-one text history is cached encrypted by the bridge and imported only after an administrator selects chats and confirms sharing. WhatsApp may not replay old history to an already-linked session; a fresh QR link may be needed. |
 | Unknown senders | No CRM persistence in default `CRM contacts only` mode. |
 | Outbound | Manual one-to-one replies to a linked Person only; no campaigns or cold outreach. |
 | Hosting | Separate bridge deployment with persistent worker, database, encryption key, and event outbox. |

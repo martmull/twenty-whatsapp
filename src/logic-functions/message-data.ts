@@ -23,13 +23,13 @@ export type Message = {
   requestId?: string | null;
 };
 
-type Person = {
+export type Person = {
   id: string;
   name: { firstName?: string | null; lastName?: string | null };
   phones?: { primaryPhoneNumber?: string | null; primaryPhoneCallingCode?: string | null } | null;
 };
 
-type BridgeMessageEvent = {
+export type BridgeMessageEvent = {
   eventId: string;
   chatId: string;
   providerMessageId: string;
@@ -54,7 +54,7 @@ const personPhone = (person: Person): string => {
   return digits(callingCode) + digits(phone).replace(/^0/, '');
 };
 
-const findPeopleByPhone = async (client: CoreApiClient): Promise<Map<string, Person[]>> => {
+export const findPeopleByPhone = async (client: CoreApiClient): Promise<Map<string, Person[]>> => {
   const peopleByPhone = new Map<string, Person[]>();
   let after: string | undefined;
 
@@ -123,6 +123,86 @@ const findMessageByExternalId = async (client: CoreApiClient, externalId: string
   return result.whatsappMessages?.edges?.[0]?.node as Message | undefined;
 };
 
+export const ensureAccount = async (client: CoreApiClient, phoneNumber: string): Promise<string> => {
+  const account = await findAccount(client, phoneNumber);
+  let accountId = account?.id;
+
+  if (!accountId) {
+    const created = await client.mutation({
+      createWhatsappAccount: { __args: { data: { name: phoneNumber, phoneNumber, state: 'connected' } }, id: true },
+    });
+    accountId = created.createWhatsappAccount?.id;
+  } else if (account?.state !== 'connected') {
+    await client.mutation({
+      updateWhatsappAccount: { __args: { id: accountId, data: { state: 'connected' } }, id: true },
+    });
+  }
+
+  if (!accountId) {
+    throw new Error('Could not create WhatsApp account');
+  }
+
+  return accountId;
+};
+
+export const importMessageForPerson = async (client: CoreApiClient, accountId: string, event: BridgeMessageEvent, person: Person): Promise<boolean> => {
+  if (!/^[a-f\d]{64}$/.test(event.eventId) || !/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound') || !Number.isFinite(Date.parse(event.sentAt))) {
+    throw new Error('Invalid bridge event');
+  }
+
+  let conversation = await findConversation(client, accountId, event.chatId);
+
+  if (!conversation) {
+    const name = [person.name.firstName, person.name.lastName].filter(Boolean).join(' ') || event.chatId.split('@')[0];
+    const created = await client.mutation({
+      createWhatsappConversation: {
+        __args: { data: { name, chatId: event.chatId, personId: person.id, linkedPersonId: person.id, accountId } },
+        id: true,
+      },
+    });
+    const id = created.createWhatsappConversation?.id;
+
+    if (!id) {
+      throw new Error('Could not create WhatsApp conversation');
+    }
+
+    conversation = { id, name, chatId: event.chatId, personId: person.id, accountId };
+  }
+
+  const existing = await findMessageByExternalId(client, event.eventId);
+
+  if (!existing) {
+    await client.mutation({
+      createWhatsappMessage: {
+        __args: {
+          data: {
+            name: event.text.slice(0, 80),
+            conversationId: conversation.id,
+            externalId: event.eventId,
+            direction: event.direction ?? 'inbound',
+            text: event.text,
+            sentAt: event.sentAt,
+            deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
+          },
+        },
+        id: true,
+      },
+    });
+  }
+
+  if (!conversation.lastMessageAt || event.sentAt >= conversation.lastMessageAt) {
+    await client.mutation({
+      updateWhatsappConversation: {
+        __args: { id: conversation.id, data: { lastMessageAt: event.sentAt, lastPreview: event.text.slice(0, 160) } },
+        id: true,
+      },
+    });
+    conversation.lastMessageAt = event.sentAt;
+  }
+
+  return !existing;
+};
+
 export const findMessageByRequestId = async (client: CoreApiClient, requestId: string): Promise<Message | undefined> => {
   const result = await client.query({
     whatsappMessages: {
@@ -143,23 +223,7 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
   }
 
   const client = applicationClient();
-  const account = await findAccount(client, phoneNumber);
-  let accountId = account?.id;
-
-  if (!accountId) {
-    const created = await client.mutation({
-      createWhatsappAccount: { __args: { data: { name: phoneNumber, phoneNumber, state: 'connected' } }, id: true },
-    });
-    accountId = created.createWhatsappAccount?.id;
-  } else if (account?.state !== 'connected') {
-    await client.mutation({
-      updateWhatsappAccount: { __args: { id: accountId, data: { state: 'connected' } }, id: true },
-    });
-  }
-
-  if (!accountId) {
-    throw new Error('Could not create WhatsApp account');
-  }
+  const accountId = await ensureAccount(client, phoneNumber);
 
   const events = await bridgeJsonRequest<BridgeMessageEvent[]>('/events');
 
@@ -185,55 +249,8 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
       continue;
     }
 
-    const person = candidates[0];
-    let conversation = await findConversation(client, accountId, event.chatId);
-
-    if (!conversation) {
-      const name = [person.name.firstName, person.name.lastName].filter(Boolean).join(' ') || event.chatId.split('@')[0];
-      const created = await client.mutation({
-        createWhatsappConversation: {
-          __args: { data: { name, chatId: event.chatId, personId: person.id, linkedPersonId: person.id, accountId } },
-          id: true,
-        },
-      });
-      const id = created.createWhatsappConversation?.id;
-
-      if (!id) {
-        throw new Error('Could not create WhatsApp conversation');
-      }
-
-      conversation = { id, name, chatId: event.chatId, personId: person.id, accountId };
-    }
-
-    const existing = await findMessageByExternalId(client, event.eventId);
-
-    if (!existing) {
-      await client.mutation({
-        createWhatsappMessage: {
-          __args: {
-            data: {
-              name: event.text.slice(0, 80),
-              conversationId: conversation.id,
-              externalId: event.eventId,
-              direction: event.direction ?? 'inbound',
-              text: event.text,
-              sentAt: event.sentAt,
-              deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
-            },
-          },
-          id: true,
-        },
-      });
+    if (await importMessageForPerson(client, accountId, event, candidates[0])) {
       imported += 1;
-    }
-
-    if (!conversation.lastMessageAt || event.sentAt >= conversation.lastMessageAt) {
-      await client.mutation({
-        updateWhatsappConversation: {
-          __args: { id: conversation.id, data: { lastMessageAt: event.sentAt, lastPreview: event.text.slice(0, 160) } },
-          id: true,
-        },
-      });
     }
 
     await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
