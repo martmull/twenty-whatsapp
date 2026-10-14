@@ -87,10 +87,10 @@ const server = createServer(async (request, response) => {
             : request.method === 'POST' && path === '/history/list'
               ? await (async () => {
                 const body = await readBody(request);
-                if (connection.getStatus().state !== 'connected' || (body.rangeDays !== 0 && body.rangeDays !== 30 && body.rangeDays !== 90) || !Number.isInteger(body.offset) || !Number.isInteger(body.limit) || (body.offset as number) < 0 || (body.limit as number) < 1 || (body.limit as number) > 50) {
+                if (connection.getStatus().state !== 'connected' || (body.rangeDays !== 0 && body.rangeDays !== 30 && body.rangeDays !== 90) || (body.kind !== undefined && body.kind !== 'all' && body.kind !== 'direct' && body.kind !== 'group') || !Number.isInteger(body.offset) || !Number.isInteger(body.limit) || (body.offset as number) < 0 || (body.limit as number) < 1 || (body.limit as number) > 50) {
                   throw new Error('Invalid history list request');
                 }
-                return connection.getHistoryCandidates(body.rangeDays, body.offset as number, body.limit as number);
+                return connection.getHistoryCandidates(body.rangeDays, body.offset as number, body.limit as number, body.kind as 'all' | 'direct' | 'group' | undefined);
               })()
               : request.method === 'POST' && path === '/history/messages'
                 ? await (async () => {

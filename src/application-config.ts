@@ -5,6 +5,7 @@ import { APPLICATION_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identi
 export default defineApplication({
   universalIdentifier: APPLICATION_UNIVERSAL_IDENTIFIER,
   displayName: 'WhatsApp',
+  logo: 'public/whatsapp.svg',
   description: 'Connect a WhatsApp linked device and bring conversations into Twenty.',
   applicationVariables: {
     WHATSAPP_BRIDGE_URL: {

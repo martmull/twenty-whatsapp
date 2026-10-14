@@ -10,5 +10,5 @@ export default defineSettingsMenuItem({
   frontComponentUniversalIdentifier:
     SETTINGS_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
   title: 'WhatsApp',
-  icon: 'IconPlug',
+  icon: 'IconBrandWhatsapp',
 });

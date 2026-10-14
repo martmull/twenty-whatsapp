@@ -44,7 +44,7 @@ const handler = async (event: RoutePayload<ListRequest>) => {
           first: 200,
           orderBy: [{ sentAt: 'DescNullsLast' }],
         },
-        edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true } },
+        edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, senderId: true, senderName: true } },
       },
     });
     messages = (messageResult.whatsappMessages?.edges ?? []).map(({ node }) => node as Message).reverse();

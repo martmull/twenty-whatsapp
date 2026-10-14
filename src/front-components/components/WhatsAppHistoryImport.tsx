@@ -12,13 +12,15 @@ import { getPreviewStyles } from 'src/front-components/components/PreviewUi';
 import { FrontComponentCheckbox } from 'src/front-components/components/FrontComponentCheckbox';
 
 type RangeDays = 0 | 30 | 90;
+type ChatFilter = 'all' | 'direct' | 'group';
 
 type HistoryCandidate = {
   chatId: string;
+  kind: 'direct' | 'group';
   name: string;
   messageCount: number;
   lastMessageAt?: string;
-  match: 'matched' | 'new' | 'ambiguous';
+  match: 'matched' | 'new' | 'ambiguous' | 'group';
   personName?: string;
 };
 
@@ -44,24 +46,26 @@ export const WhatsAppHistoryImport = () => {
   const styles = getPreviewStyles();
   const [reviewing, setReviewing] = useState(false);
   const [rangeDays, setRangeDays] = useState<RangeDays>(30);
+  const [chatFilter, setChatFilter] = useState<ChatFilter>('all');
   const [items, setItems] = useState<HistoryCandidate[]>([]);
   const [total, setTotal] = useState(0);
   const [historyReceivedAt, setHistoryReceivedAt] = useState<string>();
   const [selected, setSelected] = useState<string[]>([]);
+  const [names, setNames] = useState<Record<string, { firstName: string; lastName: string }>>({});
   const [acknowledged, setAcknowledged] = useState(false);
   const [workingAction, setWorkingAction] = useState<'review' | 'load-more' | 'import' | null>(null);
   const working = workingAction !== null;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const load = async (range: RangeDays, offset: number, action: 'review' | 'load-more' | 'import' = 'review') => {
+  const load = async (range: RangeDays, offset: number, action: 'review' | 'load-more' | 'import' = 'review', kind: ChatFilter = chatFilter) => {
     setWorkingAction(action);
     setError('');
     setNotice('');
 
     try {
       const response = await new RestApiClient().post('/s/whatsapp/history', {
-        action: 'list', rangeDays: range, offset,
+        action: 'list', rangeDays: range, kind, offset,
       }) as HistoryList;
 
       setItems((previous) => offset === 0 ? response.items : [...previous, ...response.items]);
@@ -79,8 +83,17 @@ export const WhatsAppHistoryImport = () => {
     setRangeDays(range);
     setItems([]);
     setSelected([]);
+    setNames({});
     setAcknowledged(false);
     void load(range, 0);
+  };
+
+  const changeFilter = (kind: ChatFilter) => {
+    setChatFilter(kind);
+    setItems([]);
+    setSelected([]);
+    setAcknowledged(false);
+    void load(rangeDays, 0, 'review', kind);
   };
 
   const toggle = (chatId: string, checked: boolean) => {
@@ -113,6 +126,7 @@ export const WhatsAppHistoryImport = () => {
             chatId: item.chatId,
             offset,
             createPerson: item.match === 'new',
+            ...(item.match === 'new' ? names[item.chatId] : {}),
             acknowledged,
           }) as ImportResult;
           imported += result.imported;
@@ -146,7 +160,7 @@ export const WhatsAppHistoryImport = () => {
         <Tag color="gray" variant="soft">{t('Optional')}</Tag>
       </div>
       <p style={{ ...styles.muted, margin: 0 }}>
-        {t('Review available one-to-one text conversations and contacts before sharing them with this workspace. Start with the last 30 days; nothing is imported automatically.')}
+        {t('Review available direct and group text conversations before sharing them with this workspace. Start with the last 30 days; nothing is imported automatically.')}
       </p>
       {!reviewing && (
         <div>
@@ -165,8 +179,17 @@ export const WhatsAppHistoryImport = () => {
               </Button>
             ))}
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: themeCssVariables.spacing[2] }}>
+            <span style={styles.muted}>{t('Show')}</span>
+            {([{ value: 'all', label: t('All chats') }, { value: 'direct', label: t('Direct') }, { value: 'group', label: t('Groups') }] as const).map((option) => (
+              <Button key={option.value} type="button" variant={chatFilter === option.value ? 'solid' : 'outline'} color={chatFilter === option.value ? 'accent' : 'neutral'} size="sm" disabled={working} onClick={() => changeFilter(option.value)}>{option.label}</Button>
+            ))}
+          </div>
           {!historyReceivedAt && (
             <Callout variant="warning" title={t('Earlier history may be missing')} description={t('This device was linked before history capture was enabled, or WhatsApp has not sent a history sync. A new QR link may be needed to receive older chats.')} />
+          )}
+          {chatFilter === 'group' && items.length > 0 && items.every((item) => item.messageCount === 0) && (
+            <Callout variant="warning" title={t('Group messages are not available yet')} description={t('This linked device discovered your groups, but earlier group texts were not captured. You can import a selected group now for future messages. To recover earlier texts, WhatsApp may need to send a new history sync after linking the device again.')} />
           )}
           {items.length === 0 && !working && (
             <Callout variant="info" title={t('No available history in this range')} description={t('Try a wider date range. If nothing appears, WhatsApp may need a fresh linked-device pairing to send earlier history.')} />
@@ -184,28 +207,41 @@ export const WhatsAppHistoryImport = () => {
                 </label>
                 <span style={styles.label}>{items.length} / {total}</span>
               </div>
-              {items.map((item) => (
-                <label key={item.chatId} style={{ alignItems: 'center', borderTop: `1px solid ${themeCssVariables.border.color.light}`, display: 'flex', gap: themeCssVariables.spacing[3], padding: `${themeCssVariables.spacing[2]} 0` }}>
-                  <FrontComponentCheckbox checked={selected.includes(item.chatId)} disabled={working || item.match === 'ambiguous'} onChange={(event) => toggle(item.chatId, event.target.checked)} aria-label={`${t('Select')} ${item.name}`} />
-                  <span style={{ display: 'grid', gap: themeCssVariables.spacing[1], minWidth: 0, flex: 1 }}>
-                    <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</strong>
-                    <span style={styles.muted}>{item.messageCount} {t('text messages in range')} · {item.chatId.split('@')[0]}</span>
-                  </span>
-                  <Tag color={item.match === 'matched' ? 'green' : item.match === 'ambiguous' ? 'orange' : 'blue'} variant="soft">
-                    {item.match === 'matched' ? t('Matched Person') : item.match === 'ambiguous' ? t('Ambiguous match') : t('New Person')}
-                  </Tag>
-                </label>
-              ))}
+              {items.map((item) => {
+                const [suggestedFirstName, ...suggestedLastName] = /^\+?\d+$/.test(item.name) ? ['', ''] : item.name.trim().split(/\s+/);
+                const name = names[item.chatId] ?? { firstName: suggestedFirstName, lastName: suggestedLastName.join(' ') };
+
+                return (
+                  <div key={item.chatId} style={{ borderTop: `1px solid ${themeCssVariables.border.color.light}`, display: 'grid', gap: themeCssVariables.spacing[2], padding: `${themeCssVariables.spacing[2]} 0` }}>
+                    <label style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[3] }}>
+                      <FrontComponentCheckbox checked={selected.includes(item.chatId)} disabled={working || item.match === 'ambiguous'} onChange={(event) => toggle(item.chatId, event.target.checked)} aria-label={`${t('Select')} ${item.name}`} />
+                      <span style={{ display: 'grid', gap: themeCssVariables.spacing[1], minWidth: 0, flex: 1 }}>
+                        <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</strong>
+                        <span style={styles.muted}>{item.messageCount} {t('text messages in range')}{item.kind === 'direct' ? ` · ${item.chatId.split('@')[0]}` : ''}</span>
+                      </span>
+                      <Tag color={item.match === 'matched' ? 'green' : item.match === 'ambiguous' ? 'orange' : 'blue'} variant="soft">
+                        {item.match === 'group' ? t('Group') : item.match === 'matched' ? t('Matched Person') : item.match === 'ambiguous' ? t('Ambiguous match') : t('New Person')}
+                      </Tag>
+                    </label>
+                    {item.match === 'new' && selected.includes(item.chatId) && (
+                      <div style={{ display: 'flex', gap: themeCssVariables.spacing[2], paddingLeft: themeCssVariables.spacing[4] }}>
+                        <input aria-label={`${t('First name')} · ${item.chatId.split('@')[0]}`} placeholder={t('First name')} value={name.firstName} maxLength={80} disabled={working} onChange={(event) => setNames((previous) => ({ ...previous, [item.chatId]: { ...name, firstName: event.target.value } }))} style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, minWidth: 0, flex: 1, padding: themeCssVariables.spacing[2] }} />
+                        <input aria-label={`${t('Last name')} · ${item.chatId.split('@')[0]}`} placeholder={t('Last name')} value={name.lastName} maxLength={80} disabled={working} onChange={(event) => setNames((previous) => ({ ...previous, [item.chatId]: { ...name, lastName: event.target.value } }))} style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, minWidth: 0, flex: 1, padding: themeCssVariables.spacing[2] }} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
               {items.length < total && (
                 <div><Button type="button" variant="outline" size="sm" onClick={() => void load(rangeDays, items.length, 'load-more')} disabled={working} loading={workingAction === 'load-more'}>{t('Load more conversations')}</Button></div>
               )}
             </div>
           )}
-          <p style={{ ...styles.muted, margin: 0 }}>{t('Select all covers loaded conversations only. Contacts without messages must be selected individually. New People are created only for selected unmatched contacts. Groups, media, and calls are excluded.')}</p>
+          <p style={{ ...styles.muted, margin: 0 }}>{t('Select all covers loaded conversations with messages only. Chats without messages must be selected individually. New People are created only for selected unmatched direct contacts. Group participants are not created as People. Media and calls are excluded.')}</p>
           {selected.length > 0 && (
             <label style={{ display: 'flex', alignItems: 'flex-start', gap: themeCssVariables.spacing[2] }}>
               <FrontComponentCheckbox checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} aria-label={t('Acknowledge workspace sharing')} />
-              <span style={styles.muted}>{t('I understand selected contacts and messages will be visible to workspace members with access to these records.')}</span>
+              <span style={styles.muted}>{t('I understand selected direct contacts, group conversations, participants, and messages will be visible to workspace members with access to these records.')}</span>
             </label>
           )}
           <div style={{ display: 'flex', gap: themeCssVariables.spacing[2], alignItems: 'center' }}>

@@ -6,7 +6,7 @@ export type Conversation = {
   id: string;
   name: string;
   chatId: string;
-  personId: string;
+  personId?: string | null;
   accountId: string;
   lastMessageAt?: string | null;
   lastPreview?: string | null;
@@ -21,6 +21,8 @@ export type Message = {
   sentAt: string;
   deliveryState: string;
   requestId?: string | null;
+  senderId?: string | null;
+  senderName?: string | null;
 };
 
 export type Person = {
@@ -36,6 +38,8 @@ export type BridgeMessageEvent = {
   direction?: 'inbound' | 'outbound';
   text: string;
   sentAt: string;
+  senderId?: string;
+  senderName?: string;
 };
 
 export const applicationClient = () => new CoreApiClient({ runAs: 'application' });
@@ -101,7 +105,7 @@ const findAccount = async (client: CoreApiClient, phoneNumber: string): Promise<
   return result.whatsappAccounts?.edges?.[0]?.node as { id: string; state: string } | undefined;
 };
 
-const findConversation = async (client: CoreApiClient, accountId: string, chatId: string): Promise<Conversation | undefined> => {
+export const findConversation = async (client: CoreApiClient, accountId: string, chatId: string): Promise<Conversation | undefined> => {
   const result = await client.query({
     whatsappConversations: {
       __args: { filter: { accountId: { eq: accountId }, chatId: { eq: chatId } }, first: 1 },
@@ -203,15 +207,13 @@ export const importMessageForPerson = async (client: CoreApiClient, accountId: s
   return !existing;
 };
 
-export const importHistoryMessagesForPerson = async (client: CoreApiClient, accountId: string, events: BridgeMessageEvent[], person: Person): Promise<number> => {
-  if (events.length === 0) {
-    return 0;
+export const importHistoryMessages = async (client: CoreApiClient, accountId: string, chatId: string, name: string, events: BridgeMessageEvent[], person?: Person): Promise<number> => {
+  if (!/^\d{7,15}@s\.whatsapp\.net$/.test(chatId) && !/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(chatId)) {
+    throw new Error('Invalid chat ID');
   }
 
-  const chatId = events[0].chatId;
-
   for (const event of events) {
-    if (event.chatId !== chatId || !/^[a-f\d]{64}$/.test(event.eventId) || !/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound') || !Number.isFinite(Date.parse(event.sentAt))) {
+    if (event.chatId !== chatId || !/^[a-f\d]{64}$/.test(event.eventId) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound') || !Number.isFinite(Date.parse(event.sentAt))) {
       throw new Error('Invalid bridge event');
     }
   }
@@ -219,10 +221,9 @@ export const importHistoryMessagesForPerson = async (client: CoreApiClient, acco
   let conversation = await findConversation(client, accountId, chatId);
 
   if (!conversation) {
-    const name = [person.name.firstName, person.name.lastName].filter(Boolean).join(' ') || chatId.split('@')[0];
     const created = await client.mutation({
       createWhatsappConversation: {
-        __args: { data: { name, chatId, personId: person.id, linkedPersonId: person.id, accountId } },
+        __args: { data: { name, chatId, ...(person ? { personId: person.id, linkedPersonId: person.id } : {}), accountId } },
         id: true,
       },
     });
@@ -232,7 +233,11 @@ export const importHistoryMessagesForPerson = async (client: CoreApiClient, acco
       throw new Error('Could not create WhatsApp conversation');
     }
 
-    conversation = { id, name, chatId, personId: person.id, accountId };
+    conversation = { id, name, chatId, personId: person?.id, accountId };
+  }
+
+  if (events.length === 0) {
+    return 0;
   }
 
   const existing = await client.query({
@@ -260,6 +265,8 @@ export const importHistoryMessagesForPerson = async (client: CoreApiClient, acco
           text: event.text,
           sentAt: event.sentAt,
           deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
+          ...(event.senderId ? { senderId: event.senderId } : {}),
+          ...(event.senderName ? { senderName: event.senderName } : {}),
         })) },
         id: true,
       },
@@ -282,6 +289,15 @@ export const importHistoryMessagesForPerson = async (client: CoreApiClient, acco
   }
 
   return missing.length;
+};
+
+export const importHistoryMessagesForPerson = async (client: CoreApiClient, accountId: string, events: BridgeMessageEvent[], person: Person): Promise<number> => {
+  if (events.length === 0) {
+    return 0;
+  }
+
+  const name = [person.name.firstName, person.name.lastName].filter(Boolean).join(' ') || events[0].chatId.split('@')[0];
+  return importHistoryMessages(client, accountId, events[0].chatId, name, events, person);
 };
 
 export const findMessageByRequestId = async (client: CoreApiClient, requestId: string): Promise<Message | undefined> => {
@@ -318,8 +334,22 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
   let ignored = 0;
 
   for (const event of events) {
-    if (!/^[a-f\d]{64}$/.test(event.eventId) || !/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
+    const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(event.chatId);
+    if (!/^[a-f\d]{64}$/.test(event.eventId) || (!/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) && !isGroup) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
       throw new Error('Invalid bridge event');
+    }
+
+    if (isGroup) {
+      const conversation = await findConversation(client, accountId, event.chatId);
+
+      if (conversation) {
+        imported += await importHistoryMessages(client, accountId, event.chatId, conversation.name, [event]);
+      } else {
+        ignored += 1;
+      }
+
+      await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+      continue;
     }
 
     const candidates = peopleByPhone.get(event.chatId.split('@')[0]) ?? [];

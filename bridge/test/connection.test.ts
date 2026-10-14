@@ -75,3 +75,51 @@ test('history review is encrypted, deduplicated, date limited, and paged', async
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('history uses the sender profile name when no saved contact name is available', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-names-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+
+  try {
+    await connection.recordHistory([], [{
+      key: { remoteJid: '15551234567@s.whatsapp.net', id: 'named-1', fromMe: false },
+      pushName: 'Alex Martin',
+      message: { conversation: 'Hello' },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    }]);
+
+    const candidates = await connection.getHistoryCandidates(0, 0, 20);
+    assert.equal(candidates.items[0].name, 'Alex Martin');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('group history keeps the group title and message sender', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-group-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const groupId = '120363123456789012@g.us';
+
+  try {
+    await connection.recordHistory([{ id: groupId, name: 'Project team' }], [{
+      key: { remoteJid: groupId, participant: '15551234567@s.whatsapp.net', id: 'group-1', fromMe: false },
+      pushName: 'Alex Martin',
+      message: { conversation: 'Hello team' },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    }], true);
+
+    const candidates = await connection.getHistoryCandidates(0, 0, 20);
+    assert.equal(candidates.items[0].name, 'Project team');
+    assert.equal(candidates.items[0].kind, 'group');
+    assert.equal(candidates.items[0].messageCount, 1);
+    assert.equal((await connection.getHistoryCandidates(0, 0, 20, 'group')).total, 1);
+    assert.equal((await connection.getHistoryCandidates(0, 0, 20, 'direct')).total, 0);
+
+    const history = await connection.getHistoryMessages(groupId, 0, 0, 20);
+    assert.equal(history.messages[0].text, 'Hello team');
+    assert.equal(history.messages[0].senderName, 'Alex Martin');
+    assert.equal(history.messages[0].senderId, '15551234567@s.whatsapp.net');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

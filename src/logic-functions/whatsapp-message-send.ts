@@ -25,7 +25,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
   });
   const conversation = visible.whatsappConversations?.edges?.[0]?.node;
 
-  if (!conversation || !/^\d{7,15}@s\.whatsapp\.net$/.test(conversation.chatId ?? '')) {
+  if (!conversation || (!/^\d{7,15}@s\.whatsapp\.net$/.test(conversation.chatId ?? '') && !/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(conversation.chatId ?? ''))) {
     throw new Error('Conversation unavailable');
   }
 

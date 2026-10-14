@@ -11,7 +11,7 @@ import {
 export default defineNavigationMenuItem({
   universalIdentifier: INBOX_NAVIGATION_UNIVERSAL_IDENTIFIER,
   name: 'WhatsApp',
-  icon: 'IconMessage',
+  icon: 'IconBrandWhatsapp',
   color: 'green',
   position: 50,
   type: NavigationMenuItemType.PAGE_LAYOUT,

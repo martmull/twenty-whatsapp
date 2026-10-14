@@ -7,6 +7,7 @@ import {
   ensureAccount,
   findPeopleByPhone,
   importHistoryMessagesForPerson,
+  importHistoryMessages,
   userClient,
   type BridgeMessageEvent,
   type Person,
@@ -15,14 +16,18 @@ import {
 type HistoryRequest = {
   action?: 'list' | 'import';
   rangeDays?: 0 | 30 | 90;
+  kind?: 'all' | 'direct' | 'group';
   offset?: number;
   chatId?: string;
   createPerson?: boolean;
   acknowledged?: boolean;
+  firstName?: string;
+  lastName?: string;
 };
 
 type HistoryCandidate = {
   chatId: string;
+  kind: 'direct' | 'group';
   name: string;
   messageCount: number;
   lastMessageAt?: string;
@@ -67,15 +72,23 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
       throw new Error('Invalid history offset');
     }
 
-    const history = await bridgeJsonRequest<HistoryList>('/history/list', { rangeDays: request.rangeDays, offset, limit: 20 });
+    const kind = request.kind ?? 'all';
+    if (kind !== 'all' && kind !== 'direct' && kind !== 'group') {
+      throw new Error('Invalid history kind');
+    }
+    const history = await bridgeJsonRequest<HistoryList>('/history/list', { rangeDays: request.rangeDays, kind, offset, limit: 20 });
     const peopleByPhone = await findPeopleByPhone(client);
 
     return {
       ...history,
       items: history.items.map((item) => {
+        if (item.kind === 'group') {
+          return { ...item, match: 'group' as const };
+        }
         const matches = peopleByPhone.get(item.chatId.split('@')[0]) ?? [];
         return {
           ...item,
+          name: matches.length === 1 ? [matches[0].name.firstName, matches[0].name.lastName].filter(Boolean).join(' ') || item.name : item.name,
           match: matches.length === 1 ? 'matched' as const : matches.length > 1 ? 'ambiguous' as const : 'new' as const,
           personName: matches.length === 1 ? [matches[0].name.firstName, matches[0].name.lastName].filter(Boolean).join(' ') : undefined,
         };
@@ -83,11 +96,12 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
     };
   }
 
-  if (request.action !== 'import' || !request.chatId || !/^\d{7,15}@s\.whatsapp\.net$/.test(request.chatId) || !Number.isInteger(request.offset) || (request.offset ?? -1) < 0 || request.acknowledged !== true) {
+  const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(request.chatId ?? '');
+  if (request.action !== 'import' || !request.chatId || (!/^\d{7,15}@s\.whatsapp\.net$/.test(request.chatId) && !isGroup) || !Number.isInteger(request.offset) || (request.offset ?? -1) < 0 || request.acknowledged !== true) {
     throw new Error('Invalid history import request');
   }
 
-  if (request.chatId.split('@')[0] === status.phoneNumber.replace(/\D/g, '')) {
+  if (!isGroup && request.chatId.split('@')[0] === status.phoneNumber.replace(/\D/g, '')) {
     throw new Error('Cannot import the linked account as a contact');
   }
 
@@ -97,6 +111,18 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
     offset: request.offset,
     limit: 25,
   });
+  const accountId = await ensureAccount(client, `+${status.phoneNumber.replace(/\D/g, '')}`);
+  for (const message of history.messages) {
+    if (message.chatId !== request.chatId) {
+      throw new Error('History message belongs to another chat');
+    }
+  }
+
+  if (isGroup) {
+    const imported = await importHistoryMessages(client, accountId, request.chatId, history.name.slice(0, 120), history.messages);
+    return { imported, total: history.total, nextOffset: history.nextOffset, createdPerson: false };
+  }
+
   const peopleByPhone = await findPeopleByPhone(client);
   const matches = peopleByPhone.get(request.chatId.split('@')[0]) ?? [];
 
@@ -113,12 +139,17 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
     }
 
     const name = history.name.trim();
-    const [firstName, ...lastName] = name.split(/\s+/);
+    const [suggestedFirstName, ...suggestedLastName] = name.split(/\s+/);
+    if ((request.firstName && (request.firstName.length > 80 || !request.firstName.trim())) || (request.lastName && (request.lastName.length > 80 || !request.lastName.trim()))) {
+      throw new Error('Invalid Person name');
+    }
+    const firstName = request.firstName?.trim() || suggestedFirstName || `+${request.chatId.split('@')[0]}`;
+    const lastName = request.lastName?.trim() || suggestedLastName.join(' ');
     const created = await userClient().mutation({
       createPerson: {
         __args: {
           data: {
-            name: { firstName: firstName || `+${request.chatId.split('@')[0]}`, lastName: lastName.join(' ') },
+            name: { firstName, lastName },
             phones: {
               primaryPhoneNumber: `+${request.chatId.split('@')[0]}`,
               primaryPhoneCountryCode: '',
@@ -136,15 +167,8 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
       throw new Error('Could not create Person');
     }
 
-    person = { id, name: { firstName, lastName: lastName.join(' ') } };
+    person = { id, name: { firstName, lastName } };
     createdPerson = true;
-  }
-
-  const accountId = await ensureAccount(client, `+${status.phoneNumber.replace(/\D/g, '')}`);
-  for (const message of history.messages) {
-    if (message.chatId !== request.chatId) {
-      throw new Error('History message belongs to another chat');
-    }
   }
 
   const imported = await importHistoryMessagesForPerson(client, accountId, history.messages, person);

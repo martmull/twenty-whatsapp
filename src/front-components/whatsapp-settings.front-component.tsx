@@ -172,7 +172,7 @@ const WhatsAppSettings = () => {
           <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
             <span>{t('Phone number')}: <strong>{status.phoneNumber ?? t('Connected')}</strong></span>
             <span style={styles.muted}>
-              {t('New one-to-one text messages from matched People appear in the shared inbox and on Person records. Other chats are ignored.')}
+              {t('New direct texts from matched People appear in the inbox and on Person records. Selected groups appear in the shared inbox after import.')}
             </span>
             <div>
               <Button type="button" variant="outline" color="danger" size="sm" disabled={working} onClick={() => void perform('disconnect')}>

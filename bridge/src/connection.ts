@@ -1,13 +1,13 @@
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import makeWASocket, { Browsers, DisconnectReason, type Contact, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
+import makeWASocket, { Browsers, DisconnectReason, type Chat, type Contact, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
-import { messageEventId, toMessageEvent, type MessageEvent } from './message-event.js';
+import { isDirectChatId, isGroupChatId, isSupportedChatId, messageEventId, toMessageEvent, type MessageEvent } from './message-event.js';
 
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
@@ -31,6 +31,7 @@ export type HistoryChat = {
 
 export type HistoryCandidate = {
   chatId: string;
+  kind: 'direct' | 'group';
   name: string;
   messageCount: number;
   lastMessageAt?: string;
@@ -61,7 +62,7 @@ export class WhatsAppConnection {
     this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
   }
 
-  async recordHistory(contacts: Contact[], messages: WAMessage[], fromHistorySync = false): Promise<void> {
+  async recordHistory(contacts: Contact[], messages: WAMessage[], fromHistorySync = false, chats: Chat[] = []): Promise<void> {
     const write = async () => {
       for (const contact of contacts) {
         if (contact.lid && contact.jid && /^\d{7,15}@lid$/.test(contact.lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)) {
@@ -71,10 +72,16 @@ export class WhatsAppConnection {
 
       const byChat = new Map<string, { name?: string; messages: MessageEvent[] }>();
 
+      for (const chat of chats) {
+        if (chat.id && isSupportedChatId(chat.id)) {
+          byChat.set(chat.id, { name: chat.name?.slice(0, 120) || undefined, messages: [] });
+        }
+      }
+
       for (const contact of contacts) {
         const chatId = contact.jid ?? (contact.id.endsWith('@lid') ? (await this.phoneNumbers.read(contact.id))?.chatId : contact.id);
 
-        if (/^\d{7,15}@s\.whatsapp\.net$/.test(chatId ?? '')) {
+        if (chatId && isSupportedChatId(chatId)) {
           const candidate = byChat.get(chatId!) ?? { messages: [] };
           candidate.name = (contact.name || contact.notify || contact.verifiedName || candidate.name)?.slice(0, 120);
           byChat.set(chatId!, candidate);
@@ -97,6 +104,9 @@ export class WhatsAppConnection {
         }
 
         const candidate = byChat.get(item.chatId) ?? { messages: [] };
+        if (isDirectChatId(item.chatId) && !message.key.fromMe && message.pushName && !candidate.name) {
+          candidate.name = message.pushName.slice(0, 120);
+        }
         candidate.messages.push(item);
         byChat.set(item.chatId, candidate);
       }
@@ -125,11 +135,14 @@ export class WhatsAppConnection {
     await this.historyWrites;
   }
 
-  async getHistoryCandidates(rangeDays: 0 | 30 | 90, offset: number, limit: number): Promise<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }> {
+  async getHistoryCandidates(rangeDays: 0 | 30 | 90, offset: number, limit: number, kind: 'all' | 'direct' | 'group' = 'all'): Promise<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }> {
     await this.historyWrites;
     const since = rangeDays ? Date.now() - rangeDays * 86_400_000 : 0;
     const chats = await this.historyChats.list();
     const candidates = chats.flatMap((chat) => {
+      if (kind !== 'all' && (isGroupChatId(chat.chatId) ? 'group' : 'direct') !== kind) {
+        return [];
+      }
       if (chat.chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')) {
         return [];
       }
@@ -142,7 +155,8 @@ export class WhatsAppConnection {
 
       return [{
         chatId: chat.chatId,
-        name: chat.name || `+${chat.chatId.split('@')[0]}`,
+        kind: isGroupChatId(chat.chatId) ? 'group' as const : 'direct' as const,
+        name: chat.name || (isGroupChatId(chat.chatId) ? chat.chatId.split('@')[0] : `+${chat.chatId.split('@')[0]}`),
         messageCount: messages.length,
         lastMessageAt: messages.at(-1)?.sentAt,
       }];
@@ -156,7 +170,7 @@ export class WhatsAppConnection {
   }
 
   async getHistoryMessages(chatId: string, rangeDays: 0 | 30 | 90, offset: number, limit: number): Promise<{ name: string; messages: MessageEvent[]; total: number; nextOffset?: number }> {
-    if (!/^\d{7,15}@s\.whatsapp\.net$/.test(chatId)) {
+    if (!isSupportedChatId(chatId)) {
       throw new Error('Invalid chat ID');
     }
 
@@ -172,7 +186,7 @@ export class WhatsAppConnection {
     const nextOffset = offset + limit < messages.length ? offset + limit : undefined;
 
     return {
-      name: chat.name || `+${chatId.split('@')[0]}`,
+      name: chat.name || (isGroupChatId(chatId) ? chatId.split('@')[0] : `+${chatId.split('@')[0]}`),
       messages: messages.slice(offset, offset + limit),
       total: messages.length,
       nextOffset,
@@ -198,7 +212,7 @@ export class WhatsAppConnection {
   async sendText(requestId: string, chatId: string, text: string, accountPhoneNumber: string): Promise<SendReceipt> {
     if (
       !/^[a-f\d-]{36}$/i.test(requestId) ||
-      !/^\d{7,15}@s\.whatsapp\.net$/.test(chatId) ||
+      !isSupportedChatId(chatId) ||
       !/^\+\d{7,15}$/.test(accountPhoneNumber) ||
       text.trim().length === 0 || text.length > 4096
     ) {
@@ -305,9 +319,14 @@ export class WhatsAppConnection {
       }
       await this.recordHistory([], messages);
     });
-    socket.ev.on('messaging-history.set', async ({ contacts, messages }) => {
+    socket.ev.on('messaging-history.set', async ({ chats, contacts, messages }) => {
       if (generation === this.generation) {
-        await this.recordHistory(contacts, messages, true);
+        await this.recordHistory(contacts, messages, true, chats);
+      }
+    });
+    socket.ev.on('chats.upsert', async (chats) => {
+      if (generation === this.generation) {
+        await this.recordHistory([], [], false, chats);
       }
     });
     socket.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
@@ -345,6 +364,11 @@ export class WhatsAppConnection {
           state: 'connected',
           phoneNumber: socket.user?.id?.split(':')[0],
         };
+        void socket.groupFetchAllParticipating().then((groups) => {
+          if (generation === this.generation) {
+            return this.recordHistory(Object.values(groups).map((group) => ({ id: group.id, name: group.subject })), []);
+          }
+        }).catch(() => undefined);
       }
 
       if (connection === 'close') {

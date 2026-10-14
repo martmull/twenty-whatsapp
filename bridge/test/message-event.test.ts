@@ -25,7 +25,7 @@ test('direct incoming and phone-sent text enter the queue with stable IDs', () =
   assert.equal(direct?.direction, 'inbound');
   assert.equal(outgoing?.direction, 'outbound');
   assert.equal(outgoing?.eventId, messageEventId('15551234567@s.whatsapp.net', 'provider-1'));
-  assert.equal(toMessageEvent(message('15551234567@g.us', 'Group')), undefined);
+  assert.equal(toMessageEvent(message('15551234567@g.us', 'Group'))?.chatId, '15551234567@g.us');
   assert.equal(toMessageEvent(message('15551234567@lid', 'LID')), undefined);
 });
 

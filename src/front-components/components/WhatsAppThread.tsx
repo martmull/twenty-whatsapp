@@ -11,6 +11,7 @@ type Conversation = {
   id: string;
   name: string;
   personId: string;
+  chatId: string;
   lastMessageAt?: string | null;
   lastPreview?: string | null;
 };
@@ -21,6 +22,8 @@ type Message = {
   text: string;
   sentAt: string;
   deliveryState: string;
+  senderId?: string | null;
+  senderName?: string | null;
 };
 
 type InboxData = {
@@ -163,7 +166,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
       <header style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between', gap: themeCssVariables.spacing[2] }}>
         <div>
           <h2 style={{ margin: 0, fontSize: personId ? 16 : 20 }}>{personId ? t('WhatsApp') : t('WhatsApp inbox')}</h2>
-          {!personId && <p style={styles.muted}>{t('Shared conversations with People in this workspace.')}</p>}
+          {!personId && <p style={styles.muted}>{t('Shared direct and group conversations in this workspace.')}</p>}
         </div>
         <div style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2] }}>
           <PreviewBadge tone={connected ? 'green' : 'neutral'}>{connected ? t('Connected') : t('Offline')}</PreviewBadge>
@@ -173,7 +176,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
       <div style={{ ...styles.card, display: 'grid', gridTemplateColumns: personId ? 'minmax(0, 1fr)' : 'minmax(200px, 30%) minmax(0, 1fr)', minHeight: 0, overflow: 'hidden' }}>
         {!personId && <aside aria-label={t('Conversations')} style={{ borderRight: `1px solid ${themeCssVariables.border.color.medium}`, overflowY: 'auto' }}>
           {loading && !data && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('Loading conversations…')}</p>}
-          {!loading && data?.conversations.length === 0 && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('No conversations with matched People yet.')}</p>}
+          {!loading && data?.conversations.length === 0 && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('No conversations yet.')}</p>}
           {data?.conversations.map((conversation) => (
             <button key={conversation.id} type="button" onClick={() => selectConversation(conversation.id)} style={{
               background: conversation.id === selectedId ? themeCssVariables.background.secondary : themeCssVariables.background.primary,
@@ -204,6 +207,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
             {selected && data?.messages.length === 0 && <p style={styles.muted}>{t('No messages yet.')}</p>}
             {data?.messages.slice().reverse().map((message) => (
               <div key={message.id} style={{ alignSelf: message.direction === 'outbound' ? 'flex-end' : 'flex-start', background: message.direction === 'outbound' ? '#d9fdd3' : '#fff', border: '1px solid #e9e7e3', borderRadius: themeCssVariables.border.radius.md, color: '#202c33', maxWidth: '78%', padding: `${themeCssVariables.spacing[2]} ${themeCssVariables.spacing[3]}` }}>
+                {selected?.chatId.endsWith('@g.us') && message.direction === 'inbound' && <strong style={{ color: '#075e54', display: 'block', fontSize: themeCssVariables.font.size.sm, marginBottom: 4 }}>{message.senderName || message.senderId?.split('@')[0] || t('Group participant')}</strong>}
                 <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>
                 <small style={{ ...styles.label, color: '#667781', display: 'block', marginTop: 6 }}>{formatTime(message.sentAt)}{message.direction === 'outbound' ? ` · ${message.deliveryState}` : ''}</small>
               </div>

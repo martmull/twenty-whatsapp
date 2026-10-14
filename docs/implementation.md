@@ -1,6 +1,6 @@
 # WhatsApp linked-device app for Twenty
 
-**Status:** Local text messaging verified; selective history import implemented, awaiting a fresh history sync for live verification · **Updated:** 14 October 2026 · **Design preview:** [Open the import settings mockup](./import-history-settings-preview.html)
+**Status:** Local direct messaging verified; direct and group history import implemented, with live group message verification pending · **Updated:** 14 October 2026 · **Design preview:** [Open the import settings mockup](./import-history-settings-preview.html)
 
 ## Current app inside Twenty
 
@@ -22,7 +22,7 @@ Build a Twenty app that lets a workspace admin connect one WhatsApp number from 
 
 This is an unofficial integration. The UI must say so before pairing. An acknowledgement documents the user's choice; it does not authorize the integration under WhatsApp's terms or guarantee account availability. WhatsApp may restrict automated access or sending, and lemlist documents temporary restrictions on its own WhatsApp Web campaign sends. [WhatsApp terms](https://www.whatsapp.com/legal/terms-of-service), [lemlist restrictions](https://help.lemlist.com/en/articles/15825642-fix-whatsapp-campaign-messages-blocked-by-a-temporary-meta-ban).
 
-The first release supports one connected number per workspace, manual text messages, existing Twenty People, and a workspace-shared inbox. The schema and bridge should allow multiple numbers later. It does not send campaigns, bulk messages, group messages, calls, or new-chat outreach in v1. Media received in a conversation appears as an unsupported-content placeholder; media sending is a later slice. Unmatched incoming chats are not stored by default. The admin can later opt in to an unmatched inbox after the privacy and access model is implemented.
+The current implementation supports one connected number per workspace, manual direct and selected group text messages, existing Twenty People, and a workspace-shared inbox. Groups are discovered after connection and imported only when an admin selects them; participants are identified in message bubbles but are not automatically created as People. The schema and bridge should allow multiple numbers later. It does not send campaigns, bulk messages, calls, media, or new-chat outreach. Unmatched direct incoming chats are not stored by default. The admin can later opt in to an unmatched inbox after the privacy and access model is implemented.
 
 The official alternative is Meta Embedded Signup with WhatsApp Business app coexistence. It can also present a QR code, but that QR authorizes Cloud API access rather than linking a WhatsApp Web device. HubSpot uses this flow. It is the preferred future provider for Business numbers; it cannot replace the proposed personal-account flow. [HubSpot coexistence](https://knowledge.hubspot.com/inbox/connect-a-whatsapp-number-to-hubspot-using-coexistence), [Meta Embedded Signup](https://www.postman.com/meta/whatsapp-business-platform/documentation/du6gzjv/embedded-signup).
 
@@ -211,9 +211,9 @@ Release acceptance: an admin can pair and reconnect one test number; a known Per
 | Decision | Proposed v1 answer |
 | --- | --- |
 | Sharing | Workspace-shared inbox, connected by an admin; no personal account privacy promise. |
-| Initial history | Available one-to-one text history is cached encrypted by the bridge and imported only after an administrator selects chats and confirms sharing. WhatsApp may not replay old history to an already-linked session; a fresh QR link may be needed. |
+| Initial history | Available direct and group text history is cached encrypted by the bridge and imported only after an administrator selects chats and confirms sharing. Current groups can be discovered even when old group messages are absent. WhatsApp may not replay old history to an already-linked session; a fresh QR link may be needed. |
 | Unknown senders | No CRM persistence in default `CRM contacts only` mode. |
-| Outbound | Manual one-to-one replies to a linked Person only; no campaigns or cold outreach. |
+| Outbound | Manual replies to a linked Person or an imported group only; no campaigns or cold outreach. |
 | Hosting | Separate bridge deployment with persistent worker, database, encryption key, and event outbox. |
 | Official provider | Separate future Cloud API/coexistence integration for WhatsApp Business numbers. |
 

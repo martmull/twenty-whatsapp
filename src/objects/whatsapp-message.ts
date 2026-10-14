@@ -26,6 +26,8 @@ export default defineObject({
     { universalIdentifier: MESSAGE_EXTERNAL_ID_FIELD_ID, type: FieldType.TEXT, name: 'externalId', label: 'External ID', icon: 'IconHash' },
     { universalIdentifier: '2dfc5b8b-8a2a-4424-ac1d-f58a9ec39db5', type: FieldType.TEXT, name: 'direction', label: 'Direction', icon: 'IconArrowsLeftRight' },
     { universalIdentifier: '49a8f773-cbff-4f6f-abc6-3895d1654557', type: FieldType.TEXT, name: 'text', label: 'Text', icon: 'IconMessage' },
+    { universalIdentifier: '4f9301ce-6bfa-4d8c-9cd7-3ffddfb64ead', type: FieldType.TEXT, name: 'senderId', label: 'Sender ID', icon: 'IconUser' },
+    { universalIdentifier: 'd3f895b7-987b-4704-aea7-bdef4b504ad7', type: FieldType.TEXT, name: 'senderName', label: 'Sender name', icon: 'IconUser' },
     { universalIdentifier: 'e1c40db3-9f3d-4191-ac1f-236a48238d38', type: FieldType.DATE_TIME, name: 'sentAt', label: 'Sent at', icon: 'IconCalendar' },
     { universalIdentifier: 'dc5e694f-ac84-48e8-89c7-56f33d62af92', type: FieldType.TEXT, name: 'deliveryState', label: 'Delivery state', icon: 'IconStatusChange' },
     { universalIdentifier: MESSAGE_REQUEST_ID_FIELD_ID, type: FieldType.TEXT, name: 'requestId', label: 'Request ID', icon: 'IconHash' },
