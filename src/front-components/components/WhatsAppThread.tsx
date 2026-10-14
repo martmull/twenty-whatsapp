@@ -203,7 +203,6 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
       if (result.state === 'sent') {
         setDraft('');
         setRequestId(undefined);
-        setNotice(t('Message sent.'));
       } else {
         setNotice(t('Delivery is uncertain. Check WhatsApp before trying again.'));
       }
