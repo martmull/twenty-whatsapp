@@ -20,11 +20,15 @@ export const isSupportedChatId = (chatId: string): boolean => isDirectChatId(cha
 export const messageEventId = (chatId: string, providerMessageId: string): string =>
   createHash('sha256').update(`${chatId}:${providerMessageId}`).digest('hex');
 
-export const toMessageEvent = (message: WAMessage, mappedChatId?: string): MessageEvent | undefined => {
+export const messageChatId = (message: WAMessage, mappedChatId?: string): string | undefined => {
   const remoteJid = message.key.remoteJid;
-  const chatId = remoteJid?.endsWith('@lid')
+  return remoteJid?.endsWith('@lid')
     ? message.key.fromMe ? mappedChatId : message.key.senderPn ?? mappedChatId
-    : remoteJid;
+    : remoteJid ?? undefined;
+};
+
+export const toMessageEvent = (message: WAMessage, mappedChatId?: string): MessageEvent | undefined => {
+  const chatId = messageChatId(message, mappedChatId);
   const providerMessageId = message.key.id;
   const text = message.message?.conversation ?? message.message?.extendedTextMessage?.text;
 

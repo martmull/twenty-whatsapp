@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import type { WAMessage } from '@whiskeysockets/baileys';
+import type { Chat, WAMessage } from '@whiskeysockets/baileys';
 
 import { WhatsAppConnection, type ConnectionStatus } from '../src/connection.js';
 import { createEncryptedAuthState } from '../src/encrypted-auth-state.js';
@@ -119,6 +119,54 @@ test('group history keeps the group title and message sender', async () => {
     assert.equal(history.messages[0].text, 'Hello team');
     assert.equal(history.messages[0].senderName, 'Alex Martin');
     assert.equal(history.messages[0].senderId, '15551234567@s.whatsapp.net');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('history candidates use the latest chat activity when messages are not captured', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-order-'));
+  const encryptionKey = randomBytes(32);
+  const connection = new WhatsAppConnection(directory, encryptionKey);
+  const olderId = '111111111111111111@g.us';
+  const newerId = '999999999999999999@g.us';
+  const olderTimestamp = 1_700_000_000;
+  const newerTimestamp = olderTimestamp + 86_400;
+
+  try {
+    await connection.recordHistory([], [], true, [
+      { id: olderId, name: 'Older group', conversationTimestamp: olderTimestamp } as Chat,
+      { id: newerId, name: 'Newer group', lastMessageRecvTimestamp: newerTimestamp } as Chat,
+    ]);
+
+    const restored = new WhatsAppConnection(directory, encryptionKey);
+    const firstPage = await restored.getHistoryCandidates(0, 0, 1, 'group');
+    const secondPage = await restored.getHistoryCandidates(0, 1, 1, 'group');
+    assert.equal(firstPage.total, 2);
+    assert.equal(firstPage.items[0].chatId, newerId);
+    assert.equal(firstPage.items[0].lastMessageAt, new Date(newerTimestamp * 1000).toISOString());
+    assert.equal(secondPage.items[0].chatId, olderId);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a non-text message also moves its conversation to the top', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-media-order-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const olderId = '111111111111111111@g.us';
+  const newerId = '999999999999999999@g.us';
+
+  try {
+    await connection.recordHistory([], [
+      { key: { remoteJid: olderId, id: 'text-1', fromMe: false }, message: { conversation: 'Old text' }, messageTimestamp: 1_700_000_000 },
+      { key: { remoteJid: newerId, id: 'image-1', fromMe: false }, message: { imageMessage: {} }, messageTimestamp: 1_700_086_400 },
+    ]);
+
+    const candidates = await connection.getHistoryCandidates(0, 0, 20, 'group');
+    assert.equal(candidates.items[0].chatId, newerId);
+    assert.equal(candidates.items[0].messageCount, 0);
+    assert.equal(candidates.items[0].lastMessageAt, new Date(1_700_086_400_000).toISOString());
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

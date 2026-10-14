@@ -7,7 +7,7 @@ import { toDataURL } from 'qrcode';
 
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
-import { isDirectChatId, isGroupChatId, isSupportedChatId, messageEventId, toMessageEvent, type MessageEvent } from './message-event.js';
+import { isDirectChatId, isGroupChatId, isSupportedChatId, messageChatId, messageEventId, toMessageEvent, type MessageEvent } from './message-event.js';
 
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
@@ -26,6 +26,7 @@ export type SendReceipt = {
 export type HistoryChat = {
   chatId: string;
   name?: string;
+  lastMessageAt?: string;
   messages: MessageEvent[];
 };
 
@@ -70,11 +71,15 @@ export class WhatsAppConnection {
         }
       }
 
-      const byChat = new Map<string, { name?: string; messages: MessageEvent[] }>();
+      const byChat = new Map<string, { name?: string; lastMessageAt?: string; messages: MessageEvent[] }>();
 
       for (const chat of chats) {
         if (chat.id && isSupportedChatId(chat.id)) {
-          byChat.set(chat.id, { name: chat.name?.slice(0, 120) || undefined, messages: [] });
+          const seconds = Math.max(Number(chat.conversationTimestamp ?? 0), Number(chat.lastMessageRecvTimestamp ?? 0));
+          const lastMessageAt = Number.isFinite(seconds) && seconds > 0 && seconds < 8_640_000_000_000
+            ? new Date(seconds * 1000).toISOString()
+            : undefined;
+          byChat.set(chat.id, { name: chat.name?.slice(0, 120) || undefined, lastMessageAt, messages: [] });
         }
       }
 
@@ -91,24 +96,31 @@ export class WhatsAppConnection {
       for (const message of messages) {
         const timestamp = Number(message.messageTimestamp ?? 0);
 
-        if (!Number.isFinite(timestamp) || timestamp <= 0) {
+        if (!Number.isFinite(timestamp) || timestamp <= 0 || timestamp >= 8_640_000_000_000) {
           continue;
         }
 
         const remoteJid = message.key.remoteJid;
         const mappedChatId = remoteJid?.endsWith('@lid') ? (await this.phoneNumbers.read(remoteJid))?.chatId : undefined;
-        const item = toMessageEvent(message, mappedChatId);
+        const chatId = messageChatId(message, mappedChatId);
 
-        if (!item || item.chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')) {
+        if (!chatId || !isSupportedChatId(chatId) || chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')) {
           continue;
         }
 
-        const candidate = byChat.get(item.chatId) ?? { messages: [] };
-        if (isDirectChatId(item.chatId) && !message.key.fromMe && message.pushName && !candidate.name) {
+        const candidate = byChat.get(chatId) ?? { messages: [] };
+        const sentAt = new Date(timestamp * 1000).toISOString();
+        if (!candidate.lastMessageAt || sentAt > candidate.lastMessageAt) {
+          candidate.lastMessageAt = sentAt;
+        }
+        if (isDirectChatId(chatId) && !message.key.fromMe && message.pushName && !candidate.name) {
           candidate.name = message.pushName.slice(0, 120);
         }
-        candidate.messages.push(item);
-        byChat.set(item.chatId, candidate);
+        const item = toMessageEvent(message, mappedChatId);
+        if (item) {
+          candidate.messages.push(item);
+        }
+        byChat.set(chatId, candidate);
       }
 
       for (const [chatId, candidate] of byChat) {
@@ -122,6 +134,7 @@ export class WhatsAppConnection {
         await this.historyChats.write(chatId, {
           chatId,
           name: candidate.name ?? existing?.name,
+          lastMessageAt: [candidate.lastMessageAt, existing?.lastMessageAt, existing?.messages.at(-1)?.sentAt].filter((value): value is string => Boolean(value)).sort().at(-1),
           messages: [...messagesById.values()].sort((left, right) => left.sentAt.localeCompare(right.sentAt) || left.eventId.localeCompare(right.eventId)),
         });
       }
@@ -148,8 +161,9 @@ export class WhatsAppConnection {
       }
 
       const messages = chat.messages.filter((message) => Date.parse(message.sentAt) >= since);
+      const lastMessageAt = chat.lastMessageAt ?? chat.messages.at(-1)?.sentAt;
 
-      if (chat.messages.length > 0 && messages.length === 0) {
+      if (lastMessageAt && Date.parse(lastMessageAt) < since) {
         return [];
       }
 
@@ -158,9 +172,9 @@ export class WhatsAppConnection {
         kind: isGroupChatId(chat.chatId) ? 'group' as const : 'direct' as const,
         name: chat.name || (isGroupChatId(chat.chatId) ? chat.chatId.split('@')[0] : `+${chat.chatId.split('@')[0]}`),
         messageCount: messages.length,
-        lastMessageAt: messages.at(-1)?.sentAt,
+        lastMessageAt,
       }];
-    }).sort((left, right) => (right.lastMessageAt ?? '').localeCompare(left.lastMessageAt ?? '') || left.chatId.localeCompare(right.chatId));
+    }).sort((left, right) => (right.lastMessageAt ?? '').localeCompare(left.lastMessageAt ?? '') || left.name.localeCompare(right.name) || left.chatId.localeCompare(right.chatId));
 
     return {
       items: candidates.slice(offset, offset + limit),

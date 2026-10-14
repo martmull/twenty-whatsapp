@@ -189,7 +189,7 @@ export const WhatsAppHistoryImport = () => {
             <Callout variant="warning" title={t('Earlier history may be missing')} description={t('This device was linked before history capture was enabled, or WhatsApp has not sent a history sync. A new QR link may be needed to receive older chats.')} />
           )}
           {chatFilter === 'group' && items.length > 0 && items.every((item) => item.messageCount === 0) && (
-            <Callout variant="warning" title={t('Group messages are not available yet')} description={t('This linked device discovered your groups, but earlier group texts were not captured. You can import a selected group now for future messages. To recover earlier texts, WhatsApp may need to send a new history sync after linking the device again.')} />
+            <Callout variant="warning" title={t('Group messages are not available yet')} description={t('This linked device discovered your groups, but earlier group texts were not captured. Groups without a last message date appear alphabetically after dated chats. You can import a selected group now for future messages. To recover earlier texts and dates, WhatsApp may need to send a new history sync after linking the device again.')} />
           )}
           {items.length === 0 && !working && (
             <Callout variant="info" title={t('No available history in this range')} description={t('Try a wider date range. If nothing appears, WhatsApp may need a fresh linked-device pairing to send earlier history.')} />
@@ -217,7 +217,7 @@ export const WhatsAppHistoryImport = () => {
                       <FrontComponentCheckbox checked={selected.includes(item.chatId)} disabled={working || item.match === 'ambiguous'} onChange={(event) => toggle(item.chatId, event.target.checked)} aria-label={`${t('Select')} ${item.name}`} />
                       <span style={{ display: 'grid', gap: themeCssVariables.spacing[1], minWidth: 0, flex: 1 }}>
                         <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</strong>
-                        <span style={styles.muted}>{item.messageCount} {t('text messages in range')}{item.kind === 'direct' ? ` · ${item.chatId.split('@')[0]}` : ''}</span>
+                        <span style={styles.muted}>{item.messageCount} {t('text messages in range')}{item.lastMessageAt ? ` · ${new Date(item.lastMessageAt).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}` : ` · ${t('Last message date unavailable')}`}{item.kind === 'direct' ? ` · ${item.chatId.split('@')[0]}` : ''}</span>
                       </span>
                       <Tag color={item.match === 'matched' ? 'green' : item.match === 'ambiguous' ? 'orange' : 'blue'} variant="soft">
                         {item.match === 'group' ? t('Group') : item.match === 'matched' ? t('Matched Person') : item.match === 'ambiguous' ? t('Ambiguous match') : t('New Person')}
