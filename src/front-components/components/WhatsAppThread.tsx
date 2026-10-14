@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
 import { t } from 'twenty-sdk/front-component';
+import { getPublicAssetUrl } from 'twenty-sdk/utils';
 import { themeCssVariables } from 'twenty-ui/theme';
 
 import { PreviewBadge, PreviewButton, getPreviewStyles } from 'src/front-components/components/PreviewUi';
@@ -197,12 +198,12 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
           <div style={{ borderBottom: `1px solid ${themeCssVariables.border.color.medium}`, padding: themeCssVariables.spacing[3] }}>
             <strong>{selected?.name ?? t('Select a conversation')}</strong>
           </div>
-          <div key={`${selectedId}:${latestMessageId}`} aria-label={t('Message thread')} style={{ background: themeCssVariables.background.secondary, display: 'flex', flexDirection: 'column-reverse', gap: themeCssVariables.spacing[2], overflowY: 'auto', padding: themeCssVariables.spacing[3] }}>
+          <div key={`${selectedId}:${latestMessageId}`} aria-label={t('Message thread')} style={{ backgroundColor: '#faf7f2', backgroundImage: `url("${getPublicAssetUrl('whatsapp-wallpaper.png')}")`, backgroundRepeat: 'repeat', backgroundSize: '485px auto', display: 'flex', flexDirection: 'column-reverse', gap: themeCssVariables.spacing[2], overflowY: 'auto', padding: themeCssVariables.spacing[3] }}>
             {selected && data?.messages.length === 0 && <p style={styles.muted}>{t('No messages yet.')}</p>}
             {data?.messages.slice().reverse().map((message) => (
-              <div key={message.id} style={{ alignSelf: message.direction === 'outbound' ? 'flex-end' : 'flex-start', background: message.direction === 'outbound' ? 'rgba(37, 187, 85, 0.13)' : themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.md, maxWidth: '78%', padding: `${themeCssVariables.spacing[2]} ${themeCssVariables.spacing[3]}` }}>
+              <div key={message.id} style={{ alignSelf: message.direction === 'outbound' ? 'flex-end' : 'flex-start', background: message.direction === 'outbound' ? '#d9fdd3' : '#fff', border: '1px solid #e9e7e3', borderRadius: themeCssVariables.border.radius.md, color: '#202c33', maxWidth: '78%', padding: `${themeCssVariables.spacing[2]} ${themeCssVariables.spacing[3]}` }}>
                 <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>
-                <small style={{ ...styles.label, display: 'block', marginTop: 6 }}>{formatTime(message.sentAt)}{message.direction === 'outbound' ? ` · ${message.deliveryState}` : ''}</small>
+                <small style={{ ...styles.label, color: '#667781', display: 'block', marginTop: 6 }}>{formatTime(message.sentAt)}{message.direction === 'outbound' ? ` · ${message.deliveryState}` : ''}</small>
               </div>
             ))}
           </div>
