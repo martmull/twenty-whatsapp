@@ -44,7 +44,7 @@ export type BridgeMessageEvent = {
   sentAt: string;
   senderId?: string;
   senderName?: string;
-  media?: { kind: 'image' | 'video'; mimeType: string; fileName: string; sizeBytes?: number };
+  media?: { kind: 'image' | 'video' | 'audio'; mimeType: string; fileName: string; sizeBytes?: number };
 };
 
 export const applicationClient = () => new CoreApiClient({ runAs: 'application' });

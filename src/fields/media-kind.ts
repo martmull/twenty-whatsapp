@@ -6,6 +6,6 @@ export default defineField({
   label: 'Media type',
   type: FieldType.TEXT,
   objectUniversalIdentifier: 'e31b65a9-bbb8-4f7c-ad0d-cd9b9701d98c',
-  description: 'Image or video.',
+  description: 'Image, video, or audio.',
   isNullable: true,
 });

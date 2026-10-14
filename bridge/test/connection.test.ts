@@ -345,7 +345,7 @@ test('history candidates use the latest chat activity when messages are not capt
   }
 });
 
-test('image and video history stays ordered and exposes media details without decryption keys', async () => {
+test('image, video, and audio history stays ordered and exposes media details without decryption keys', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-media-order-'));
   const connection = new WhatsAppConnection(directory, randomBytes(32));
   const olderId = '111111111111111111@g.us';
@@ -356,12 +356,13 @@ test('image and video history stays ordered and exposes media details without de
       { key: { remoteJid: olderId, id: 'text-1', fromMe: false }, message: { conversation: 'Old text' }, messageTimestamp: 1_700_000_000 },
       { key: { remoteJid: newerId, id: 'image-1', fromMe: false }, message: { imageMessage: { mimetype: 'image/jpeg', mediaKey: randomBytes(32), directPath: '/image', fileLength: 1024 } }, messageTimestamp: 1_700_086_400 },
       { key: { remoteJid: newerId, id: 'video-1', fromMe: true }, message: { videoMessage: { mimetype: 'video/mp4', caption: 'A short clip', mediaKey: randomBytes(32), directPath: '/video', fileLength: 2048 } }, messageTimestamp: 1_700_086_401 },
+      { key: { remoteJid: newerId, id: 'audio-1', fromMe: false }, message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus', ptt: true, mediaKey: randomBytes(32), directPath: '/audio', fileLength: 4096 } }, messageTimestamp: 1_700_086_402 },
     ]);
 
     const candidates = await connection.getHistoryCandidates(0, 0, 20, 'group');
     assert.equal(candidates.items[0].chatId, newerId);
-    assert.equal(candidates.items[0].messageCount, 2);
-    assert.equal(candidates.items[0].lastMessageAt, new Date(1_700_086_401_000).toISOString());
+    assert.equal(candidates.items[0].messageCount, 3);
+    assert.equal(candidates.items[0].lastMessageAt, new Date(1_700_086_402_000).toISOString());
     const history = await connection.getHistoryMessages(newerId, 0, 0, 10);
     assert.equal(history.messages[0].text, '[Image]');
     assert.equal(history.messages[0].media?.kind, 'image');
@@ -371,12 +372,18 @@ test('image and video history stays ordered and exposes media details without de
     assert.equal(nextPage.messages[0].text, 'A short clip');
     assert.equal(nextPage.messages[0].media?.kind, 'video');
     assert.equal(nextPage.messages[0].direction, 'outbound');
+    const audioPage = await connection.getHistoryMessages(newerId, 0, nextPage.nextOffset ?? 0, 10);
+    assert.equal(audioPage.messages[0].text, '[Audio]');
+    assert.equal(audioPage.messages[0].media?.kind, 'audio');
+    assert.equal(audioPage.messages[0].media?.mimeType, 'audio/ogg');
+    assert.equal(audioPage.messages[0].media?.sizeBytes, 4096);
     assert.equal(JSON.stringify(history).includes('mediaKey'), false);
     const savedReferences = await readdir(join(directory, 'media-references'));
-    assert.equal(savedReferences.length, 2);
+    assert.equal(savedReferences.length, 3);
     const encryptedReference = await readFile(join(directory, 'media-references', savedReferences[0]), 'utf8');
     assert.equal(encryptedReference.includes('/image'), false);
     assert.equal(encryptedReference.includes('/video'), false);
+    assert.equal(encryptedReference.includes('/audio'), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

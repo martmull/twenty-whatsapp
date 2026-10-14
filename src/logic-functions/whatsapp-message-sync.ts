@@ -5,7 +5,7 @@ import { syncMessages } from 'src/logic-functions/message-data';
 export default defineLogicFunction({
   universalIdentifier: '4353a880-c060-4b74-a96e-9dd03e387618',
   name: 'whatsapp-message-sync',
-  description: 'Import new direct and selected-group messages, including available images and videos.',
+  description: 'Import new direct and selected-group messages, including available images, videos, and audio.',
   timeoutSeconds: 120,
   handler: syncMessages,
   httpRouteTriggerSettings: {

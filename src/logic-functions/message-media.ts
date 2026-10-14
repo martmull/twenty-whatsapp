@@ -13,7 +13,7 @@ const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
 
 type MediaEvent = {
   eventId: string;
-  media?: { kind: 'image' | 'video'; mimeType: string; fileName: string; sizeBytes?: number };
+  media?: { kind: 'image' | 'video' | 'audio'; mimeType: string; fileName: string; sizeBytes?: number };
 };
 
 const putMedia = async (body: ReadableStream<Uint8Array>, sizeBytes: number, url: string, contentType: string): Promise<void> => {

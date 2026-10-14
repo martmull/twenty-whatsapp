@@ -2,7 +2,7 @@ import { downloadContentFromMessage, type WAMessage } from '@whiskeysockets/bail
 
 export const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
 
-export type MediaKind = 'image' | 'video';
+export type MediaKind = 'image' | 'video' | 'audio';
 
 export type MediaSummary = {
   kind: MediaKind;
@@ -25,22 +25,29 @@ const MEDIA_FORMATS: Record<string, string> = {
   'video/mp4': 'mp4',
   'video/quicktime': 'mov',
   'video/3gpp': '3gp',
+  'audio/ogg': 'ogg',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/aac': 'aac',
+  'audio/amr': 'amr',
+  'audio/webm': 'webm',
 };
 
 export const describeMedia = (message: WAMessage, eventId: string): { summary: MediaSummary; reference?: MediaReference; caption?: string } | undefined => {
   const image = message.message?.imageMessage;
   const video = message.message?.videoMessage;
-  const content = image ?? video;
+  const audio = message.message?.audioMessage;
+  const content = image ?? video ?? audio;
 
   if (!content) {
     return undefined;
   }
 
-  const kind: MediaKind = image ? 'image' : 'video';
+  const kind: MediaKind = image ? 'image' : video ? 'video' : 'audio';
   const suppliedMimeType = content.mimetype?.split(';')[0].trim().toLowerCase();
   const mimeType = suppliedMimeType && MEDIA_FORMATS[suppliedMimeType] && suppliedMimeType.startsWith(`${kind}/`)
     ? suppliedMimeType
-    : kind === 'image' ? 'image/jpeg' : 'video/mp4';
+    : kind === 'image' ? 'image/jpeg' : kind === 'video' ? 'video/mp4' : 'audio/ogg';
   const size = Number(content.fileLength ?? 0);
   const summary: MediaSummary = {
     kind,
@@ -51,11 +58,12 @@ export const describeMedia = (message: WAMessage, eventId: string): { summary: M
   const mediaKey = content.mediaKey?.length ? Buffer.from(content.mediaKey).toString('base64') : undefined;
   const directPath = content.directPath || undefined;
   const url = content.url || undefined;
+  const caption = image?.caption || video?.caption;
 
   return {
     summary,
     ...(mediaKey && (directPath || url) ? { reference: { ...summary, mediaKey, directPath, url } } : {}),
-    ...(content.caption ? { caption: content.caption } : {}),
+    ...(caption ? { caption } : {}),
   };
 };
 
