@@ -284,9 +284,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
           {!loading && data?.conversations.length === 0 && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('No conversations yet.')}</p>}
           {data?.conversations.map((conversation) => (
             <button key={conversation.id} type="button" onClick={() => selectConversation(conversation.id)} style={{
-              background: conversation.id === selectedId ? themeCssVariables.background.secondary : themeCssVariables.background.primary,
+              background: conversation.unread ? isDark ? '#182635' : '#eef4ff' : conversation.id === selectedId ? themeCssVariables.background.secondary : themeCssVariables.background.primary,
               border: 0,
               borderBottom: `1px solid ${themeCssVariables.border.color.medium}`,
+              borderLeft: `3px solid ${conversation.unread ? themeCssVariables.color.blue : 'transparent'}`,
               color: themeCssVariables.font.color.primary,
               cursor: 'pointer',
               display: 'grid',
@@ -298,10 +299,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
             }}>
               <span style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2], justifyContent: 'space-between' }}>
                 <strong style={{ fontWeight: conversation.unread ? 700 : 600 }}>{conversation.name}</strong>
-                {conversation.unread && <span aria-label={t('Unread messages')} title={t('Unread messages')} style={{ background: themeCssVariables.color.blue, borderRadius: '50%', flexShrink: 0, height: 8, width: 8 }} />}
+                {conversation.unread && <span title={t('Unread messages')} style={{ background: themeCssVariables.color.blue, borderRadius: 999, color: '#fff', flexShrink: 0, fontSize: themeCssVariables.font.size.sm, fontWeight: 700, padding: '2px 8px' }}>{t('Unread')}</span>}
               </span>
               <span style={{ ...styles.muted, color: conversation.unread ? themeCssVariables.font.color.primary : styles.muted.color, fontWeight: conversation.unread ? 600 : undefined }}>{conversation.lastPreview ?? t('No messages yet')}</span>
-              <small style={styles.label}>{formatTime(conversation.lastMessageAt)}</small>
+              <small style={{ ...styles.label, color: conversation.unread ? themeCssVariables.color.blue : styles.label.color, fontWeight: conversation.unread ? 600 : undefined }}>{formatTime(conversation.lastMessageAt)}</small>
             </button>
           ))}
         </aside>}
@@ -334,16 +335,16 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
           </div>
           <div style={{ borderTop: `1px solid ${themeCssVariables.border.color.medium}`, display: 'grid', gap: themeCssVariables.spacing[2], padding: themeCssVariables.spacing[3] }}>
             {error && <p role="alert" style={{ color: themeCssVariables.color.red, margin: 0 }}>{error}</p>}
-            {notice && <p role="status" style={{ ...styles.muted, margin: 0 }}>{notice}</p>}
+            {notice && <p role="status" style={{ background: themeCssVariables.background.secondary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderLeft: `3px solid ${themeCssVariables.color.blue}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontWeight: 600, margin: 0, padding: themeCssVariables.spacing[2] }}>{notice}</p>}
             <textarea
               aria-label={t('Write a WhatsApp message')}
               placeholder={selected ? t('Write a message…') : personId ? t('No conversation yet') : t('Select a conversation first')}
               value={draft}
               onChange={(event) => { setDraft(event.target.value); setRequestId(undefined); setNotice(''); }}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.repeat && !('isComposing' in event && event.isComposing)) {
+                if (event.key === 'Enter' && !event.shiftKey && !('isComposing' in event && event.isComposing)) {
                   event.preventDefault();
-                  void send();
+                  if (!event.repeat) void send();
                 }
               }}
               disabled={!selected || !connected || sending}
