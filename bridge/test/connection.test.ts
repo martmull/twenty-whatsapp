@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import type { Chat, WAMessage } from '@whiskeysockets/baileys';
+import { proto, type Chat, type WAMessage } from '@whiskeysockets/baileys';
 
 import { WhatsAppConnection, type ConnectionStatus } from '../src/connection.js';
 import { createEncryptedAuthState } from '../src/encrypted-auth-state.js';
@@ -30,6 +30,32 @@ test('bridge waiters wake when new data is available', async () => {
   const update = await waiting;
   assert.equal(update.changed, true);
   assert.notEqual(update.cursor, initial.cursor);
+});
+
+test('a sent message remains available for a recipient retry after bridge restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-retry-'));
+  const encryptionKey = randomBytes(32);
+  const chatId = '15551234567@s.whatsapp.net';
+  let messageId = '';
+  const connection = new WhatsAppConnection(directory, encryptionKey);
+
+  try {
+    Object.defineProperty(connection, 'socket', { value: {
+      sendMessage: async (_jid: string, _content: unknown, options?: { messageId?: string }) => {
+        messageId = options?.messageId ?? '';
+        assert.ok(messageId);
+        assert.equal((await connection.getSentMessage({ id: messageId }))?.conversation, 'Hello');
+        return { key: { id: messageId, remoteJid: chatId, fromMe: true }, message: proto.Message.create({ conversation: 'Hello' }) };
+      },
+    } });
+    Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
+
+    assert.equal((await connection.sendText(randomUUID(), chatId, 'Hello', '+15557654321')).state, 'sent');
+    const restarted = new WhatsAppConnection(directory, encryptionKey);
+    assert.equal((await restarted.getSentMessage({ id: messageId, remoteJid: chatId }))?.conversation, 'Hello');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('only one importer claims a queued batch and completion wakes other viewers', async () => {

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import makeWASocket, { Browsers, DisconnectReason, type Chat, type Contact, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
+import makeWASocket, { Browsers, DisconnectReason, generateMessageIDV2, proto, type Chat, type Contact, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
@@ -57,6 +57,7 @@ export class WhatsAppConnection {
   private reconnectTimer: NodeJS.Timeout | undefined;
   private readonly events: EncryptedJsonStore<MessageEvent>;
   private readonly sends: EncryptedJsonStore<SendReceipt>;
+  private readonly sentMessages: EncryptedJsonStore<{ encodedMessage: string }>;
   private readonly phoneNumbers: EncryptedJsonStore<{ chatId: string }>;
   private readonly contactNames: EncryptedJsonStore<{ name: string }>;
   private readonly historyChats: EncryptedJsonStore<HistoryChat>;
@@ -78,6 +79,7 @@ export class WhatsAppConnection {
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
+    this.sentMessages = new EncryptedJsonStore(join(directory, 'sent-messages'), encryptionKey);
     this.phoneNumbers = new EncryptedJsonStore(join(directory, 'phone-numbers'), encryptionKey);
     this.contactNames = new EncryptedJsonStore(join(directory, 'contact-names'), encryptionKey);
     this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
@@ -517,18 +519,37 @@ export class WhatsAppConnection {
 
       const pending: SendReceipt = { requestId, state: 'unknown' };
       await this.sends.write(requestId, pending);
-      const sent = await this.socket.sendMessage(chatId, { text });
+      const messageId = generateMessageIDV2(this.socket.user?.id);
+      // A recipient can request a retry before sendMessage resolves.
+      await this.sentMessages.write(messageId, {
+        encodedMessage: Buffer.from(proto.Message.encode({ conversation: text }).finish()).toString('base64'),
+      });
+      const sent = await this.socket.sendMessage(chatId, { text }, { messageId });
+      if (!sent?.key.id || !sent.message) {
+        throw new Error('WhatsApp did not confirm the outgoing message');
+      }
+      await this.sentMessages.write(sent.key.id, {
+        encodedMessage: Buffer.from(proto.Message.encode(sent.message).finish()).toString('base64'),
+      });
       const receipt: SendReceipt = {
         requestId,
         state: 'sent',
-        providerMessageId: sent?.key.id ?? undefined,
-        eventId: sent?.key.id ? messageEventId(chatId, sent.key.id) : undefined,
+        providerMessageId: sent.key.id,
+        eventId: messageEventId(chatId, sent.key.id),
       };
       await this.sends.write(requestId, receipt);
       return receipt;
     } finally {
       this.sendingRequests.delete(requestId);
     }
+  }
+
+  async getSentMessage(key: proto.IMessageKey): Promise<proto.IMessage | undefined> {
+    if (!key.id || key.id.length > 128) {
+      return undefined;
+    }
+    const saved = await this.sentMessages.read(key.id);
+    return saved ? proto.Message.decode(Buffer.from(saved.encodedMessage, 'base64')) : undefined;
   }
 
   getStatus(): ConnectionStatus {
@@ -569,6 +590,8 @@ export class WhatsAppConnection {
       syncFullHistory: true,
       shouldSyncHistoryMessage: () => true,
       emitOwnEvents: false,
+      // Baileys needs the original payload when a recipient requests a decryption retry.
+      getMessage: (key) => this.getSentMessage(key),
     });
 
     this.socket = socket;
