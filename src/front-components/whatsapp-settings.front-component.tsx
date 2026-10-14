@@ -160,7 +160,7 @@ const WhatsAppSettings = () => {
       }}>
         <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between' }}>
           <strong>{t('Linked device')}</strong>
-          <Tag color={badge.color} variant="soft">{badge.label}</Tag>
+          <Tag color={badge.color} variant="soft" preventShrink>{badge.label}</Tag>
         </div>
         <div>
           <Button type="button" variant="outline" size="sm" loading={working} onClick={() => void refreshStatus()}>
@@ -172,7 +172,7 @@ const WhatsAppSettings = () => {
           <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
             <span>{t('Phone number')}: <strong>{status.phoneNumber ?? t('Connected')}</strong></span>
             <span style={styles.muted}>
-              {t('New direct texts from matched People appear in the inbox and on Person records. Selected groups appear in the shared inbox after import.')}
+              {t('New direct messages from matched People, including available images and videos, appear in the inbox and on Person records. Selected groups appear in the shared inbox after import.')}
             </span>
             <div>
               <Button type="button" variant="outline" color="danger" size="sm" disabled={working} onClick={() => void perform('disconnect')}>
@@ -227,7 +227,7 @@ const WhatsAppSettings = () => {
             }}>
               <strong>{t('Before you connect')}</strong>
               <p style={styles.muted}>
-                {t('This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages from matched People are shared with permitted workspace members. Available earlier history is stored encrypted on the bridge for optional review and is shared only if you import it.')}
+                {t('This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages and available images and videos from matched People are shared with permitted workspace members. Available earlier history is stored encrypted on the bridge for optional review and is shared only if you import it.')}
               </p>
               <a href="https://www.whatsapp.com/legal/terms-of-service" target="_blank" rel="noreferrer">
                 {t('Read WhatsApp terms')}

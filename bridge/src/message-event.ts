@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import type { WAMessage } from '@whiskeysockets/baileys';
 
+import { describeMedia, type MediaSummary } from './media.js';
+
 export type MessageEvent = {
   eventId: string;
   chatId: string;
@@ -11,6 +13,7 @@ export type MessageEvent = {
   sentAt: string;
   senderId?: string;
   senderName?: string;
+  media?: MediaSummary;
 };
 
 export const isGroupChatId = (chatId: string): boolean => /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(chatId);
@@ -30,11 +33,17 @@ export const messageChatId = (message: WAMessage, mappedChatId?: string): string
 export const toMessageEvent = (message: WAMessage, mappedChatId?: string): MessageEvent | undefined => {
   const chatId = messageChatId(message, mappedChatId);
   const providerMessageId = message.key.id;
-  const text = message.message?.conversation ?? message.message?.extendedTextMessage?.text;
+  if (!chatId || !isSupportedChatId(chatId) || !providerMessageId) {
+    return undefined;
+  }
+
+  const eventId = messageEventId(chatId, providerMessageId);
+  const media = describeMedia(message, eventId);
+  const text = message.message?.conversation ?? message.message?.extendedTextMessage?.text
+    ?? (media ? media.caption?.trim().slice(0, 4096) || (media.summary.kind === 'image' ? '[Image]' : '[Video]') : undefined);
 
   if (
-    !chatId || !isSupportedChatId(chatId) ||
-    !providerMessageId || !text || text.length > 4096
+    !text || text.length > 4096
   ) {
     return undefined;
   }
@@ -42,7 +51,7 @@ export const toMessageEvent = (message: WAMessage, mappedChatId?: string): Messa
   const seconds = Number(message.messageTimestamp ?? 0);
 
   return {
-    eventId: messageEventId(chatId, providerMessageId),
+    eventId,
     chatId,
     providerMessageId,
     direction: message.key.fromMe ? 'outbound' : 'inbound',
@@ -50,5 +59,6 @@ export const toMessageEvent = (message: WAMessage, mappedChatId?: string): Messa
     sentAt: new Date(Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : Date.now()).toISOString(),
     ...(isGroupChatId(chatId) && !message.key.fromMe && message.key.participant ? { senderId: message.key.participant } : {}),
     ...(isGroupChatId(chatId) && !message.key.fromMe && message.pushName ? { senderName: message.pushName.slice(0, 120) } : {}),
+    ...(media ? { media: media.summary } : {}),
   };
 };

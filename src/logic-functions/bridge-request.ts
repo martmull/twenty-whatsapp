@@ -6,7 +6,7 @@ type BridgeStatus = {
 };
 
 export const bridgeJsonRequest = async <TResponse>(
-  path: '/status' | '/connect' | '/disconnect' | '/events' | '/events/ack' | '/send' | '/history/list' | '/history/messages',
+  path: '/status' | '/connect' | '/disconnect' | '/events' | '/events/ack' | '/send' | '/history/list' | '/history/messages' | '/history/members',
   body?: Record<string, unknown>,
 ): Promise<TResponse> => {
   const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;
@@ -35,3 +35,26 @@ export const bridgeJsonRequest = async <TResponse>(
 
 export const bridgeRequest = (path: '/status' | '/connect' | '/disconnect') =>
   bridgeJsonRequest<BridgeStatus>(path);
+
+export const bridgeMediaRequest = async (eventId: string): Promise<Response | undefined> => {
+  if (!/^[a-f\d]{64}$/.test(eventId)) {
+    throw new Error('Invalid media ID');
+  }
+
+  const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;
+  const bridgeToken = process.env.WHATSAPP_BRIDGE_TOKEN;
+  if (!bridgeUrl || !bridgeToken) {
+    throw new Error('WhatsApp bridge variables are not configured');
+  }
+
+  const response = await fetch(new URL(`/media/${eventId}`, bridgeUrl), {
+    headers: { authorization: `Bearer ${bridgeToken}` },
+    signal: AbortSignal.timeout(55_000),
+  });
+
+  if (!response.ok) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  return response;
+};

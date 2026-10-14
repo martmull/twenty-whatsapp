@@ -1,6 +1,7 @@
 import { CoreApiClient } from 'twenty-client-sdk/core';
 
 import { bridgeJsonRequest, bridgeRequest } from 'src/logic-functions/bridge-request';
+import { importMessageMedia } from 'src/logic-functions/message-media';
 
 export type Conversation = {
   id: string;
@@ -9,6 +10,7 @@ export type Conversation = {
   personId?: string | null;
   accountId: string;
   lastMessageAt?: string | null;
+  lastInboundAt?: string | null;
   lastPreview?: string | null;
 };
 
@@ -23,6 +25,8 @@ export type Message = {
   requestId?: string | null;
   senderId?: string | null;
   senderName?: string | null;
+  mediaKind?: string | null;
+  media?: { fileId: string; label?: string | null; url?: string | null }[] | null;
 };
 
 export type Person = {
@@ -40,6 +44,7 @@ export type BridgeMessageEvent = {
   sentAt: string;
   senderId?: string;
   senderName?: string;
+  media?: { kind: 'image' | 'video'; mimeType: string; fileName: string; sizeBytes?: number };
 };
 
 export const applicationClient = () => new CoreApiClient({ runAs: 'application' });
@@ -109,7 +114,7 @@ export const findConversation = async (client: CoreApiClient, accountId: string,
   const result = await client.query({
     whatsappConversations: {
       __args: { filter: { accountId: { eq: accountId }, chatId: { eq: chatId } }, first: 1 },
-      edges: { node: { id: true, name: true, chatId: true, personId: true, accountId: true, lastMessageAt: true, lastPreview: true } },
+      edges: { node: { id: true, name: true, chatId: true, personId: true, accountId: true, lastMessageAt: true, lastInboundAt: true, lastPreview: true } },
     },
   });
 
@@ -120,7 +125,7 @@ const findMessageByExternalId = async (client: CoreApiClient, externalId: string
   const result = await client.query({
     whatsappMessages: {
       __args: { filter: { externalId: { eq: externalId } }, first: 1 },
-      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true } },
+      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true } } },
     },
   });
 
@@ -147,6 +152,36 @@ export const ensureAccount = async (client: CoreApiClient, phoneNumber: string):
   }
 
   return accountId;
+};
+
+const attachMedia = async (client: CoreApiClient, event: BridgeMessageEvent, message: Message): Promise<void> => {
+  if (!event.media) {
+    return;
+  }
+
+  if (message.mediaKind !== event.media.kind) {
+    await client.mutation({
+      updateWhatsappMessage: {
+        __args: { id: message.id, data: { mediaKind: event.media.kind } },
+        id: true,
+      },
+    });
+  }
+  if (message.media?.length) {
+    return;
+  }
+
+  const file = await importMessageMedia(event);
+  if (!file) {
+    return;
+  }
+
+  await client.mutation({
+    updateWhatsappMessage: {
+      __args: { id: message.id, data: { media: [file] } },
+      id: true,
+    },
+  });
 };
 
 export const importMessageForPerson = async (client: CoreApiClient, accountId: string, event: BridgeMessageEvent, person: Person): Promise<boolean> => {
@@ -176,7 +211,7 @@ export const importMessageForPerson = async (client: CoreApiClient, accountId: s
   const existing = await findMessageByExternalId(client, event.eventId);
 
   if (!existing) {
-    await client.mutation({
+    const created = await client.mutation({
       createWhatsappMessage: {
         __args: {
           data: {
@@ -187,21 +222,40 @@ export const importMessageForPerson = async (client: CoreApiClient, accountId: s
             text: event.text,
             sentAt: event.sentAt,
             deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
+            ...(event.media ? { mediaKind: event.media.kind } : {}),
           },
         },
         id: true,
       },
     });
+    if (!created.createWhatsappMessage?.id) {
+      throw new Error('Could not create WhatsApp message');
+    }
   }
 
-  if (!conversation.lastMessageAt || event.sentAt >= conversation.lastMessageAt) {
+  if (event.media) {
+    const message = existing ?? await findMessageByExternalId(client, event.eventId);
+    if (!message) {
+      throw new Error('Could not find imported WhatsApp message');
+    }
+    await attachMedia(client, event, message);
+  }
+
+  const updateLastMessage = !conversation.lastMessageAt || event.sentAt >= conversation.lastMessageAt;
+  const updateLastInbound = event.direction !== 'outbound' && (!conversation.lastInboundAt || event.sentAt >= conversation.lastInboundAt);
+
+  if (updateLastMessage || updateLastInbound) {
     await client.mutation({
       updateWhatsappConversation: {
-        __args: { id: conversation.id, data: { lastMessageAt: event.sentAt, lastPreview: event.text.slice(0, 160) } },
+        __args: { id: conversation.id, data: {
+          ...(updateLastMessage ? { lastMessageAt: event.sentAt, lastPreview: event.text.slice(0, 160) } : {}),
+          ...(updateLastInbound ? { lastInboundAt: event.sentAt } : {}),
+        } },
         id: true,
       },
     });
-    conversation.lastMessageAt = event.sentAt;
+    if (updateLastMessage) conversation.lastMessageAt = event.sentAt;
+    if (updateLastInbound) conversation.lastInboundAt = event.sentAt;
   }
 
   return !existing;
@@ -234,6 +288,14 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
     }
 
     conversation = { id, name, chatId, personId: person?.id, accountId };
+  } else if (/^\+?\d+$/.test(conversation.name) && name.trim() && !/^\+?\d+$/.test(name.trim())) {
+    await client.mutation({
+      updateWhatsappConversation: {
+        __args: { id: conversation.id, data: { name: name.trim().slice(0, 120) } },
+        id: true,
+      },
+    });
+    conversation.name = name.trim().slice(0, 120);
   }
 
   if (events.length === 0) {
@@ -265,6 +327,7 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
           text: event.text,
           sentAt: event.sentAt,
           deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
+          ...(event.media ? { mediaKind: event.media.kind } : {}),
           ...(event.senderId ? { senderId: event.senderId } : {}),
           ...(event.senderName ? { senderName: event.senderName } : {}),
         })) },
@@ -277,12 +340,29 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
     }
   }
 
-  const latest = events.reduce((current, event) => event.sentAt > current.sentAt ? event : current);
+  for (const event of events) {
+    if (!event.media) {
+      continue;
+    }
+    const message = await findMessageByExternalId(client, event.eventId);
+    if (!message) {
+      throw new Error('Could not find imported WhatsApp message');
+    }
+    await attachMedia(client, event, message);
+  }
 
-  if (!conversation.lastMessageAt || latest.sentAt >= conversation.lastMessageAt) {
+  const latest = events.reduce((current, event) => event.sentAt > current.sentAt ? event : current);
+  const latestInbound = events.filter((event) => event.direction !== 'outbound').reduce<BridgeMessageEvent | undefined>((current, event) => !current || event.sentAt > current.sentAt ? event : current, undefined);
+  const updateLastMessage = !conversation.lastMessageAt || latest.sentAt >= conversation.lastMessageAt;
+  const updateLastInbound = latestInbound && (!conversation.lastInboundAt || latestInbound.sentAt >= conversation.lastInboundAt);
+
+  if (updateLastMessage || updateLastInbound) {
     await client.mutation({
       updateWhatsappConversation: {
-        __args: { id: conversation.id, data: { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } },
+        __args: { id: conversation.id, data: {
+          ...(updateLastMessage ? { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } : {}),
+          ...(updateLastInbound ? { lastInboundAt: latestInbound.sentAt } : {}),
+        } },
         id: true,
       },
     });
@@ -319,21 +399,21 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
     return { imported: 0, ignored: 0 };
   }
 
-  const client = applicationClient();
-  const accountId = await ensureAccount(client, phoneNumber);
-
   const events = await bridgeJsonRequest<BridgeMessageEvent[]>('/events');
 
   if (events.length === 0) {
     return { imported: 0, ignored: 0 };
   }
 
+  const client = applicationClient();
+  const accountId = await ensureAccount(client, phoneNumber);
   const peopleByPhone = await findPeopleByPhone(client);
 
   let imported = 0;
   let ignored = 0;
 
-  for (const event of events) {
+  const firstMediaIndex = events.findIndex((event) => event.media);
+  for (const event of firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1)) {
     const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(event.chatId);
     if (!/^[a-f\d]{64}$/.test(event.eventId) || (!/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) && !isGroup) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
       throw new Error('Invalid bridge event');

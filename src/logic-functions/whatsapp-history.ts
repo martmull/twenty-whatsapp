@@ -14,7 +14,7 @@ import {
 } from 'src/logic-functions/message-data';
 
 type HistoryRequest = {
-  action?: 'list' | 'import';
+  action?: 'list' | 'import' | 'members';
   rangeDays?: 0 | 30 | 90;
   kind?: 'all' | 'direct' | 'group';
   offset?: number;
@@ -33,6 +33,8 @@ type HistoryCandidate = {
   lastMessageAt?: string;
 };
 
+const isPhoneName = (name: string) => /^\+?\d+$/.test(name.trim());
+
 type HistoryList = {
   items: HistoryCandidate[];
   total: number;
@@ -44,6 +46,14 @@ type HistoryMessages = {
   messages: BridgeMessageEvent[];
   total: number;
   nextOffset?: number;
+};
+
+type GroupMember = {
+  id: string;
+  phoneNumber?: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
 };
 
 const handler = async (event: RoutePayload<HistoryRequest>) => {
@@ -61,6 +71,13 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
 
   if (status.state !== 'connected' || !status.phoneNumber) {
     throw new Error('WhatsApp is disconnected');
+  }
+
+  if (request.action === 'members') {
+    if (!/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(request.chatId ?? '')) {
+      throw new Error('Invalid group ID');
+    }
+    return bridgeJsonRequest<GroupMember[]>('/history/members', { chatId: request.chatId });
   }
 
   const client = applicationClient();
@@ -86,11 +103,14 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
           return { ...item, match: 'group' as const };
         }
         const matches = peopleByPhone.get(item.chatId.split('@')[0]) ?? [];
+        const personName = matches.length === 1 ? [matches[0].name.firstName, matches[0].name.lastName].filter(Boolean).join(' ') : undefined;
+        const renameable = matches.length === 1 && isPhoneName(personName || '') && personName?.replace(/\D/g, '') === item.chatId.split('@')[0];
         return {
           ...item,
-          name: matches.length === 1 ? [matches[0].name.firstName, matches[0].name.lastName].filter(Boolean).join(' ') || item.name : item.name,
+          name: renameable ? item.name : personName || item.name,
           match: matches.length === 1 ? 'matched' as const : matches.length > 1 ? 'ambiguous' as const : 'new' as const,
-          personName: matches.length === 1 ? [matches[0].name.firstName, matches[0].name.lastName].filter(Boolean).join(' ') : undefined,
+          personName,
+          renameable,
         };
       }),
     };
@@ -133,18 +153,22 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
   let person: Person | undefined = matches[0];
   let createdPerson = false;
 
+  if ((request.firstName && (request.firstName.length > 80 || !request.firstName.trim())) || (request.lastName && (request.lastName.length > 80 || !request.lastName.trim()))) {
+    throw new Error('Invalid Person name');
+  }
+
+  const [suggestedFirstName, ...suggestedLastName] = isPhoneName(history.name) ? ['', ''] : history.name.trim().split(/\s+/);
+  const firstName = request.firstName?.trim() || suggestedFirstName;
+  const lastName = request.lastName?.trim() || suggestedLastName.join(' ');
+
   if (!person) {
     if (request.createPerson !== true) {
       throw new Error('This contact is not matched to a Person');
     }
 
-    const name = history.name.trim();
-    const [suggestedFirstName, ...suggestedLastName] = name.split(/\s+/);
-    if ((request.firstName && (request.firstName.length > 80 || !request.firstName.trim())) || (request.lastName && (request.lastName.length > 80 || !request.lastName.trim()))) {
-      throw new Error('Invalid Person name');
+    if (!firstName) {
+      throw new Error('Enter a first name for this contact before importing');
     }
-    const firstName = request.firstName?.trim() || suggestedFirstName || `+${request.chatId.split('@')[0]}`;
-    const lastName = request.lastName?.trim() || suggestedLastName.join(' ');
     const created = await userClient().mutation({
       createPerson: {
         __args: {
@@ -169,6 +193,14 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
 
     person = { id, name: { firstName, lastName } };
     createdPerson = true;
+  } else if (isPhoneName([person.name.firstName, person.name.lastName].filter(Boolean).join(' ')) && firstName) {
+    await userClient().mutation({
+      updatePerson: {
+        __args: { id: person.id, data: { name: { firstName, lastName } } },
+        id: true,
+      },
+    });
+    person = { ...person, name: { firstName, lastName } };
   }
 
   const imported = await importHistoryMessagesForPerson(client, accountId, history.messages, person);

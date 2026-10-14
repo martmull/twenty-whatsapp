@@ -1,8 +1,9 @@
-import { defineApplicationRole, STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS } from 'twenty-sdk/define';
+import { defineApplicationRole, STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS, SystemPermissionFlag } from 'twenty-sdk/define';
 
 import { WHATSAPP_ACCOUNT_OBJECT_ID } from 'src/objects/whatsapp-account';
 import { WHATSAPP_CONVERSATION_OBJECT_ID } from 'src/objects/whatsapp-conversation';
 import { WHATSAPP_MESSAGE_OBJECT_ID } from 'src/objects/whatsapp-message';
+import { WHATSAPP_CONVERSATION_READ_STATE_OBJECT_ID } from 'src/objects/whatsapp-conversation-read-state';
 
 export default defineApplicationRole({
   universalIdentifier: '50589f49-6cc1-414e-83d3-ec54751445ce',
@@ -24,7 +25,7 @@ export default defineApplicationRole({
       canSoftDeleteObjectRecords: false,
       canDestroyObjectRecords: false,
     },
-    ...[WHATSAPP_ACCOUNT_OBJECT_ID, WHATSAPP_CONVERSATION_OBJECT_ID, WHATSAPP_MESSAGE_OBJECT_ID].map((objectUniversalIdentifier) => ({
+    ...[WHATSAPP_ACCOUNT_OBJECT_ID, WHATSAPP_CONVERSATION_OBJECT_ID, WHATSAPP_CONVERSATION_READ_STATE_OBJECT_ID, WHATSAPP_MESSAGE_OBJECT_ID].map((objectUniversalIdentifier) => ({
       objectUniversalIdentifier,
       canReadObjectRecords: true,
       canUpdateObjectRecords: true,
@@ -33,5 +34,5 @@ export default defineApplicationRole({
     })),
   ],
   fieldPermissions: [],
-  permissionFlagUniversalIdentifiers: [],
+  permissionFlagUniversalIdentifiers: [SystemPermissionFlag.UPLOAD_FILE],
 });

@@ -59,6 +59,16 @@ const server = createServer(async (request, response) => {
 
   try {
     const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+    const mediaId = request.method === 'GET' ? /^\/media\/([a-f\d]{64})$/.exec(path)?.[1] : undefined;
+    if (mediaId) {
+      const media = await connection.getMedia(mediaId);
+      response.setHeader('content-type', media.mimeType);
+      response.setHeader('content-length', media.bytes.length);
+      response.setHeader('x-content-type-options', 'nosniff');
+      response.end(media.bytes);
+      return;
+    }
+
     const result =
       request.method === 'GET' && path === '/status'
         ? connection.getStatus()
@@ -100,6 +110,14 @@ const server = createServer(async (request, response) => {
                   }
                   return connection.getHistoryMessages(body.chatId, body.rangeDays, body.offset as number, body.limit as number);
                 })()
+                : request.method === 'POST' && path === '/history/members'
+                  ? await (async () => {
+                    const body = await readBody(request);
+                    if (typeof body.chatId !== 'string' || !/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(body.chatId)) {
+                      throw new Error('Invalid group ID');
+                    }
+                    return connection.getGroupMembers(body.chatId);
+                  })()
             : undefined;
 
     if (result === undefined) {

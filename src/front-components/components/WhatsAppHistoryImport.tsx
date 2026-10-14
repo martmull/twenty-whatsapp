@@ -22,6 +22,7 @@ type HistoryCandidate = {
   lastMessageAt?: string;
   match: 'matched' | 'new' | 'ambiguous' | 'group';
   personName?: string;
+  renameable?: boolean;
 };
 
 type HistoryList = {
@@ -34,6 +35,15 @@ type ImportResult = {
   imported: number;
   nextOffset?: number;
   createdPerson: boolean;
+};
+
+type GroupMember = {
+  id: string;
+  phoneNumber?: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  isMe?: boolean;
 };
 
 const rangeOptions: { value: RangeDays; label: string }[] = [
@@ -52,6 +62,10 @@ export const WhatsAppHistoryImport = () => {
   const [historyReceivedAt, setHistoryReceivedAt] = useState<string>();
   const [selected, setSelected] = useState<string[]>([]);
   const [names, setNames] = useState<Record<string, { firstName: string; lastName: string }>>({});
+  const [membersByChat, setMembersByChat] = useState<Record<string, GroupMember[]>>({});
+  const [openMembersChatId, setOpenMembersChatId] = useState<string>();
+  const [loadingMembersChatId, setLoadingMembersChatId] = useState<string>();
+  const [membersError, setMembersError] = useState('');
   const [acknowledged, setAcknowledged] = useState(false);
   const [workingAction, setWorkingAction] = useState<'review' | 'load-more' | 'import' | null>(null);
   const working = workingAction !== null;
@@ -84,6 +98,7 @@ export const WhatsAppHistoryImport = () => {
     setItems([]);
     setSelected([]);
     setNames({});
+    setOpenMembersChatId(undefined);
     setAcknowledged(false);
     void load(range, 0);
   };
@@ -92,12 +107,38 @@ export const WhatsAppHistoryImport = () => {
     setChatFilter(kind);
     setItems([]);
     setSelected([]);
+    setOpenMembersChatId(undefined);
     setAcknowledged(false);
     void load(rangeDays, 0, 'review', kind);
   };
 
   const toggle = (chatId: string, checked: boolean) => {
     setSelected((previous) => checked ? [...previous, chatId] : previous.filter((id) => id !== chatId));
+  };
+
+  const showMembers = async (chatId: string) => {
+    if (openMembersChatId === chatId) {
+      setOpenMembersChatId(undefined);
+      return;
+    }
+
+    setOpenMembersChatId(chatId);
+    setMembersError('');
+    if (membersByChat[chatId]) {
+      return;
+    }
+
+    setLoadingMembersChatId(chatId);
+    try {
+      const members = await new RestApiClient().post<GroupMember[]>('/s/whatsapp/history', {
+        action: 'members', rangeDays, chatId,
+      });
+      setMembersByChat((previous) => ({ ...previous, [chatId]: members }));
+    } catch {
+      setMembersError(t('Could not load group members. Check the connection and retry.'));
+    } finally {
+      setLoadingMembersChatId(undefined);
+    }
   };
 
   const visibleConversations = items.filter((item) => item.messageCount > 0 && item.match !== 'ambiguous');
@@ -114,6 +155,17 @@ export const WhatsAppHistoryImport = () => {
 
     try {
       const chosen = items.filter((item) => selected.includes(item.chatId));
+      const missingName = chosen.find((item) => {
+        if (item.match !== 'new' && !item.renameable) {
+          return false;
+        }
+        const suggested = /^\+?\d+$/.test(item.name) ? '' : item.name.trim().split(/\s+/)[0];
+        return !(names[item.chatId]?.firstName.trim() || suggested);
+      });
+      if (missingName) {
+        setError(t('Enter a first name for contacts whose name is unavailable before importing.'));
+        return;
+      }
 
       for (const [index, item] of chosen.entries()) {
         setNotice(`${t('Importing')} ${index + 1} / ${chosen.length}…`);
@@ -126,7 +178,7 @@ export const WhatsAppHistoryImport = () => {
             chatId: item.chatId,
             offset,
             createPerson: item.match === 'new',
-            ...(item.match === 'new' ? names[item.chatId] : {}),
+            ...(item.match === 'new' || item.renameable ? names[item.chatId] : {}),
             acknowledged,
           }) as ImportResult;
           imported += result.imported;
@@ -157,10 +209,10 @@ export const WhatsAppHistoryImport = () => {
       <div style={{ display: 'flex', alignItems: 'center', gap: themeCssVariables.spacing[2] }}>
         <IconHistory size={themeCssVariables.icon.size.md} />
         <strong>{t('Import existing history')}</strong>
-        <Tag color="gray" variant="soft">{t('Optional')}</Tag>
+        <Tag color="gray" variant="soft" preventShrink>{t('Optional')}</Tag>
       </div>
       <p style={{ ...styles.muted, margin: 0 }}>
-        {t('Review available direct and group text conversations before sharing them with this workspace. Start with the last 30 days; nothing is imported automatically.')}
+        {t('Review available direct and group conversations before sharing them with this workspace. Text, available images, and videos can be imported. Start with the last 30 days; nothing is imported automatically.')}
       </p>
       {!reviewing && (
         <div>
@@ -217,13 +269,38 @@ export const WhatsAppHistoryImport = () => {
                       <FrontComponentCheckbox checked={selected.includes(item.chatId)} disabled={working || item.match === 'ambiguous'} onChange={(event) => toggle(item.chatId, event.target.checked)} aria-label={`${t('Select')} ${item.name}`} />
                       <span style={{ display: 'grid', gap: themeCssVariables.spacing[1], minWidth: 0, flex: 1 }}>
                         <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</strong>
-                        <span style={styles.muted}>{item.messageCount} {t('text messages in range')}{item.lastMessageAt ? ` · ${new Date(item.lastMessageAt).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}` : ` · ${t('Last message date unavailable')}`}{item.kind === 'direct' ? ` · ${item.chatId.split('@')[0]}` : ''}</span>
+                        <span style={styles.muted}>{item.messageCount} {t('messages in range')}{item.lastMessageAt ? ` · ${new Date(item.lastMessageAt).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}` : ` · ${t('Last message date unavailable')}`}{item.kind === 'direct' ? ` · ${item.chatId.split('@')[0]}` : ''}</span>
                       </span>
-                      <Tag color={item.match === 'matched' ? 'green' : item.match === 'ambiguous' ? 'orange' : 'blue'} variant="soft">
+                      <Tag color={item.match === 'matched' ? 'green' : item.match === 'ambiguous' ? 'orange' : 'blue'} variant="soft" preventShrink>
                         {item.match === 'group' ? t('Group') : item.match === 'matched' ? t('Matched Person') : item.match === 'ambiguous' ? t('Ambiguous match') : t('New Person')}
                       </Tag>
                     </label>
-                    {item.match === 'new' && selected.includes(item.chatId) && (
+                    {item.kind === 'group' && (
+                      <div style={{ paddingLeft: themeCssVariables.spacing[4] }}>
+                        <Button type="button" variant="outline" size="sm" disabled={working} loading={loadingMembersChatId === item.chatId} onClick={() => void showMembers(item.chatId)}>
+                          {openMembersChatId === item.chatId ? t('Hide members') : t('Show members')}
+                        </Button>
+                      </div>
+                    )}
+                    {item.kind === 'group' && openMembersChatId === item.chatId && (
+                      <div style={{ ...styles.card, display: 'grid', gap: themeCssVariables.spacing[2], marginLeft: themeCssVariables.spacing[4], padding: themeCssVariables.spacing[3] }}>
+                        <strong>{t('Current group members')} {membersByChat[item.chatId] ? `(${membersByChat[item.chatId].length})` : ''}</strong>
+                        <span style={styles.muted}>{t('WhatsApp provides display names, not separate first and last names. The suggestions below split the available name and may need correction.')}</span>
+                        {membersError && <span role="alert" style={{ color: themeCssVariables.color.red }}>{membersError}</span>}
+                        {membersByChat[item.chatId] && (
+                          <div style={{ display: 'grid', gap: themeCssVariables.spacing[2], maxHeight: 240, overflowY: 'auto' }}>
+                            {membersByChat[item.chatId].length === 0 && <span style={styles.muted}>{t('No members available.')}</span>}
+                            {membersByChat[item.chatId].map((member) => (
+                              <div key={member.id} style={{ display: 'grid', gap: themeCssVariables.spacing[1] }}>
+                                <strong>{member.isMe ? `${t('You')}${member.displayName ? ` · ${member.displayName}` : ''}` : member.displayName || member.phoneNumber || t('Name unavailable')}</strong>
+                                <span style={styles.muted}>{member.displayName ? `${t('First name')}: ${member.firstName || '—'} · ${t('Last name')}: ${member.lastName || '—'}` : member.phoneNumber || member.id}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {(item.match === 'new' || item.renameable) && selected.includes(item.chatId) && (
                       <div style={{ display: 'flex', gap: themeCssVariables.spacing[2], paddingLeft: themeCssVariables.spacing[4] }}>
                         <input aria-label={`${t('First name')} · ${item.chatId.split('@')[0]}`} placeholder={t('First name')} value={name.firstName} maxLength={80} disabled={working} onChange={(event) => setNames((previous) => ({ ...previous, [item.chatId]: { ...name, firstName: event.target.value } }))} style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, minWidth: 0, flex: 1, padding: themeCssVariables.spacing[2] }} />
                         <input aria-label={`${t('Last name')} · ${item.chatId.split('@')[0]}`} placeholder={t('Last name')} value={name.lastName} maxLength={80} disabled={working} onChange={(event) => setNames((previous) => ({ ...previous, [item.chatId]: { ...name, lastName: event.target.value } }))} style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, minWidth: 0, flex: 1, padding: themeCssVariables.spacing[2] }} />
@@ -237,11 +314,11 @@ export const WhatsAppHistoryImport = () => {
               )}
             </div>
           )}
-          <p style={{ ...styles.muted, margin: 0 }}>{t('Select all covers loaded conversations with messages only. Chats without messages must be selected individually. New People are created only for selected unmatched direct contacts. Group participants are not created as People. Media and calls are excluded.')}</p>
+          <p style={{ ...styles.muted, margin: 0 }}>{t('Select all covers loaded conversations with messages only. Chats without messages must be selected individually. New People are created only for selected unmatched direct contacts. Group participants are not created as People. Available images and videos up to 64 MB are imported; older media may be unavailable. Calls and other attachments are excluded.')}</p>
           {selected.length > 0 && (
             <label style={{ display: 'flex', alignItems: 'flex-start', gap: themeCssVariables.spacing[2] }}>
               <FrontComponentCheckbox checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} aria-label={t('Acknowledge workspace sharing')} />
-              <span style={styles.muted}>{t('I understand selected direct contacts, group conversations, participants, and messages will be visible to workspace members with access to these records.')}</span>
+              <span style={styles.muted}>{t('I understand selected direct contacts, group conversations, participants, messages, images, and videos will be visible to workspace members with access to these records.')}</span>
             </label>
           )}
           <div style={{ display: 'flex', gap: themeCssVariables.spacing[2], alignItems: 'center' }}>

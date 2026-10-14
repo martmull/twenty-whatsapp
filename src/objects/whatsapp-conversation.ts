@@ -40,6 +40,7 @@ export default defineObject({
     },
     { universalIdentifier: CONVERSATION_ACCOUNT_ID_FIELD_ID, type: FieldType.TEXT, name: 'accountId', label: 'Account ID', icon: 'IconBrandWhatsapp' },
     { universalIdentifier: '4b32c71f-8c24-4429-8b16-05f6cd65ada6', type: FieldType.DATE_TIME, name: 'lastMessageAt', label: 'Last message at', icon: 'IconCalendar' },
+    { universalIdentifier: 'be4b5c2e-817a-47e8-ace0-55459b4b3cbc', type: FieldType.DATE_TIME, name: 'lastInboundAt', label: 'Last incoming message at', icon: 'IconCalendar', isUIEditable: false },
     { universalIdentifier: '8161acfd-6177-4843-8e03-462ccf3b558b', type: FieldType.TEXT, name: 'lastPreview', label: 'Last preview', icon: 'IconMessage' },
   ],
 });
