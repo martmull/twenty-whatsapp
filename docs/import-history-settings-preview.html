@@ -77,7 +77,15 @@
       .close { border: 0; background: #f5f5f5; border-radius: 5px; width: 30px; height: 30px; font-size: 19px; line-height: 1; color: #666; }
       .drawer-body { padding: 24px 28px; overflow: auto; flex: 1; }
       .demo { background: #eff3ff; color: #4c5d8c; border-radius: 5px; padding: 10px 13px; font-size: 12px; margin-bottom: 20px; }
+      .history-filter { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px; border: 1px solid #e9e9e9; border-radius: 7px; }
+      .history-filter strong { display: block; font-size: 13px; }
+      .history-filter span { display: block; color: #888; font-size: 12px; margin-top: 4px; }
+      .history-filter select { min-width: 160px; border: 1px solid #dedede; border-radius: 5px; background: #fff; padding: 8px 10px; color: #444; font-size: 13px; }
       .group-title { font-size: 12px; font-weight: 700; letter-spacing: .025em; text-transform: uppercase; color: #999; margin: 22px 0 11px; }
+      .selection-bar { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin: 12px 0; color: #777; font-size: 12px; }
+      .selection-bar label { display: flex; align-items: center; gap: 8px; color: #555; cursor: pointer; }
+      .selection-bar input { accent-color: #496cf5; width: 16px; height: 16px; }
+      .load-more { display: flex; justify-content: center; padding: 5px 0 7px; }
       .option { display: flex; align-items: flex-start; gap: 13px; border: 1px solid #e9e9e9; border-radius: 7px; padding: 15px; margin-bottom: 9px; cursor: pointer; }
       .option:hover { background: #fbfbfb; }
       .option input { margin-top: 3px; accent-color: #496cf5; width: 16px; height: 16px; }
@@ -94,7 +102,7 @@
       .foot-actions { display: flex; gap: 9px; }
       .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 20; background: #303745; color: #fff; border-radius: 6px; padding: 11px 16px; font-size: 12px; box-shadow: 0 7px 24px #0003; }
       @media (max-width: 900px) { .shell { grid-template-columns: 210px minmax(0,1fr); } .topbar { padding: 0 22px; } .page { padding: 38px 24px; } .app-title { position: static; transform: none; margin-left: auto; } }
-      @media (max-width: 640px) { .shell { display: block; } .sidebar { display: none; } .topbar { height: 54px; padding: 0 16px; } .tabs { height: 49px; } .page { padding: 28px 16px 70px; } .feature-list { grid-template-columns: 1fr; } .drawer-header, .drawer-body, .drawer-foot { padding-left: 18px; padding-right: 18px; } .drawer-foot { align-items: stretch; flex-direction: column; } .foot-actions { justify-content: flex-end; } }
+      @media (max-width: 640px) { .shell { display: block; } .sidebar { display: none; } .topbar { height: 54px; padding: 0 16px; } .tabs { height: 49px; } .page { padding: 28px 16px 70px; } .feature-list { grid-template-columns: 1fr; } .history-filter { align-items: stretch; flex-direction: column; } .drawer-header, .drawer-body, .drawer-foot { padding-left: 18px; padding-right: 18px; } .drawer-foot { align-items: stretch; flex-direction: column; } .foot-actions { justify-content: flex-end; } }
     </style>
   </head>
   <body>
@@ -141,13 +149,13 @@
             </section>
             <section class="card" aria-labelledby="history-heading">
               <div class="section-title"><span class="history-icon" aria-hidden="true">↺</span><div><strong id="history-heading">Import existing history</strong><small>Optional · available after connecting</small></div></div>
-              <p class="history-intro">Bring earlier WhatsApp conversations and contacts into Twenty. Review what is available and choose exactly what to share with this workspace before anything is imported.</p>
+              <p class="history-intro">Bring earlier WhatsApp conversations and contacts into Twenty. Start with recent chats, then review exactly what to share with this workspace before anything is imported.</p>
               <div class="feature-list">
                 <div class="feature"><strong>Conversations</strong><span>Import selected one-to-one text messages into the matching Person record.</span></div>
                 <div class="feature"><strong>Contacts</strong><span>Match existing People by phone number. Create a Person only for a contact you select.</span></div>
               </div>
               <div class="callout"><b>History availability varies.</b> A linked device may receive only part of the earlier chat history. Groups, calls, media, and unselected chats are outside this proposed import.</div>
-              <div class="history-actions"><button class="button primary" type="button" id="open-review">Review available history</button><span>Nothing is imported automatically.</span></div>
+              <div class="history-actions"><button class="button primary" type="button" id="open-review">Review available history</button><span>Suggested starting point: last 30 days. Nothing is imported automatically.</span></div>
             </section>
           </div>
         </div>
@@ -159,12 +167,19 @@
         <div class="drawer-header"><div><div class="eyebrow">WhatsApp / Import history</div><h2 id="review-title">Review what to import</h2><p>Select conversations and contacts before adding them to your shared Twenty workspace.</p></div><button class="close" id="close-review" type="button" aria-label="Close review">×</button></div>
         <div class="drawer-body">
           <div class="demo">Illustrative data for this design preview. These are not your WhatsApp contacts or conversations.</div>
+          <div class="history-filter"><div><strong>How far back?</strong><span>Only messages in this period will be imported. Widen it if needed.</span></div><select id="date-range" aria-label="Conversation date range"><option value="30">Last 30 days · suggested</option><option value="90">Last 90 days</option><option value="all">All available history</option></select></div>
           <div class="group-title">Conversations</div>
-          <label class="option"><input class="import-choice" type="checkbox" data-messages="24" data-person="0" /><span class="option-body"><span class="option-title">Alex Martin <span class="tag matched">Matched Person</span></span><span class="option-copy">24 text messages available · last message 12 Oct</span></span></label>
-          <label class="option"><input class="import-choice" type="checkbox" data-messages="11" data-person="1" /><span class="option-body"><span class="option-title">Camille Dupont <span class="tag">New Person</span></span><span class="option-copy">11 text messages available · a Person will be created if selected</span></span></label>
+          <div class="selection-bar"><label><input id="select-all-shown" type="checkbox" /><span id="select-all-label">Select all shown conversations</span></label><span id="pagination-summary" aria-live="polite"></span></div>
+          <label class="option conversation-option" data-days-ago="2" data-messages-30="24" data-messages-90="31" data-messages-all="52"><input class="import-choice" type="checkbox" data-messages="24" data-person="0" /><span class="option-body"><span class="option-title">Alex Martin <span class="tag matched">Matched Person</span></span><span class="option-copy">24 text messages in range · last message 2 days ago</span></span></label>
+          <label class="option conversation-option" data-days-ago="6" data-messages-30="11" data-messages-90="15" data-messages-all="20"><input class="import-choice" type="checkbox" data-messages="11" data-person="1" /><span class="option-body"><span class="option-title">Camille Dupont <span class="tag">New Person</span></span><span class="option-copy">11 text messages in range · last message 6 days ago</span></span></label>
+          <label class="option conversation-option" data-days-ago="15" data-messages-30="18" data-messages-90="22" data-messages-all="40"><input class="import-choice" type="checkbox" data-messages="18" data-person="0" /><span class="option-body"><span class="option-title">Noah Laurent <span class="tag matched">Matched Person</span></span><span class="option-copy">18 text messages in range · last message 15 days ago</span></span></label>
+          <label class="option conversation-option" data-days-ago="24" data-messages-30="5" data-messages-90="8" data-messages-all="14"><input class="import-choice" type="checkbox" data-messages="5" data-person="1" /><span class="option-body"><span class="option-title">Hugo Petit <span class="tag">New Person</span></span><span class="option-copy">5 text messages in range · last message 24 days ago</span></span></label>
+          <label class="option conversation-option" data-days-ago="57" data-messages-30="0" data-messages-90="8" data-messages-all="19"><input class="import-choice" type="checkbox" data-messages="8" data-person="0" /><span class="option-body"><span class="option-title">Sophie Roy <span class="tag matched">Matched Person</span></span><span class="option-copy">8 text messages in range · last message 57 days ago</span></span></label>
+          <label class="option conversation-option" data-days-ago="116" data-messages-30="0" data-messages-90="0" data-messages-all="6"><input class="import-choice" type="checkbox" data-messages="6" data-person="1" /><span class="option-body"><span class="option-title">Julien Moreau <span class="tag">New Person</span></span><span class="option-copy">6 text messages in range · last message 116 days ago</span></span></label>
+          <div class="load-more"><button class="button" type="button" id="load-more">Load more conversations</button></div>
           <div class="group-title">Contacts without conversations</div>
           <label class="option"><input class="import-choice" type="checkbox" data-messages="0" data-person="1" /><span class="option-body"><span class="option-title">Léa Bernard <span class="tag">New Person</span></span><span class="option-copy">Contact details only · no messages available</span></span></label>
-          <p class="small-help">Existing People are matched by phone number. New People are created only for selected contacts. Duplicate messages are skipped on later imports.</p>
+          <p class="small-help">Select all applies only to conversations currently shown; contacts without conversations are selected separately. Loading more does not select new rows. Existing People are matched by phone number; new People are created only for selected contacts.</p>
           <label class="confirmation"><input id="share-confirmation" type="checkbox" /><span>I understand selected contacts and messages will be visible to workspace members who have access to these records.</span></label>
         </div>
         <div class="drawer-foot"><span class="summary" id="selection-summary" aria-live="polite">No items selected</span><div class="foot-actions"><button class="button" type="button" id="cancel-review">Cancel</button><button class="button primary" type="button" id="import-selection" disabled>Import selected</button></div></div>
@@ -179,13 +194,40 @@
       const importButton = document.getElementById('import-selection');
       const toast = document.getElementById('toast');
       const reviewButton = document.getElementById('open-review');
+      const conversationRows = [...document.querySelectorAll('.conversation-option')];
+      const dateRange = document.getElementById('date-range');
+      const loadMoreButton = document.getElementById('load-more');
+      const paginationSummary = document.getElementById('pagination-summary');
+      const selectAllShown = document.getElementById('select-all-shown');
+      const selectAllLabel = document.getElementById('select-all-label');
+      const PAGE_SIZE = 2;
+      let shownCount = PAGE_SIZE;
       let toastTimer;
       const updateSelection = () => {
         const selected = choices.filter((choice) => choice.checked);
+        const visibleConversations = conversationRows.filter((row) => !row.hidden).map((row) => row.querySelector('input'));
+        const visibleSelected = visibleConversations.filter((choice) => choice.checked);
         const messages = selected.reduce((count, choice) => count + Number(choice.dataset.messages), 0);
         const newPeople = selected.reduce((count, choice) => count + Number(choice.dataset.person), 0);
         summary.textContent = selected.length ? `${selected.length} selected · ${messages} messages · ${newPeople} new ${newPeople === 1 ? 'Person' : 'People'}` : 'No items selected';
+        selectAllLabel.textContent = `Select all ${visibleConversations.length} shown conversations`;
+        selectAllShown.checked = visibleConversations.length > 0 && visibleSelected.length === visibleConversations.length;
+        selectAllShown.indeterminate = visibleSelected.length > 0 && visibleSelected.length < visibleConversations.length;
         importButton.disabled = selected.length === 0 || !confirmation.checked;
+      };
+      const updateVisibleConversations = () => {
+        const days = dateRange.value === 'all' ? Infinity : Number(dateRange.value);
+        const inRange = conversationRows.filter((row) => Number(row.dataset.daysAgo) <= days);
+        conversationRows.forEach((row) => {
+          const messageCount = row.dataset[dateRange.value === 'all' ? 'messagesAll' : `messages${dateRange.value}`];
+          row.querySelector('input').dataset.messages = messageCount;
+          row.querySelector('.option-copy').textContent = `${messageCount} text messages in range · last message ${row.dataset.daysAgo} days ago`;
+          row.hidden = !inRange.includes(row) || inRange.indexOf(row) >= shownCount;
+          if (row.hidden) row.querySelector('input').checked = false;
+        });
+        paginationSummary.textContent = `Showing ${Math.min(shownCount, inRange.length)} of ${inRange.length} conversations`;
+        loadMoreButton.hidden = shownCount >= inRange.length;
+        updateSelection();
       };
       const closeReview = () => { overlay.hidden = true; reviewButton.focus(); };
       const showToast = (message) => { clearTimeout(toastTimer); toast.textContent = message; toast.hidden = false; toastTimer = setTimeout(() => { toast.hidden = true; }, 4500); };
@@ -196,9 +238,16 @@
       document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !overlay.hidden) closeReview(); });
       choices.forEach((choice) => choice.addEventListener('change', updateSelection));
       confirmation.addEventListener('change', updateSelection);
+      dateRange.addEventListener('change', () => { shownCount = PAGE_SIZE; updateVisibleConversations(); });
+      loadMoreButton.addEventListener('click', () => { shownCount += PAGE_SIZE; updateVisibleConversations(); });
+      selectAllShown.addEventListener('change', () => {
+        conversationRows.filter((row) => !row.hidden).forEach((row) => { row.querySelector('input').checked = selectAllShown.checked; });
+        updateSelection();
+      });
       importButton.addEventListener('click', () => { closeReview(); showToast('Design preview only. No contacts or messages were imported.'); });
       document.getElementById('check-connection').addEventListener('click', () => showToast('Design preview: connection status is simulated.'));
       document.getElementById('disconnect').addEventListener('click', () => showToast('Design preview: the device was not disconnected.'));
+      updateVisibleConversations();
     </script>
   </body>
 </html>
