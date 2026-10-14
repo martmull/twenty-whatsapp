@@ -10,6 +10,8 @@ The bridge now queues new one-to-one incoming and phone-sent text messages in en
 
 This is a local development implementation synced to `localhost:2020`. New incoming and phone-sent texts have been verified in the Twenty inbox, and a message sent from Twenty was received on the contact's phone. The first version matches primary Person phone numbers, including LID messages when WhatsApp shares the sender's phone number or a contact mapping is learned from a new incoming message. It does not import history, group chats, media, unmatched senders, or LID messages without a phone mapping. The inbox currently loads the 50 most recent conversations and 200 most recent messages in a thread.
 
+The [history import settings preview](docs/import-history-settings-preview.html) shows a proposed opt-in review flow beneath the connected-device card. It uses sample contacts and does not import data.
+
 ![Current WhatsApp inbox inside Twenty](docs/current-inbox.png)
 
 This is a single-workspace local development slice. Do not deploy the bridge as a public service or connect a production number. WhatsApp may restrict or disconnect unofficial clients.
@@ -40,7 +42,7 @@ For a transport check that does not link a phone, run node bridge/scripts/check-
 
 - src/: Twenty objects, Person relation, settings and inbox front components, Person widget, and authenticated message routes.
 - bridge/: persistent Baileys process with encrypted auth, event queue, and send receipts.
-- docs/: implementation design, interactive design preview, and screenshots from the earlier in-product preview.
+- docs/: implementation design, interactive design previews, and screenshots from the earlier in-product preview.
 - scripts/configure-local.mjs: local credential and application-variable setup.
 
 ## Remaining before production use

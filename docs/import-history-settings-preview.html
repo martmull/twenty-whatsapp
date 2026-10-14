@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WhatsApp history import · Twenty settings preview</title>
+    <style>
+      :root { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #333; background: #fff; font-synthesis: none; }
+      * { box-sizing: border-box; }
+      body { margin: 0; }
+      button, input { font: inherit; }
+      button { cursor: pointer; }
+      button:focus-visible, input:focus-visible { outline: 2px solid #496cf5; outline-offset: 2px; }
+      [hidden] { display: none !important; }
+      .shell { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: 100vh; }
+      .sidebar { background: #fafafa; border-right: 1px solid #e9e9e9; display: flex; flex-direction: column; }
+      .workspace { height: 66px; border-bottom: 1px solid #ececec; padding: 0 17px; display: flex; align-items: center; gap: 11px; font-size: 16px; font-weight: 600; }
+      .workspace .avatar { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 4px; background: #dfe8ff; color: #314fba; font-size: 13px; }
+      .workspace .chevron { color: #777; font-size: 13px; font-weight: 400; }
+      .workspace .spacer { flex: 1; }
+      .icon { width: 17px; height: 17px; display: inline-grid; place-items: center; flex: none; font-size: 16px; line-height: 1; color: #666; }
+      .sidebar-scroll { padding: 10px 12px 22px; }
+      .quick { height: 32px; display: flex; align-items: center; gap: 13px; padding: 0 9px; border-bottom: 1px solid #ededed; margin-bottom: 13px; font-size: 14px; font-weight: 600; }
+      .quick .selected { background: #f0f0f0; padding: 7px 9px; border-radius: 5px; }
+      .group { color: #aaa; font-size: 12px; font-weight: 600; margin: 19px 6px 8px; }
+      .nav-item { min-height: 36px; border-radius: 5px; display: flex; align-items: center; gap: 10px; padding: 0 10px; color: #555; font-size: 14px; }
+      .nav-item.active { background: #ececec; color: #303030; font-weight: 600; }
+      .nav-item.indent { padding-left: 30px; }
+      .sidebar-foot { margin-top: auto; padding: 13px 20px; color: #777; font-size: 12px; }
+      .main { min-width: 0; }
+      .topbar { height: 66px; border-bottom: 1px solid #ededed; display: flex; align-items: center; padding: 0 39px; gap: 12px; font-size: 14px; }
+      .breadcrumb { color: #888; }
+      .breadcrumb strong { color: #444; font-weight: 500; }
+      .app-title { position: absolute; left: 61%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; font-weight: 600; }
+      .app-icon { width: 20px; height: 20px; background: #f4dfe8; border-radius: 3px; color: #a5315e; display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+      .tabs { height: 57px; border-bottom: 1px solid #eee; display: flex; align-items: stretch; justify-content: center; gap: 24px; }
+      .tab { border: 0; background: transparent; color: #777; padding: 0 2px; font-size: 14px; }
+      .tab.active { border-bottom: 2px solid #333; color: #333; }
+      .page { width: min(100%, 1050px); margin: 0 auto; padding: 57px 42px 80px; }
+      .page > h1 { margin: 0; font-size: 23px; letter-spacing: -.035em; font-weight: 650; }
+      .page > p { margin: 11px 0 34px; color: #777; font-size: 14px; }
+      .stack { width: min(100%, 840px); display: grid; gap: 20px; }
+      .card { border: 1px solid #e7e7e7; border-radius: 9px; padding: 23px; background: #fff; }
+      .card-head { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+      .card-head strong { font-size: 16px; }
+      .status { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border: 1px solid #e8e8e8; border-radius: 5px; color: #21a262; font-size: 13px; }
+      .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+      .button { background: #fff; border: 1px solid #e5e5e5; border-radius: 5px; color: #444; min-height: 37px; padding: 8px 14px; font-size: 13px; font-weight: 500; }
+      .button:hover { background: #f8f8f8; }
+      .button.primary { background: #496cf5; border-color: #496cf5; color: white; }
+      .button.primary:hover { background: #3658dd; }
+      .button:disabled { background: #b4c3fa; border-color: #b4c3fa; cursor: not-allowed; color: white; }
+      .connection-controls { margin: 20px 0 25px; }
+      .connection-detail { display: flex; align-items: center; justify-content: space-between; padding: 17px 0; border-top: 1px solid #eee; font-size: 14px; }
+      .connection-detail strong { font-weight: 600; }
+      .connected-note { color: #777; font-size: 13px; line-height: 1.5; max-width: 670px; margin: 0 0 22px; }
+      .section-title { display: flex; gap: 12px; align-items: center; }
+      .section-title .history-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; background: #f1f4ff; color: #506dd7; font-size: 18px; }
+      .section-title strong { font-size: 16px; }
+      .section-title small { display: block; color: #969696; margin-top: 3px; font-size: 12px; }
+      .history-intro { color: #666; font-size: 13px; line-height: 1.55; margin: 19px 0; }
+      .feature-list { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .feature { border: 1px solid #ebebeb; border-radius: 6px; padding: 14px 15px; }
+      .feature strong { display: block; margin-bottom: 5px; font-size: 13px; }
+      .feature span { display: block; color: #818181; font-size: 12px; line-height: 1.45; }
+      .callout { background: #f7f8fa; border-radius: 6px; color: #666; font-size: 12px; line-height: 1.5; padding: 12px 15px; margin: 18px 0; }
+      .callout b { color: #444; }
+      .history-actions { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+      .history-actions span { font-size: 12px; color: #999; }
+      .preview-ribbon { position: fixed; right: 17px; bottom: 17px; z-index: 5; background: #262d3d; color: #fff; border-radius: 6px; padding: 9px 12px; font-size: 11px; box-shadow: 0 4px 16px #0002; }
+      .overlay { position: fixed; inset: 0; z-index: 10; background: #17202d7d; display: flex; justify-content: flex-end; }
+      .drawer { width: min(100%, 750px); height: 100%; background: #fff; display: flex; flex-direction: column; box-shadow: -8px 0 35px #0002; }
+      .drawer-header { padding: 22px 28px 18px; border-bottom: 1px solid #ececec; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+      .eyebrow { color: #888; font-size: 12px; margin-bottom: 7px; }
+      .drawer-header h2 { margin: 0; font-size: 21px; letter-spacing: -.025em; }
+      .drawer-header p { margin: 9px 0 0; color: #777; font-size: 13px; line-height: 1.45; }
+      .close { border: 0; background: #f5f5f5; border-radius: 5px; width: 30px; height: 30px; font-size: 19px; line-height: 1; color: #666; }
+      .drawer-body { padding: 24px 28px; overflow: auto; flex: 1; }
+      .demo { background: #eff3ff; color: #4c5d8c; border-radius: 5px; padding: 10px 13px; font-size: 12px; margin-bottom: 20px; }
+      .group-title { font-size: 12px; font-weight: 700; letter-spacing: .025em; text-transform: uppercase; color: #999; margin: 22px 0 11px; }
+      .option { display: flex; align-items: flex-start; gap: 13px; border: 1px solid #e9e9e9; border-radius: 7px; padding: 15px; margin-bottom: 9px; cursor: pointer; }
+      .option:hover { background: #fbfbfb; }
+      .option input { margin-top: 3px; accent-color: #496cf5; width: 16px; height: 16px; }
+      .option-body { flex: 1; min-width: 0; }
+      .option-title { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: 13px; font-weight: 600; }
+      .option-copy { color: #888; font-size: 12px; margin-top: 6px; }
+      .tag { border-radius: 4px; padding: 3px 6px; background: #f0f0f0; color: #777; font-size: 11px; font-weight: 500; }
+      .tag.matched { background: #e8f7ee; color: #1f9257; }
+      .small-help { color: #888; font-size: 12px; line-height: 1.5; margin: 10px 0; }
+      .confirmation { display: flex; align-items: flex-start; gap: 10px; margin-top: 21px; font-size: 12px; line-height: 1.5; color: #555; }
+      .confirmation input { margin-top: 1px; accent-color: #496cf5; width: 16px; height: 16px; }
+      .drawer-foot { border-top: 1px solid #ececec; padding: 17px 28px; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+      .summary { color: #666; font-size: 13px; }
+      .foot-actions { display: flex; gap: 9px; }
+      .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 20; background: #303745; color: #fff; border-radius: 6px; padding: 11px 16px; font-size: 12px; box-shadow: 0 7px 24px #0003; }
+      @media (max-width: 900px) { .shell { grid-template-columns: 210px minmax(0,1fr); } .topbar { padding: 0 22px; } .page { padding: 38px 24px; } .app-title { position: static; transform: none; margin-left: auto; } }
+      @media (max-width: 640px) { .shell { display: block; } .sidebar { display: none; } .topbar { height: 54px; padding: 0 16px; } .tabs { height: 49px; } .page { padding: 28px 16px 70px; } .feature-list { grid-template-columns: 1fr; } .drawer-header, .drawer-body, .drawer-foot { padding-left: 18px; padding-right: 18px; } .drawer-foot { align-items: stretch; flex-direction: column; } .foot-actions { justify-content: flex-end; } }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="Twenty settings navigation">
+        <div class="workspace"><span class="avatar">A</span> Apple <span class="chevron">⌄</span><span class="spacer"></span><span class="icon">⌕</span><span class="icon">◧</span></div>
+        <div class="sidebar-scroll">
+          <div class="quick"><span class="icon">⌂</span><span class="icon">◯</span><span class="selected">⚙ Settings</span></div>
+          <div class="group">User</div>
+          <div class="nav-item"><span class="icon">◎</span>Profile</div>
+          <div class="nav-item"><span class="icon">◫</span>Experience</div>
+          <div class="nav-item"><span class="icon">＠</span>Accounts</div>
+          <div class="nav-item indent"><span class="icon">✉</span>Emails</div>
+          <div class="nav-item indent"><span class="icon">▣</span>Calendars</div>
+          <div class="group">Workspace</div>
+          <div class="nav-item"><span class="icon">⬡</span>General</div>
+          <div class="nav-item"><span class="icon">⌘</span>Data model</div>
+          <div class="nav-item"><span class="icon">▣</span>Layout</div>
+          <div class="nav-item"><span class="icon">♙</span>Members</div>
+          <div class="nav-item"><span class="icon">♧</span>MCP &amp; APIs</div>
+          <div class="nav-item active"><span class="icon">▦</span>Apps</div>
+          <div class="nav-item"><span class="icon">✧</span>AI</div>
+          <div class="nav-item"><span class="icon">◯</span>Communication</div>
+          <div class="group">Other</div>
+          <div class="nav-item"><span class="icon">▤</span>Admin Panel</div>
+          <div class="nav-item"><span class="icon">♙</span>Community</div>
+          <div class="nav-item"><span class="icon">ⓘ</span>Documentation</div>
+        </div>
+        <div class="sidebar-foot">Twenty design preview</div>
+      </aside>
+      <main class="main">
+        <header class="topbar"><span class="breadcrumb">Workspace / Apps / <strong>WhatsApp</strong></span><span class="app-title"><span class="app-icon">W</span> WhatsApp</span></header>
+        <nav class="tabs" aria-label="Application settings"><button class="tab" type="button">⚙ General</button><button class="tab active" type="button">♧ WhatsApp</button></nav>
+        <div class="page">
+          <h1>WhatsApp connection</h1>
+          <p>Link a phone by scanning a QR code in WhatsApp → Linked devices.</p>
+          <div class="stack">
+            <section class="card" aria-labelledby="connection-heading">
+              <div class="card-head"><strong id="connection-heading">Linked device</strong><span class="status">Connected</span></div>
+              <div class="connection-controls"><button class="button" type="button" id="check-connection">Check connection</button></div>
+              <div class="connection-detail"><span>Phone number</span><strong>+33 •• •• •• 42</strong></div>
+              <p class="connected-note">New one-to-one text messages from matched People appear in the shared inbox and on Person records. Other chats are ignored.</p>
+              <button class="button" type="button" id="disconnect">Disconnect and remove session</button>
+            </section>
+            <section class="card" aria-labelledby="history-heading">
+              <div class="section-title"><span class="history-icon" aria-hidden="true">↺</span><div><strong id="history-heading">Import existing history</strong><small>Optional · available after connecting</small></div></div>
+              <p class="history-intro">Bring earlier WhatsApp conversations and contacts into Twenty. Review what is available and choose exactly what to share with this workspace before anything is imported.</p>
+              <div class="feature-list">
+                <div class="feature"><strong>Conversations</strong><span>Import selected one-to-one text messages into the matching Person record.</span></div>
+                <div class="feature"><strong>Contacts</strong><span>Match existing People by phone number. Create a Person only for a contact you select.</span></div>
+              </div>
+              <div class="callout"><b>History availability varies.</b> A linked device may receive only part of the earlier chat history. Groups, calls, media, and unselected chats are outside this proposed import.</div>
+              <div class="history-actions"><button class="button primary" type="button" id="open-review">Review available history</button><span>Nothing is imported automatically.</span></div>
+            </section>
+          </div>
+        </div>
+      </main>
+    </div>
+    <div class="preview-ribbon">Design preview · no connection or import actions</div>
+    <div class="overlay" id="review-overlay" hidden>
+      <div class="drawer" role="dialog" aria-modal="true" aria-labelledby="review-title">
+        <div class="drawer-header"><div><div class="eyebrow">WhatsApp / Import history</div><h2 id="review-title">Review what to import</h2><p>Select conversations and contacts before adding them to your shared Twenty workspace.</p></div><button class="close" id="close-review" type="button" aria-label="Close review">×</button></div>
+        <div class="drawer-body">
+          <div class="demo">Illustrative data for this design preview. These are not your WhatsApp contacts or conversations.</div>
+          <div class="group-title">Conversations</div>
+          <label class="option"><input class="import-choice" type="checkbox" data-messages="24" data-person="0" /><span class="option-body"><span class="option-title">Alex Martin <span class="tag matched">Matched Person</span></span><span class="option-copy">24 text messages available · last message 12 Oct</span></span></label>
+          <label class="option"><input class="import-choice" type="checkbox" data-messages="11" data-person="1" /><span class="option-body"><span class="option-title">Camille Dupont <span class="tag">New Person</span></span><span class="option-copy">11 text messages available · a Person will be created if selected</span></span></label>
+          <div class="group-title">Contacts without conversations</div>
+          <label class="option"><input class="import-choice" type="checkbox" data-messages="0" data-person="1" /><span class="option-body"><span class="option-title">Léa Bernard <span class="tag">New Person</span></span><span class="option-copy">Contact details only · no messages available</span></span></label>
+          <p class="small-help">Existing People are matched by phone number. New People are created only for selected contacts. Duplicate messages are skipped on later imports.</p>
+          <label class="confirmation"><input id="share-confirmation" type="checkbox" /><span>I understand selected contacts and messages will be visible to workspace members who have access to these records.</span></label>
+        </div>
+        <div class="drawer-foot"><span class="summary" id="selection-summary" aria-live="polite">No items selected</span><div class="foot-actions"><button class="button" type="button" id="cancel-review">Cancel</button><button class="button primary" type="button" id="import-selection" disabled>Import selected</button></div></div>
+      </div>
+    </div>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <script>
+      const overlay = document.getElementById('review-overlay');
+      const choices = [...document.querySelectorAll('.import-choice')];
+      const confirmation = document.getElementById('share-confirmation');
+      const summary = document.getElementById('selection-summary');
+      const importButton = document.getElementById('import-selection');
+      const toast = document.getElementById('toast');
+      const reviewButton = document.getElementById('open-review');
+      let toastTimer;
+      const updateSelection = () => {
+        const selected = choices.filter((choice) => choice.checked);
+        const messages = selected.reduce((count, choice) => count + Number(choice.dataset.messages), 0);
+        const newPeople = selected.reduce((count, choice) => count + Number(choice.dataset.person), 0);
+        summary.textContent = selected.length ? `${selected.length} selected · ${messages} messages · ${newPeople} new ${newPeople === 1 ? 'Person' : 'People'}` : 'No items selected';
+        importButton.disabled = selected.length === 0 || !confirmation.checked;
+      };
+      const closeReview = () => { overlay.hidden = true; reviewButton.focus(); };
+      const showToast = (message) => { clearTimeout(toastTimer); toast.textContent = message; toast.hidden = false; toastTimer = setTimeout(() => { toast.hidden = true; }, 4500); };
+      reviewButton.addEventListener('click', () => { overlay.hidden = false; document.getElementById('close-review').focus(); });
+      document.getElementById('close-review').addEventListener('click', closeReview);
+      document.getElementById('cancel-review').addEventListener('click', closeReview);
+      overlay.addEventListener('click', (event) => { if (event.target === overlay) closeReview(); });
+      document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !overlay.hidden) closeReview(); });
+      choices.forEach((choice) => choice.addEventListener('change', updateSelection));
+      confirmation.addEventListener('change', updateSelection);
+      importButton.addEventListener('click', () => { closeReview(); showToast('Design preview only. No contacts or messages were imported.'); });
+      document.getElementById('check-connection').addEventListener('click', () => showToast('Design preview: connection status is simulated.'));
+      document.getElementById('disconnect').addEventListener('click', () => showToast('Design preview: the device was not disconnected.'));
+    </script>
+  </body>
+</html>
