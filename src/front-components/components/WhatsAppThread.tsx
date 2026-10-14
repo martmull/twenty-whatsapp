@@ -225,8 +225,7 @@ export const WhatsAppThread = ({ personId, compact = false }: WhatsAppThreadProp
               maxLength={4096}
               style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, padding: themeCssVariables.spacing[2], resize: 'vertical', width: '100%', boxSizing: 'border-box' }}
             />
-            <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between', gap: themeCssVariables.spacing[2] }}>
-              <small style={styles.label}>{connected ? t('Send ⌘↵') : t('Connect WhatsApp to send')}</small>
+            <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'flex-end' }}>
               <PreviewButton primary disabled={!selected || !connected || !draft.trim() || sending} onClick={() => void send()}>{sending ? t('Sending…') : t('Send')}</PreviewButton>
             </div>
           </div>
