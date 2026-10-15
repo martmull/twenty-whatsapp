@@ -289,7 +289,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const latestMessageId = data?.messages[data.messages.length - 1]?.id;
 
   return (
-    <section onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer?.files ?? [])); }} onPaste={(event) => { const files = Array.from(event.clipboardData?.files ?? []); if (files.length) { event.preventDefault(); addFiles(files); } }} style={{
+    <section onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer?.files ?? [])); }} style={{
       ...styles.root,
       display: 'grid',
       gridTemplateRows: 'auto minmax(0, 1fr)',
@@ -377,6 +377,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
               placeholder={selected ? t('Write a message…') : personId ? t('No conversation yet') : t('Select a conversation first')}
               value={draft}
               onChange={(event) => { setDraft(event.target.value); setRequestId(undefined); setNotice(''); }}
+              onPaste={(event) => { const files = Array.from(event.clipboardData?.files ?? []); if (files.length) { event.preventDefault(); addFiles(files); } }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey && !('isComposing' in event && event.isComposing)) {
                   event.preventDefault();
