@@ -12,9 +12,10 @@ const mediaKindForMimeType = (mimeType: string): 'image' | 'video' | 'document' 
     : ['video/mp4', 'video/quicktime', 'video/3gpp'].includes(mimeType) ? 'video'
       : 'document';
 
-const downloadAttachment = async (attachment: Attachment, signedUrl: string): Promise<Buffer> => {
+export const downloadAttachment = async (attachment: Attachment, signedUrl: string): Promise<Buffer> => {
   const url = new URL(signedUrl);
-  if (url.pathname !== `/file/FilesField/${attachment.fileId}` || !url.searchParams.get('token')) {
+  const validFilePath = [`/file/FilesField/${attachment.fileId}`, `/file/files-field/${attachment.fileId}`].includes(url.pathname);
+  if (!validFilePath || !url.searchParams.get('token')) {
     throw new Error('Invalid attachment URL');
   }
   const response = await fetch(url, { signal: AbortSignal.timeout(45_000) });
