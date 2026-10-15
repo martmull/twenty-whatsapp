@@ -64,7 +64,6 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const selectedIdRef = useRef<string | undefined>(undefined);
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [requestId, setRequestId] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -390,8 +389,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
               style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, padding: themeCssVariables.spacing[2], resize: 'vertical', width: '100%', boxSizing: 'border-box' }}
             />
             <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between', gap: themeCssVariables.spacing[2] }}>
-              <input ref={fileInputRef} type="file" multiple aria-label={t('Choose files')} style={{ display: 'none' }} onChange={(event) => { addFiles(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ''; }} />
-              <PreviewButton disabled={!selected || !connected || sending} onClick={() => fileInputRef.current?.click()}>{t('Attach files')}</PreviewButton>
+              <span style={{ ...styles.button, cursor: !selected || !connected || sending ? 'not-allowed' : 'pointer', opacity: !selected || !connected || sending ? 0.5 : 1, overflow: 'hidden', position: 'relative' }}>
+                <span aria-hidden="true">{t('Attach files')}</span>
+                <input type="file" multiple aria-label={t('Attach files')} disabled={!selected || !connected || sending} onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} style={{ cursor: 'pointer', height: '100%', inset: 0, opacity: 0, position: 'absolute', width: '100%' }} />
+              </span>
               <PreviewButton primary disabled={!selected || !connected || (!draft.trim() && attachments.length === 0) || sending} onClick={() => void send()}>{sending ? sendingLabel : t('Send')}</PreviewButton>
             </div>
           </div>
