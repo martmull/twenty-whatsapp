@@ -3,19 +3,76 @@ import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 import { bridgeJsonRequest, bridgeRequest } from 'src/logic-functions/bridge-request';
 import { applicationClient, findMessageByRequestId, userClient } from 'src/logic-functions/message-data';
 
-type SendRequest = { conversationId?: string; requestId?: string; text?: string };
+type Attachment = { fileId: string; label: string; mimeType: string; size: number };
+type SendRequest = { conversationId?: string; requestId?: string; text?: string; attachment?: Attachment };
 type SendReceipt = { state: 'unknown' | 'sent'; eventId?: string };
+const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
+const mediaKindForMimeType = (mimeType: string): 'image' | 'video' | 'document' =>
+  ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType) ? 'image'
+    : ['video/mp4', 'video/quicktime', 'video/3gpp'].includes(mimeType) ? 'video'
+      : 'document';
+
+const downloadAttachment = async (attachment: Attachment, signedUrl: string): Promise<Buffer> => {
+  const url = new URL(signedUrl);
+  if (url.pathname !== `/file/FilesField/${attachment.fileId}` || !url.searchParams.get('token')) {
+    throw new Error('Invalid attachment URL');
+  }
+  const response = await fetch(url, { signal: AbortSignal.timeout(45_000) });
+  if (!response.ok || !response.body) throw new Error('Attachment is unavailable');
+  const claimedSize = Number(response.headers.get('content-length'));
+  if (Number.isFinite(claimedSize) && claimedSize > MAX_MEDIA_BYTES) {
+    await response.body.cancel();
+    throw new Error('Attachment is too large');
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  const reader = response.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_MEDIA_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error('Attachment is too large');
+    }
+    chunks.push(Buffer.from(value));
+  }
+  if (size !== attachment.size) throw new Error('Attachment size changed');
+  return Buffer.concat(chunks, size);
+};
+
+const sendAttachment = async (requestId: string, chatId: string, accountPhoneNumber: string, caption: string, attachment: Attachment, signedUrl: string): Promise<SendReceipt> => {
+  const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;
+  const bridgeToken = process.env.WHATSAPP_BRIDGE_TOKEN;
+  if (!bridgeUrl || !bridgeToken) throw new Error('WhatsApp bridge variables are not configured');
+  const bytes = await downloadAttachment(attachment, signedUrl);
+  const kind = mediaKindForMimeType(attachment.mimeType);
+  const metadata = Buffer.from(JSON.stringify({ requestId, chatId, accountPhoneNumber, kind, mimeType: attachment.mimeType, fileName: attachment.label, caption })).toString('base64');
+  const response = await fetch(new URL('/send/media', bridgeUrl), {
+    method: 'POST',
+    headers: { authorization: `Bearer ${bridgeToken}`, 'content-type': 'application/octet-stream', 'x-whatsapp-media': metadata },
+    body: new Uint8Array(bytes).buffer,
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok) throw new Error(`WhatsApp bridge returned ${response.status}`);
+  return await response.json() as SendReceipt;
+};
 
 const handler = async (event: RoutePayload<SendRequest>) => {
   if (!event.userWorkspaceId) {
     throw new Error('Authentication required');
   }
 
-  const { conversationId, requestId, text } = event.body ?? {};
+  const { conversationId, requestId, text, attachment } = event.body ?? {};
 
-  if (!conversationId || !/^[a-f\d-]{36}$/i.test(conversationId) || !requestId || !/^[a-f\d-]{36}$/i.test(requestId) || !text || !text.trim() || text.length > 4096) {
+  if (!conversationId || !/^[a-f\d-]{36}$/i.test(conversationId) || !requestId || !/^[a-f\d-]{36}$/i.test(requestId) || typeof text !== 'string' || text.length > 4096 || (!attachment && !text.trim()) ||
+    (attachment && (!/^[a-f\d-]{36}$/i.test(attachment.fileId) || !attachment.label || attachment.label.length > 255 || /[/\\\u0000-\u001f]/.test(attachment.label) ||
+      !/^[\w.+-]+\/[\w.+-]+$/.test(attachment.mimeType) || !Number.isSafeInteger(attachment.size) || attachment.size < 1 || attachment.size > MAX_MEDIA_BYTES))) {
     throw new Error('Invalid message');
   }
+  const caption = text ?? '';
+  const mediaKind = attachment ? mediaKindForMimeType(attachment.mimeType) : undefined;
+  const messageText = caption.trim() || (mediaKind === 'image' ? '[Image]' : mediaKind === 'video' ? '[Video]' : mediaKind === 'document' ? '[File]' : '');
 
   const visible = await userClient().query({
     whatsappConversations: {
@@ -24,8 +81,9 @@ const handler = async (event: RoutePayload<SendRequest>) => {
     },
   });
   const conversation = visible.whatsappConversations?.edges?.[0]?.node;
+  const chatId = conversation?.chatId;
 
-  if (!conversation || (!/^\d{7,15}@s\.whatsapp\.net$/.test(conversation.chatId ?? '') && !/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(conversation.chatId ?? ''))) {
+  if (!conversation || !chatId || (!/^\d{7,15}@s\.whatsapp\.net$/.test(chatId) && !/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(chatId))) {
     throw new Error('Conversation unavailable');
   }
 
@@ -50,14 +108,14 @@ const handler = async (event: RoutePayload<SendRequest>) => {
   const client = applicationClient();
   let message = await findMessageByRequestId(client, requestId);
 
-  if (message && (message.conversationId !== conversationId || message.text !== text)) {
+  if (message && (message.conversationId !== conversationId || message.text !== messageText || (message.media?.[0]?.fileId ?? undefined) !== attachment?.fileId)) {
     throw new Error('Request ID already used');
   }
 
   if (!message) {
     const created = await client.mutation({
       createWhatsappMessage: {
-        __args: { data: { name: text.slice(0, 80), conversationId, direction: 'outbound', text, sentAt: new Date().toISOString(), deliveryState: 'unknown', requestId } },
+        __args: { data: { name: messageText.slice(0, 80), conversationId, direction: 'outbound', text: messageText, sentAt: new Date().toISOString(), deliveryState: 'unknown', requestId, ...(attachment ? { mediaKind, media: [{ fileId: attachment.fileId, label: attachment.label }] } : {}) } },
         id: true,
       },
     });
@@ -67,14 +125,19 @@ const handler = async (event: RoutePayload<SendRequest>) => {
       throw new Error('Could not store outgoing message');
     }
 
-    message = { id, conversationId, direction: 'outbound', text, sentAt: new Date().toISOString(), deliveryState: 'unknown', requestId };
+    message = await findMessageByRequestId(client, requestId);
+    if (!message) throw new Error('Could not load outgoing message');
   }
 
   if (message.deliveryState === 'sent') {
     return { messageId: message.id, state: 'sent' as const };
   }
 
-  const receipt = await bridgeJsonRequest<SendReceipt>('/send', { requestId, chatId: conversation.chatId, text, accountPhoneNumber: `+${connectedPhoneNumber}` });
+  if (attachment && !message.media?.[0]?.url) throw new Error('Attachment is unavailable');
+
+  const receipt = attachment
+    ? await sendAttachment(requestId, chatId, `+${connectedPhoneNumber}`, caption, attachment, message.media![0].url!)
+    : await bridgeJsonRequest<SendReceipt>('/send', { requestId, chatId, text: caption, accountPhoneNumber: `+${connectedPhoneNumber}` });
 
   if (receipt.state === 'sent') {
     await client.mutation({
@@ -85,7 +148,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
     });
     await client.mutation({
       updateWhatsappConversation: {
-        __args: { id: conversationId, data: { lastMessageAt: new Date().toISOString(), lastPreview: text.slice(0, 160) } },
+        __args: { id: conversationId, data: { lastMessageAt: new Date().toISOString(), lastPreview: messageText.slice(0, 160) } },
         id: true,
       },
     });
@@ -98,8 +161,8 @@ const handler = async (event: RoutePayload<SendRequest>) => {
 export default defineLogicFunction({
   universalIdentifier: '9d76e546-352a-4cf1-bd64-92d36c653b6a',
   name: 'whatsapp-message-send',
-  description: 'Send one manual text message with a stable request ID.',
-  timeoutSeconds: 30,
+  description: 'Send one manual text or file message with a stable request ID.',
+  timeoutSeconds: 180,
   handler,
   httpRouteTriggerSettings: {
     path: '/whatsapp/messages/send',

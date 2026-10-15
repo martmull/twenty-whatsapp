@@ -1,6 +1,6 @@
 import { defineField, FieldType } from 'twenty-sdk/define';
 
-export const WHATSAPP_MESSAGE_MEDIA_FIELD_ID = '57b1e370-557f-4f91-9b40-a882b21a5817';
+import { WHATSAPP_MESSAGE_MEDIA_FIELD_ID } from 'src/constants/whatsapp-media-field';
 
 export default defineField({
   universalIdentifier: WHATSAPP_MESSAGE_MEDIA_FIELD_ID,

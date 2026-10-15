@@ -58,6 +58,39 @@ test('a sent message remains available for a recipient retry after bridge restar
   }
 });
 
+test('an attachment is sent once and its payload is available for a recipient retry', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-media-send-'));
+  const encryptionKey = randomBytes(32);
+  const connection = new WhatsAppConnection(directory, encryptionKey);
+  const chatId = '15551234567@s.whatsapp.net';
+  const requestId = randomUUID();
+  let sendCount = 0;
+  let messageId = '';
+
+  try {
+    Object.defineProperty(connection, 'socket', { value: {
+      sendMessage: async (_jid: string, content: { image?: Buffer; video?: Buffer; document?: Buffer; caption?: string }, options?: { messageId?: string }) => {
+        sendCount += 1;
+        messageId = options?.messageId ?? '';
+        assert.equal(_jid, chatId);
+        assert.equal(content.caption, 'Look');
+        assert.equal(content.image?.toString(), 'image bytes');
+        return { key: { id: messageId, remoteJid: chatId, fromMe: true }, message: proto.Message.create({ imageMessage: { caption: 'Look' } }) };
+      },
+    } });
+    Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
+
+    const first = await connection.sendMedia(requestId, chatId, '+15557654321', 'image', 'image/png', 'photo.png', 'Look', Buffer.from('image bytes'));
+    assert.equal(first.state, 'sent');
+    assert.equal((await connection.sendMedia(requestId, chatId, '+15557654321', 'image', 'image/png', 'photo.png', 'Look', Buffer.from('image bytes'))).state, 'sent');
+    assert.equal(sendCount, 1);
+    const restarted = new WhatsAppConnection(directory, encryptionKey);
+    assert.ok((await restarted.getSentMessage({ id: messageId }))?.imageMessage);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('only one importer claims a queued batch and completion wakes other viewers', async () => {
   class QueuedConnection extends WhatsAppConnection {
     override async getEvents(): Promise<MessageEvent[]> {

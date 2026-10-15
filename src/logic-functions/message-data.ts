@@ -125,7 +125,7 @@ const findMessageByExternalId = async (client: CoreApiClient, externalId: string
   const result = await client.query({
     whatsappMessages: {
       __args: { filter: { externalId: { eq: externalId } }, first: 1 },
-      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true } } },
+      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true, url: true } } },
     },
   });
 
@@ -384,7 +384,7 @@ export const findMessageByRequestId = async (client: CoreApiClient, requestId: s
   const result = await client.query({
     whatsappMessages: {
       __args: { filter: { requestId: { eq: requestId } }, first: 1 },
-      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true } },
+      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true } } },
     },
   });
 

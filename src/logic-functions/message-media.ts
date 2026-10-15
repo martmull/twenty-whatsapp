@@ -6,7 +6,7 @@ import { type ReadableStream as NodeReadableStream } from 'node:stream/web';
 
 import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 
-import { WHATSAPP_MESSAGE_MEDIA_FIELD_ID } from 'src/fields/media';
+import { WHATSAPP_MESSAGE_MEDIA_FIELD_ID } from 'src/constants/whatsapp-media-field';
 import { bridgeMediaRequest } from 'src/logic-functions/bridge-request';
 
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024;

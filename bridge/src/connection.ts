@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import makeWASocket, { Browsers, DisconnectReason, generateMessageIDV2, proto, type Chat, type Contact, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
+import makeWASocket, { Browsers, DisconnectReason, generateMessageIDV2, proto, type AnyMediaMessageContent, type Chat, type Contact, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
@@ -69,6 +69,7 @@ export class WhatsAppConnection {
   private activeGroupNameLookups = 0;
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
+  private readonly sendingMessageIds = new Set<string>();
   private changeCursor = randomUUID();
   private readonly changeListeners = new Set<() => void>();
   private syncLease: { id: string; expiresAt: number } | undefined;
@@ -544,9 +545,55 @@ export class WhatsAppConnection {
     }
   }
 
+  async sendMedia(requestId: string, chatId: string, accountPhoneNumber: string, kind: 'image' | 'video' | 'document', mimeType: string, fileName: string, caption: string, bytes: Buffer): Promise<SendReceipt> {
+    if (!/^[a-f\d-]{36}$/i.test(requestId) || !isSupportedChatId(chatId) || !/^\+\d{7,15}$/.test(accountPhoneNumber) ||
+      !/^[\w.+-]+\/[\w.+-]+$/.test(mimeType) || !fileName || fileName.length > 255 || /[/\\\u0000-\u001f]/.test(fileName) ||
+      caption.length > 4096 || bytes.length === 0 || bytes.length > 64 * 1024 * 1024 ||
+      (kind === 'image' && !mimeType.startsWith('image/')) || (kind === 'video' && !mimeType.startsWith('video/'))) {
+      throw new Error('Invalid media send request');
+    }
+    if (this.sendingRequests.has(requestId)) {
+      return { requestId, state: 'unknown' };
+    }
+    this.sendingRequests.add(requestId);
+    try {
+      const existing = await this.sends.read(requestId);
+      if (existing) return existing;
+      if (!this.socket || this.status.state !== 'connected') throw new Error('WhatsApp is disconnected');
+      if (`+${this.status.phoneNumber?.replace(/\D/g, '')}` !== accountPhoneNumber) throw new Error('WhatsApp account changed');
+
+      await this.sends.write(requestId, { requestId, state: 'unknown' });
+      const messageId = generateMessageIDV2(this.socket.user?.id);
+      const content: AnyMediaMessageContent = kind === 'image'
+        ? { image: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
+        : kind === 'video'
+          ? { video: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
+          : { document: bytes, mimetype: mimeType, fileName, ...(caption ? { caption } : {}) };
+      this.sendingMessageIds.add(messageId);
+      let sent: WAMessage | undefined;
+      try {
+        sent = await this.socket.sendMessage(chatId, content, { messageId });
+        if (!sent?.key.id || !sent.message) throw new Error('WhatsApp did not confirm the outgoing attachment');
+        await this.sentMessages.write(sent.key.id, { encodedMessage: Buffer.from(proto.Message.encode(sent.message).finish()).toString('base64') });
+      } finally {
+        this.sendingMessageIds.delete(messageId);
+      }
+      if (!sent?.key.id) throw new Error('WhatsApp did not confirm the outgoing attachment');
+      const receipt: SendReceipt = { requestId, state: 'sent', providerMessageId: sent.key.id, eventId: messageEventId(chatId, sent.key.id) };
+      await this.sends.write(requestId, receipt);
+      return receipt;
+    } finally {
+      this.sendingRequests.delete(requestId);
+    }
+  }
+
   async getSentMessage(key: proto.IMessageKey): Promise<proto.IMessage | undefined> {
     if (!key.id || key.id.length > 128) {
       return undefined;
+    }
+    // Media is encrypted and uploaded inside sendMessage; wait for its stored payload during an early recipient retry.
+    for (let attempt = 0; this.sendingMessageIds.has(key.id) && attempt < 40; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
     const saved = await this.sentMessages.read(key.id);
     return saved ? proto.Message.decode(Buffer.from(saved.encodedMessage, 'base64')) : undefined;

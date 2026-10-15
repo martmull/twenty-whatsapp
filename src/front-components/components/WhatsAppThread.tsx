@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
-import { t, useColorScheme } from 'twenty-sdk/front-component';
+import { t, useColorScheme, type UploadedFrontComponentFile } from 'twenty-sdk/front-component';
 import { getPublicAssetUrl } from 'twenty-sdk/utils';
 import { themeCssVariables } from 'twenty-ui/theme';
 
 import { PreviewButton, getPreviewStyles } from 'src/front-components/components/PreviewUi';
 import { createRequestId } from 'src/front-components/components/createRequestId';
+import { uploadWhatsAppAttachment } from 'src/front-components/components/uploadWhatsAppAttachment';
+
+type PendingAttachment = { id: string; file: File; uploaded?: UploadedFrontComponentFile };
+const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
 
 type Conversation = {
   id: string;
@@ -59,9 +63,13 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const [selectedId, setSelectedId] = useState<string>();
   const selectedIdRef = useRef<string | undefined>(undefined);
   const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [requestId, setRequestId] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const [sendingLabel, setSendingLabel] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [showGroupMembers, setShowGroupMembers] = useState(false);
@@ -173,6 +181,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
 
   const selectConversation = (conversationId: string) => {
     setDraft('');
+    setAttachments([]);
     setRequestId(undefined);
     setNotice('');
     setShowGroupMembers(false);
@@ -182,16 +191,60 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     void load(conversationId, true);
   };
 
+  const addFiles = (files: File[]) => {
+    if (!selectedId || !connected || sending) return;
+    const accepted = files.filter((file) => file.size > 0 && file.size <= MAX_ATTACHMENT_BYTES).map((file) => {
+      if (file.name.trim()) return file;
+      const extension = file.type === 'image/png' ? '.png' : file.type === 'image/jpeg' ? '.jpg' : file.type === 'video/mp4' ? '.mp4' : '';
+      return new File([file], `pasted-file-${Date.now()}${extension}`, { type: file.type });
+    });
+    if (accepted.length !== files.length) setError(t('Files must be nonempty and at most 64 MB each.'));
+    if (accepted.length) {
+      setAttachments((previous) => [...previous, ...accepted.map((file) => ({ id: createRequestId(), file }))]);
+      setNotice('');
+    }
+  };
+
   const send = async () => {
-    if (!selectedId || !draft.trim() || sending || data?.connectionState !== 'connected') {
+    if (!selectedId || (!draft.trim() && attachments.length === 0) || sendingRef.current || data?.connectionState !== 'connected') {
       return;
     }
 
+    sendingRef.current = true;
     setSending(true);
     setError('');
     setNotice('');
 
     try {
+      if (attachments.length) {
+        let caption = draft;
+        for (const attachment of attachments) {
+          setSendingLabel(t('Uploading…'));
+          const uploaded = attachment.uploaded ?? await uploadWhatsAppAttachment(attachment.file);
+          if (!attachment.uploaded) {
+            setAttachments((previous) => previous.map((item) => item.id === attachment.id ? { ...item, uploaded } : item));
+          }
+          setSendingLabel(t('Sending…'));
+          const result = await new RestApiClient().post<{ state: 'sent' | 'unknown' }>('/s/whatsapp/messages/send', {
+            conversationId: selectedId,
+            requestId: attachment.id,
+            text: caption,
+            attachment: { fileId: uploaded.fileId, label: attachment.file.name, mimeType: uploaded.mimeType || attachment.file.type || 'application/octet-stream', size: uploaded.size },
+          });
+          if (result.state !== 'sent') {
+            setNotice(t('Delivery is uncertain. Check WhatsApp before trying again.'));
+            await load(selectedId, true);
+            return;
+          }
+          setAttachments((previous) => previous.filter((item) => item.id !== attachment.id));
+          if (caption) {
+            setDraft('');
+            caption = '';
+          }
+        }
+        await load(selectedId, true);
+        return;
+      }
       const stableRequestId = requestId ?? createRequestId();
       setRequestId(stableRequestId);
       const result = await new RestApiClient().post<{ state: 'sent' | 'unknown' }>('/s/whatsapp/messages/send', {
@@ -211,7 +264,9 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     } catch {
       setError(t('Could not confirm delivery. Your draft is saved here; retry uses the same request ID.'));
     } finally {
+      sendingRef.current = false;
       setSending(false);
+      setSendingLabel('');
     }
   };
 
@@ -235,7 +290,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const latestMessageId = data?.messages[data.messages.length - 1]?.id;
 
   return (
-    <section style={{
+    <section onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer?.files ?? [])); }} onPaste={(event) => { const files = Array.from(event.clipboardData?.files ?? []); if (files.length) { event.preventDefault(); addFiles(files); } }} style={{
       ...styles.root,
       display: 'grid',
       gridTemplateRows: 'auto minmax(0, 1fr)',
@@ -302,8 +357,9 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                 {message.media?.[0]?.url && message.mediaKind === 'image' && <a href={message.media[0].url} target="_blank" rel="noopener noreferrer" aria-label={t('Open image')}><img src={message.media[0].url} alt={message.text === '[Image]' ? t('WhatsApp image') : message.text} loading="lazy" style={{ display: 'block', maxHeight: 360, maxWidth: '100%', borderRadius: themeCssVariables.border.radius.sm, objectFit: 'contain' }} /></a>}
                 {message.media?.[0]?.url && message.mediaKind === 'video' && <video controls preload="metadata" aria-label={t('WhatsApp video')} style={{ display: 'block', maxHeight: 360, maxWidth: '100%', borderRadius: themeCssVariables.border.radius.sm }} src={message.media[0].url} />}
                 {message.media?.[0]?.url && message.mediaKind === 'audio' && <audio controls preload="metadata" aria-label={t('WhatsApp audio message')} src={message.media[0].url} style={{ display: 'block', maxWidth: '100%', width: 320 }} />}
-                {message.mediaKind && !message.media?.[0]?.url && <div style={{ color: isDark ? '#8696a0' : '#667781' }}>{message.mediaKind === 'image' ? t('Image unavailable') : message.mediaKind === 'video' ? t('Video unavailable') : t('Audio unavailable')}</div>}
-                {(!message.mediaKind || !['[Image]', '[Video]', '[Audio]'].includes(message.text)) && <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>}
+                {message.media?.[0]?.url && message.mediaKind === 'document' && <a href={message.media[0].url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>{message.media[0].label || t('Download file')}</a>}
+                {message.mediaKind && !message.media?.[0]?.url && <div style={{ color: isDark ? '#8696a0' : '#667781' }}>{message.mediaKind === 'image' ? t('Image unavailable') : message.mediaKind === 'video' ? t('Video unavailable') : message.mediaKind === 'audio' ? t('Audio unavailable') : t('File unavailable')}</div>}
+                {(!message.mediaKind || !['[Image]', '[Video]', '[Audio]', '[File]'].includes(message.text)) && <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>}
                 <small style={{ ...styles.label, color: isDark ? '#aebac1' : '#667781', display: 'block', marginTop: 6 }}>{formatTime(message.sentAt)}{message.direction === 'outbound' ? ` · ${message.deliveryState}` : ''}</small>
               </div>
             ))}
@@ -311,6 +367,12 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
           <div style={{ borderTop: `1px solid ${themeCssVariables.border.color.medium}`, display: 'grid', gap: themeCssVariables.spacing[2], padding: themeCssVariables.spacing[3] }}>
             {error && <p role="alert" style={{ color: themeCssVariables.color.red, margin: 0 }}>{error}</p>}
             {notice && <p role="status" style={{ background: themeCssVariables.background.secondary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderLeft: `3px solid ${themeCssVariables.color.blue}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontWeight: 600, margin: 0, padding: themeCssVariables.spacing[2] }}>{notice}</p>}
+            {attachments.length > 0 && <div aria-label={t('Files to send')} style={{ display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[2] }}>
+              {attachments.map((attachment) => <span key={attachment.id} style={{ ...styles.label, alignItems: 'center', background: themeCssVariables.background.secondary, borderRadius: themeCssVariables.border.radius.sm, display: 'inline-flex', gap: themeCssVariables.spacing[2], padding: themeCssVariables.spacing[2] }}>
+                {attachment.file.name} · {(attachment.file.size / 1024 / 1024).toFixed(1)} MB
+                <button type="button" aria-label={`${t('Remove')} ${attachment.file.name}`} disabled={sending} onClick={() => setAttachments((previous) => previous.filter((item) => item.id !== attachment.id))} style={{ background: 'none', border: 0, color: 'inherit', cursor: 'pointer' }}>×</button>
+              </span>)}
+            </div>}
             <textarea
               aria-label={t('Write a WhatsApp message')}
               placeholder={selected ? t('Write a message…') : personId ? t('No conversation yet') : t('Select a conversation first')}
@@ -327,8 +389,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
               maxLength={4096}
               style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, padding: themeCssVariables.spacing[2], resize: 'vertical', width: '100%', boxSizing: 'border-box' }}
             />
-            <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'flex-end' }}>
-              <PreviewButton primary disabled={!selected || !connected || !draft.trim() || sending} onClick={() => void send()}>{sending ? t('Sending…') : t('Send')}</PreviewButton>
+            <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between', gap: themeCssVariables.spacing[2] }}>
+              <input ref={fileInputRef} type="file" multiple aria-label={t('Choose files')} style={{ display: 'none' }} onChange={(event) => { addFiles(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ''; }} />
+              <PreviewButton disabled={!selected || !connected || sending} onClick={() => fileInputRef.current?.click()}>{t('Attach files')}</PreviewButton>
+              <PreviewButton primary disabled={!selected || !connected || (!draft.trim() && attachments.length === 0) || sending} onClick={() => void send()}>{sending ? sendingLabel : t('Send')}</PreviewButton>
             </div>
           </div>
         </div>
