@@ -1,0 +1,153 @@
+diff --git a/packages/twenty-front-component-renderer/src/host/events/utils/__tests__/serializeEvent.test.ts b/packages/twenty-front-component-renderer/src/host/events/utils/__tests__/serializeEvent.test.ts
+index 5648877d63a..f2ea2119eb4 100644
+--- a/packages/twenty-front-component-renderer/src/host/events/utils/__tests__/serializeEvent.test.ts
++++ b/packages/twenty-front-component-renderer/src/host/events/utils/__tests__/serializeEvent.test.ts
+@@ -175,6 +175,13 @@ describe('serializeEvent', () => {
+     expect(result).toEqual({ type: 'paste', clipboardText: 'pasted text' });
+   });
+ 
++  it('forwards pasted and dropped files', () => {
++    const file = new File(['image bytes'], 'image.png', { type: 'image/png' });
++
++    expect(serializeEvent({ type: 'paste', clipboardData: { files: [file], getData: () => '' } }).transferFiles).toEqual([file]);
++    expect(serializeEvent({ type: 'drop', dataTransfer: { files: [file] } }).transferFiles).toEqual([file]);
++  });
++
+   it('should cap the forwarded clipboard text length', () => {
+     const result = serializeEvent({
+       type: 'paste',
+diff --git a/packages/twenty-front-component-renderer/src/host/events/utils/applyInputEventProperties.ts b/packages/twenty-front-component-renderer/src/host/events/utils/applyInputEventProperties.ts
+index 6d7338eb9b2..153659d4261 100644
+--- a/packages/twenty-front-component-renderer/src/host/events/utils/applyInputEventProperties.ts
++++ b/packages/twenty-front-component-renderer/src/host/events/utils/applyInputEventProperties.ts
+@@ -1,7 +1,8 @@
+-import { isBoolean, isString } from '@sniptt/guards';
++import { isBoolean, isObject, isString } from '@sniptt/guards';
+ 
+ import { MAX_SERIALIZED_EVENT_TEXT_LENGTH } from '@/host/events/constants/MaxSerializedEventTextLength';
+ import { applyPasteClipboardText } from '@/host/events/utils/applyPasteClipboardText';
++import { serializeFileList } from '@/host/events/utils/serializeFileList';
+ import { resolveNativeHostEvent } from '@/host/events/utils/resolveNativeHostEvent';
+ import { type SerializedEventData } from '@/types/SerializedEventData';
+ 
+@@ -31,4 +32,16 @@ export const applyInputEventProperties = ({
+   }
+ 
+   applyPasteClipboardText(serializedEvent, domEvent);
++
++  const transferData = serializedEvent.type === 'paste'
++    ? domEvent.clipboardData
++    : serializedEvent.type === 'drop'
++      ? domEvent.dataTransfer
++      : undefined;
++  if (isObject(transferData)) {
++    const files = serializeFileList((transferData as Record<string, unknown>).files);
++    if (files?.length) {
++      serializedEvent.transferFiles = files;
++    }
++  }
+ };
+diff --git a/packages/twenty-front-component-renderer/src/remote/elements/utils/__tests__/applySerializedEventClipboardData.test.ts b/packages/twenty-front-component-renderer/src/remote/elements/utils/__tests__/applySerializedEventClipboardData.test.ts
+index a933891ce2b..51c5f78fb09 100644
+--- a/packages/twenty-front-component-renderer/src/remote/elements/utils/__tests__/applySerializedEventClipboardData.test.ts
++++ b/packages/twenty-front-component-renderer/src/remote/elements/utils/__tests__/applySerializedEventClipboardData.test.ts
+@@ -2,6 +2,7 @@ import { applySerializedEventClipboardData } from '@/remote/elements/utils/apply
+ 
+ type SynthesizedClipboardData = {
+   types: string[];
++  files: File[];
+   getData: (format: string) => string;
+   setData: (format: string, data: string) => void;
+ };
+@@ -9,6 +10,7 @@ type SynthesizedClipboardData = {
+ const applyToEvent = (eventData: {
+   type: string;
+   clipboardText?: string;
++  transferFiles?: File[];
+ }): SynthesizedClipboardData | undefined => {
+   const event: Record<string, unknown> = {};
+   applySerializedEventClipboardData(event, eventData);
+@@ -27,6 +29,15 @@ describe('applySerializedEventClipboardData', () => {
+     expect(clipboardData?.types).toEqual(['text/plain']);
+   });
+ 
++  it('exposes pasted file bytes to the remote handler', async () => {
++    const file = new File(['image bytes'], 'image.png', { type: 'image/png' });
++    const clipboardData = applyToEvent({ type: 'paste', transferFiles: [file] });
++
++    expect(clipboardData?.types).toEqual(['Files']);
++    expect(clipboardData?.files[0]).toBe(file);
++    expect(clipboardData?.files[0].size).toBe(11);
++  });
++
+   it('should return an empty string for other formats', () => {
+     const clipboardData = applyToEvent({
+       type: 'paste',
+diff --git a/packages/twenty-front-component-renderer/src/remote/elements/utils/__tests__/createWorkerEventFromSerializedEvent.test.ts b/packages/twenty-front-component-renderer/src/remote/elements/utils/__tests__/createWorkerEventFromSerializedEvent.test.ts
+index 7e9d8700988..7065fa0470b 100644
+--- a/packages/twenty-front-component-renderer/src/remote/elements/utils/__tests__/createWorkerEventFromSerializedEvent.test.ts
++++ b/packages/twenty-front-component-renderer/src/remote/elements/utils/__tests__/createWorkerEventFromSerializedEvent.test.ts
+@@ -28,6 +28,18 @@ const createConnectedInputInsideContainer = () => {
+ };
+ 
+ describe('createWorkerEventFromSerializedEvent', () => {
++  it('exposes dropped files to the remote handler', () => {
++    const file = new File(['video bytes'], 'clip.mp4', { type: 'video/mp4' });
++    const event = createWorkerEventFromSerializedEvent({
++      listeningElement: createListeningElement(),
++      eventType: 'drop',
++      eventData: serializeEvent({ type: 'drop', dataTransfer: { files: [file] } }),
++    });
++
++    const transferred = (event as DragEvent).dataTransfer?.files[0];
++    expect(transferred).toBe(file);
++    expect(transferred?.size).toBe(11);
++  });
+   it.each([
+     ['focusin', 'FocusEvent'],
+     ['paste', 'ClipboardEvent'],
+diff --git a/packages/twenty-front-component-renderer/src/remote/elements/utils/applySerializedEventClipboardData.ts b/packages/twenty-front-component-renderer/src/remote/elements/utils/applySerializedEventClipboardData.ts
+index 41f2df685ae..a199a7a4f0d 100644
+--- a/packages/twenty-front-component-renderer/src/remote/elements/utils/applySerializedEventClipboardData.ts
++++ b/packages/twenty-front-component-renderer/src/remote/elements/utils/applySerializedEventClipboardData.ts
+@@ -15,7 +15,11 @@ export const applySerializedEventClipboardData = (
+ 
+   Object.defineProperty(event, 'clipboardData', {
+     value: {
+-      types: clipboardText === '' ? [] : ['text/plain'],
++      types: [
++        ...(clipboardText === '' ? [] : ['text/plain']),
++        ...(eventData.transferFiles?.length ? ['Files'] : []),
++      ],
++      files: eventData.transferFiles ?? [],
+       getData: (format: string) =>
+         CLIPBOARD_TEXT_FORMATS.has(format) ? clipboardText : '',
+       setData: () => undefined,
+diff --git a/packages/twenty-front-component-renderer/src/remote/elements/utils/applySerializedEventProperties.ts b/packages/twenty-front-component-renderer/src/remote/elements/utils/applySerializedEventProperties.ts
+index 9d0dd785769..9a2d4fc4a5e 100644
+--- a/packages/twenty-front-component-renderer/src/remote/elements/utils/applySerializedEventProperties.ts
++++ b/packages/twenty-front-component-renderer/src/remote/elements/utils/applySerializedEventProperties.ts
+@@ -21,4 +21,11 @@ export const applySerializedEventProperties = ({
+   }
+ 
+   applySerializedEventClipboardData(event, eventData);
++  if (eventData.type === 'drop') {
++    Object.defineProperty(event, 'dataTransfer', {
++      value: { files: eventData.transferFiles ?? [] },
++      configurable: true,
++      enumerable: true,
++    });
++  }
+ };
+diff --git a/packages/twenty-front-component-renderer/src/types/SerializedEventData.ts b/packages/twenty-front-component-renderer/src/types/SerializedEventData.ts
+index a4332b444e0..16f019634b3 100644
+--- a/packages/twenty-front-component-renderer/src/types/SerializedEventData.ts
++++ b/packages/twenty-front-component-renderer/src/types/SerializedEventData.ts
+@@ -44,6 +44,7 @@ export type SerializedEventData = {
+   inputType?: string;
+   data?: string;
+   clipboardText?: string;
++  transferFiles?: SerializedFileData[];
+   value?: string;
+   nativeEditSequence?: number;
+   selectionStart?: number;

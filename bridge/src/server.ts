@@ -47,6 +47,19 @@ const readBody = async (request: import('node:http').IncomingMessage): Promise<R
   return value as Record<string, unknown>;
 };
 
+const readMediaBody = async (request: import('node:http').IncomingMessage): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > 64 * 1024 * 1024) throw new Error('Attachment too large');
+    chunks.push(buffer);
+  }
+  if (size === 0) throw new Error('Empty attachment');
+  return Buffer.concat(chunks, size);
+};
+
 const server = createServer(async (request, response) => {
   response.setHeader('cache-control', 'no-store');
   response.setHeader('content-type', 'application/json');
@@ -59,6 +72,19 @@ const server = createServer(async (request, response) => {
 
   try {
     const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+    if (request.method === 'POST' && path === '/send/media') {
+      const encoded = request.headers['x-whatsapp-media'];
+      if (typeof encoded !== 'string' || encoded.length > 12_000) throw new Error('Invalid media metadata');
+      const body: unknown = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid media metadata');
+      const media = body as Record<string, unknown>;
+      if (typeof media.requestId !== 'string' || typeof media.chatId !== 'string' || typeof media.accountPhoneNumber !== 'string' ||
+        (media.kind !== 'image' && media.kind !== 'video' && media.kind !== 'document') || typeof media.mimeType !== 'string' ||
+        typeof media.fileName !== 'string' || typeof media.caption !== 'string') throw new Error('Invalid media metadata');
+      const bytes = await readMediaBody(request);
+      response.end(JSON.stringify(await connection.sendMedia(media.requestId, media.chatId, media.accountPhoneNumber, media.kind, media.mimeType, media.fileName, media.caption, bytes)));
+      return;
+    }
     const mediaId = request.method === 'GET' ? /^\/media\/([a-f\d]{64})$/.exec(path)?.[1] : undefined;
     if (mediaId) {
       const media = await connection.getMedia(mediaId);
@@ -74,6 +100,26 @@ const server = createServer(async (request, response) => {
         ? connection.getStatus()
         : request.method === 'GET' && path === '/events'
           ? await connection.getEvents()
+          : request.method === 'POST' && path === '/events/claim'
+            ? await connection.claimEvents()
+          : request.method === 'POST' && path === '/events/release'
+            ? await (async () => {
+              const body = await readBody(request);
+              if (typeof body.leaseId !== 'string' || !/^[a-f\d-]{36}$/i.test(body.leaseId) || typeof body.completed !== 'boolean') {
+                throw new Error('Invalid sync lease');
+              }
+              return connection.releaseEvents(body.leaseId, body.completed);
+            })()
+          : request.method === 'POST' && path === '/events/wait'
+            ? await (async () => {
+              const body = await readBody(request);
+              if (typeof body.cursor !== 'string' || (body.cursor !== '' && !/^[a-f\d-]{36}$/i.test(body.cursor))) {
+                throw new Error('Invalid cursor');
+              }
+              return connection.waitForChange(body.cursor);
+            })()
+          : request.method === 'POST' && path === '/events/notify'
+            ? (connection.notifyChange(), { notified: true })
           : request.method === 'POST' && path === '/events/ack'
             ? await (async () => {
               const body = await readBody(request);
@@ -110,6 +156,14 @@ const server = createServer(async (request, response) => {
                   }
                   return connection.getHistoryMessages(body.chatId, body.rangeDays, body.offset as number, body.limit as number);
                 })()
+                : request.method === 'POST' && path === '/history/names'
+                  ? await (async () => {
+                    const body = await readBody(request);
+                    if (connection.getStatus().state !== 'connected' || !Array.isArray(body.chatIds) || body.chatIds.length > 100 || !body.chatIds.every((id) => typeof id === 'string')) {
+                      throw new Error('Invalid history names request');
+                    }
+                    return connection.getHistoryNames(body.chatIds);
+                  })()
                 : request.method === 'POST' && path === '/history/members'
                   ? await (async () => {
                     const body = await readBody(request);

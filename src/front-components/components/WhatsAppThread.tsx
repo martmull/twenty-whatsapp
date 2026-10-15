@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
-import { t, useColorScheme } from 'twenty-sdk/front-component';
+import { t, useColorScheme, type UploadedFrontComponentFile } from 'twenty-sdk/front-component';
 import { getPublicAssetUrl } from 'twenty-sdk/utils';
 import { themeCssVariables } from 'twenty-ui/theme';
 
-import { PreviewBadge, PreviewButton, getPreviewStyles } from 'src/front-components/components/PreviewUi';
+import { PreviewButton, getPreviewStyles } from 'src/front-components/components/PreviewUi';
 import { createRequestId } from 'src/front-components/components/createRequestId';
+import { uploadWhatsAppAttachment } from 'src/front-components/components/uploadWhatsAppAttachment';
+
+type PendingAttachment = { id: string; file: File; uploaded?: UploadedFrontComponentFile };
+const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
 
 type Conversation = {
   id: string;
@@ -59,10 +63,12 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const [selectedId, setSelectedId] = useState<string>();
   const selectedIdRef = useRef<string | undefined>(undefined);
   const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [requestId, setRequestId] = useState<string>();
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const [sendingLabel, setSendingLabel] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [showGroupMembers, setShowGroupMembers] = useState(false);
@@ -114,34 +120,9 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     }
   };
 
-  const refreshNow = async () => {
-    if (refreshing) {
-      return;
-    }
-
-    setRefreshing(true);
-    let syncFailed = false;
-
-    try {
-      await new RestApiClient().post('/s/whatsapp/messages/sync', {});
-    } catch {
-      syncFailed = true;
-    }
-
-    await load(selectedIdRef.current, true);
-    if (syncFailed) {
-      setError(t('Could not sync new WhatsApp messages. Check the bridge connection and try again.'));
-    }
-    setRefreshing(false);
-  };
-
   useEffect(() => {
     let active = true;
-    let refreshing = false;
     const refresh = async (sync = false) => {
-      if (refreshing) return;
-      refreshing = true;
-
       try {
         if (sync) {
           await new RestApiClient().post('/s/whatsapp/messages/sync', {}).catch(() => undefined);
@@ -165,22 +146,41 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
           setLoading(false);
           setError(t('Could not load WhatsApp messages. Check your access and connection.'));
         }
-      } finally {
-        refreshing = false;
       }
     };
 
-    void refresh();
-    const timer = setInterval(() => void refresh(true), 15_000);
+    const watch = async () => {
+      await refresh();
+      let cursor = '';
+
+      while (active) {
+        try {
+          const update = await new RestApiClient().post<{ cursor: string; changed: boolean }>('/s/whatsapp/messages/updates', { cursor });
+          if (!active) break;
+          cursor = update.cursor;
+          if (update.changed) {
+            await refresh(true);
+          }
+        } catch {
+          if (!active) break;
+          await new Promise((resolve) => setTimeout(resolve, 15_000));
+          if (active) {
+            await refresh(true);
+          }
+        }
+      }
+    };
+
+    void watch();
 
     return () => {
       active = false;
-      clearInterval(timer);
     };
   }, [personId]);
 
   const selectConversation = (conversationId: string) => {
     setDraft('');
+    setAttachments([]);
     setRequestId(undefined);
     setNotice('');
     setShowGroupMembers(false);
@@ -190,16 +190,60 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     void load(conversationId, true);
   };
 
+  const addFiles = (files: File[]) => {
+    if (!selectedId || !connected || sending) return;
+    const accepted = files.filter((file) => file.size > 0 && file.size <= MAX_ATTACHMENT_BYTES).map((file) => {
+      if (file.name.trim()) return file;
+      const extension = file.type === 'image/png' ? '.png' : file.type === 'image/jpeg' ? '.jpg' : file.type === 'video/mp4' ? '.mp4' : '';
+      return new File([file], `pasted-file-${Date.now()}${extension}`, { type: file.type });
+    });
+    if (accepted.length !== files.length) setError(t('Files must be nonempty and at most 64 MB each.'));
+    if (accepted.length) {
+      setAttachments((previous) => [...previous, ...accepted.map((file) => ({ id: createRequestId(), file }))]);
+      setNotice('');
+    }
+  };
+
   const send = async () => {
-    if (!selectedId || !draft.trim() || sending || data?.connectionState !== 'connected') {
+    if (!selectedId || (!draft.trim() && attachments.length === 0) || sendingRef.current || data?.connectionState !== 'connected') {
       return;
     }
 
+    sendingRef.current = true;
     setSending(true);
     setError('');
     setNotice('');
 
     try {
+      if (attachments.length) {
+        let caption = draft;
+        for (const attachment of attachments) {
+          setSendingLabel(t('Uploading…'));
+          const uploaded = attachment.uploaded ?? await uploadWhatsAppAttachment(attachment.file);
+          if (!attachment.uploaded) {
+            setAttachments((previous) => previous.map((item) => item.id === attachment.id ? { ...item, uploaded } : item));
+          }
+          setSendingLabel(t('Sending…'));
+          const result = await new RestApiClient().post<{ state: 'sent' | 'unknown' }>('/s/whatsapp/messages/send', {
+            conversationId: selectedId,
+            requestId: attachment.id,
+            text: caption,
+            attachment: { fileId: uploaded.fileId, label: attachment.file.name, mimeType: uploaded.mimeType || attachment.file.type || 'application/octet-stream', size: uploaded.size },
+          });
+          if (result.state !== 'sent') {
+            setNotice(t('Delivery is uncertain. Check WhatsApp before trying again.'));
+            await load(selectedId, true);
+            return;
+          }
+          setAttachments((previous) => previous.filter((item) => item.id !== attachment.id));
+          if (caption) {
+            setDraft('');
+            caption = '';
+          }
+        }
+        await load(selectedId, true);
+        return;
+      }
       const stableRequestId = requestId ?? createRequestId();
       setRequestId(stableRequestId);
       const result = await new RestApiClient().post<{ state: 'sent' | 'unknown' }>('/s/whatsapp/messages/send', {
@@ -211,7 +255,6 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
       if (result.state === 'sent') {
         setDraft('');
         setRequestId(undefined);
-        setNotice(t('Message sent.'));
       } else {
         setNotice(t('Delivery is uncertain. Check WhatsApp before trying again.'));
       }
@@ -220,16 +263,18 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     } catch {
       setError(t('Could not confirm delivery. Your draft is saved here; retry uses the same request ID.'));
     } finally {
+      sendingRef.current = false;
       setSending(false);
+      setSendingLabel('');
     }
   };
 
   const selected = data?.conversations.find((conversation) => conversation.id === selectedId);
   const connected = data?.connectionState === 'connected';
-  const connectionLabel = data?.connectionState === 'connected' ? t('Connected')
-    : data?.connectionState === 'reconnecting' ? t('Reconnecting')
-    : data?.connectionState === 'unavailable' ? t('Bridge unavailable')
-    : data?.connectionState === 'pairing' ? t('Pairing') : t('Disconnected');
+  const connectionWarning = data?.connectionState === 'reconnecting' ? t('WhatsApp is reconnecting.')
+    : data?.connectionState === 'unavailable' ? t('WhatsApp connection is unavailable.')
+    : data?.connectionState === 'pairing' ? t('WhatsApp is waiting for a QR scan.')
+    : data?.connectionState === 'disconnected' ? t('WhatsApp is disconnected.') : undefined;
   const isGroup = selected?.chatId.endsWith('@g.us');
   const memberNameById = new Map<string, string>();
   for (const member of data?.groupMembers ?? []) {
@@ -244,10 +289,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const latestMessageId = data?.messages[data.messages.length - 1]?.id;
 
   return (
-    <section style={{
+    <section onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer?.files ?? [])); }} style={{
       ...styles.root,
       display: 'grid',
-      gridTemplateRows: data?.connectionState === 'unavailable' ? 'auto auto minmax(0, 1fr)' : 'auto minmax(0, 1fr)',
+      gridTemplateRows: 'auto minmax(0, 1fr)',
       gap: themeCssVariables.spacing[3],
       height: personId ? 'calc(100dvh - 140px)' : '100%',
       minHeight: personId ? 420 : 560,
@@ -258,21 +303,20 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
           <h2 style={{ margin: 0, fontSize: personId ? 16 : 20 }}>{personId ? t('WhatsApp') : t('WhatsApp inbox')}</h2>
           {!personId && <p style={styles.muted}>{t('Shared direct and group conversations in this workspace.')}</p>}
         </div>
-        <div style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2] }}>
-          <PreviewBadge tone={connected ? 'green' : data?.connectionState === 'unavailable' ? 'red' : 'neutral'}>{connectionLabel}</PreviewBadge>
-          <PreviewButton disabled={refreshing} onClick={() => void refreshNow()}>{refreshing ? t('Refreshing…') : t('Refresh')}</PreviewButton>
-        </div>
+        {connectionWarning && <span role="alert" style={{ color: themeCssVariables.color.red, fontSize: themeCssVariables.font.size.sm, textAlign: 'right' }}>
+          {connectionWarning} <a href="/settings/applications" style={{ color: 'inherit', textDecoration: 'underline' }}>{t('App settings')}</a>
+        </span>}
       </header>
-      {data?.connectionState === 'unavailable' && <p role="alert" style={{ color: themeCssVariables.color.red, margin: 0 }}>{t('The WhatsApp bridge is unavailable. Check the bridge process in app settings, then refresh.')}</p>}
       <div style={{ ...styles.card, display: 'grid', gridTemplateColumns: personId ? 'minmax(0, 1fr)' : 'minmax(200px, 30%) minmax(0, 1fr)', minHeight: 0, overflow: 'hidden' }}>
         {!personId && <aside aria-label={t('Conversations')} style={{ borderRight: `1px solid ${themeCssVariables.border.color.medium}`, overflowY: 'auto' }}>
           {loading && !data && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('Loading conversations…')}</p>}
           {!loading && data?.conversations.length === 0 && <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('No conversations yet.')}</p>}
           {data?.conversations.map((conversation) => (
             <button key={conversation.id} type="button" onClick={() => selectConversation(conversation.id)} style={{
-              background: conversation.id === selectedId ? themeCssVariables.background.secondary : themeCssVariables.background.primary,
+              background: conversation.unread ? isDark ? '#182635' : '#eef4ff' : conversation.id === selectedId ? themeCssVariables.background.secondary : themeCssVariables.background.primary,
               border: 0,
               borderBottom: `1px solid ${themeCssVariables.border.color.medium}`,
+              borderLeft: `3px solid ${conversation.unread ? themeCssVariables.color.blue : 'transparent'}`,
               color: themeCssVariables.font.color.primary,
               cursor: 'pointer',
               display: 'grid',
@@ -284,10 +328,9 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
             }}>
               <span style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2], justifyContent: 'space-between' }}>
                 <strong style={{ fontWeight: conversation.unread ? 700 : 600 }}>{conversation.name}</strong>
-                {conversation.unread && <span aria-label={t('Unread messages')} title={t('Unread messages')} style={{ background: themeCssVariables.color.blue, borderRadius: '50%', flexShrink: 0, height: 8, width: 8 }} />}
               </span>
               <span style={{ ...styles.muted, color: conversation.unread ? themeCssVariables.font.color.primary : styles.muted.color, fontWeight: conversation.unread ? 600 : undefined }}>{conversation.lastPreview ?? t('No messages yet')}</span>
-              <small style={styles.label}>{formatTime(conversation.lastMessageAt)}</small>
+              <small style={{ ...styles.label, color: conversation.unread ? themeCssVariables.color.blue : styles.label.color, fontWeight: conversation.unread ? 600 : undefined }}>{formatTime(conversation.lastMessageAt)}</small>
             </button>
           ))}
         </aside>}
@@ -312,24 +355,33 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                 {isGroup && message.direction === 'inbound' && <strong style={{ color: isDark ? '#53bdeb' : '#075e54', display: 'block', fontSize: themeCssVariables.font.size.sm, marginBottom: 4 }}>{memberNameById.get(message.senderId ?? '') || message.senderName || message.senderId?.split('@')[0] || t('Group participant')}</strong>}
                 {message.media?.[0]?.url && message.mediaKind === 'image' && <a href={message.media[0].url} target="_blank" rel="noopener noreferrer" aria-label={t('Open image')}><img src={message.media[0].url} alt={message.text === '[Image]' ? t('WhatsApp image') : message.text} loading="lazy" style={{ display: 'block', maxHeight: 360, maxWidth: '100%', borderRadius: themeCssVariables.border.radius.sm, objectFit: 'contain' }} /></a>}
                 {message.media?.[0]?.url && message.mediaKind === 'video' && <video controls preload="metadata" aria-label={t('WhatsApp video')} style={{ display: 'block', maxHeight: 360, maxWidth: '100%', borderRadius: themeCssVariables.border.radius.sm }} src={message.media[0].url} />}
-                {message.mediaKind && !message.media?.[0]?.url && <div style={{ color: isDark ? '#8696a0' : '#667781' }}>{message.mediaKind === 'image' ? t('Image unavailable') : t('Video unavailable')}</div>}
-                {(!message.mediaKind || !['[Image]', '[Video]'].includes(message.text)) && <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>}
+                {message.media?.[0]?.url && message.mediaKind === 'audio' && <audio controls preload="metadata" aria-label={t('WhatsApp audio message')} src={message.media[0].url} style={{ display: 'block', maxWidth: '100%', width: 320 }} />}
+                {message.media?.[0]?.url && message.mediaKind === 'document' && <a href={message.media[0].url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>{message.media[0].label || t('Download file')}</a>}
+                {message.mediaKind && !message.media?.[0]?.url && <div style={{ color: isDark ? '#8696a0' : '#667781' }}>{message.mediaKind === 'image' ? t('Image unavailable') : message.mediaKind === 'video' ? t('Video unavailable') : message.mediaKind === 'audio' ? t('Audio unavailable') : t('File unavailable')}</div>}
+                {(!message.mediaKind || !['[Image]', '[Video]', '[Audio]', '[File]'].includes(message.text)) && <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>}
                 <small style={{ ...styles.label, color: isDark ? '#aebac1' : '#667781', display: 'block', marginTop: 6 }}>{formatTime(message.sentAt)}{message.direction === 'outbound' ? ` · ${message.deliveryState}` : ''}</small>
               </div>
             ))}
           </div>
           <div style={{ borderTop: `1px solid ${themeCssVariables.border.color.medium}`, display: 'grid', gap: themeCssVariables.spacing[2], padding: themeCssVariables.spacing[3] }}>
             {error && <p role="alert" style={{ color: themeCssVariables.color.red, margin: 0 }}>{error}</p>}
-            {notice && <p role="status" style={{ ...styles.muted, margin: 0 }}>{notice}</p>}
+            {notice && <p role="status" style={{ background: themeCssVariables.background.secondary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderLeft: `3px solid ${themeCssVariables.color.blue}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontWeight: 600, margin: 0, padding: themeCssVariables.spacing[2] }}>{notice}</p>}
+            {attachments.length > 0 && <div aria-label={t('Files to send')} style={{ display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[2] }}>
+              {attachments.map((attachment) => <span key={attachment.id} style={{ ...styles.label, alignItems: 'center', background: themeCssVariables.background.secondary, borderRadius: themeCssVariables.border.radius.sm, display: 'inline-flex', gap: themeCssVariables.spacing[2], padding: themeCssVariables.spacing[2] }}>
+                {attachment.file.name} · {(attachment.file.size / 1024 / 1024).toFixed(1)} MB
+                <button type="button" aria-label={`${t('Remove')} ${attachment.file.name}`} disabled={sending} onClick={() => setAttachments((previous) => previous.filter((item) => item.id !== attachment.id))} style={{ background: 'none', border: 0, color: 'inherit', cursor: 'pointer' }}>×</button>
+              </span>)}
+            </div>}
             <textarea
               aria-label={t('Write a WhatsApp message')}
               placeholder={selected ? t('Write a message…') : personId ? t('No conversation yet') : t('Select a conversation first')}
               value={draft}
               onChange={(event) => { setDraft(event.target.value); setRequestId(undefined); setNotice(''); }}
+              onPaste={(event) => { const files = Array.from(event.clipboardData?.files ?? []); if (files.length) { event.preventDefault(); addFiles(files); } }}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.repeat && !('isComposing' in event && event.isComposing)) {
+                if (event.key === 'Enter' && !event.shiftKey && !('isComposing' in event && event.isComposing)) {
                   event.preventDefault();
-                  void send();
+                  if (!event.repeat) void send();
                 }
               }}
               disabled={!selected || !connected || sending}
@@ -337,8 +389,12 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
               maxLength={4096}
               style={{ background: themeCssVariables.background.primary, border: `1px solid ${themeCssVariables.border.color.medium}`, borderRadius: themeCssVariables.border.radius.sm, color: themeCssVariables.font.color.primary, fontFamily: themeCssVariables.font.family, fontSize: themeCssVariables.font.size.md, padding: themeCssVariables.spacing[2], resize: 'vertical', width: '100%', boxSizing: 'border-box' }}
             />
-            <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'flex-end' }}>
-              <PreviewButton primary disabled={!selected || !connected || !draft.trim() || sending} onClick={() => void send()}>{sending ? t('Sending…') : t('Send')}</PreviewButton>
+            <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between', gap: themeCssVariables.spacing[2] }}>
+              <span style={{ ...styles.button, cursor: !selected || !connected || sending ? 'not-allowed' : 'pointer', opacity: !selected || !connected || sending ? 0.5 : 1, overflow: 'hidden', position: 'relative' }}>
+                <span aria-hidden="true">{t('Attach files')}</span>
+                <input type="file" multiple aria-label={t('Attach files')} disabled={!selected || !connected || sending} onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} style={{ cursor: 'pointer', height: '100%', inset: 0, opacity: 0, position: 'absolute', width: '100%' }} />
+              </span>
+              <PreviewButton primary disabled={!selected || !connected || (!draft.trim() && attachments.length === 0) || sending} onClick={() => void send()}>{sending ? sendingLabel : t('Send')}</PreviewButton>
             </div>
           </div>
         </div>

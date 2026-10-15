@@ -212,7 +212,7 @@ export const WhatsAppHistoryImport = () => {
         <Tag color="gray" variant="soft" preventShrink>{t('Optional')}</Tag>
       </div>
       <p style={{ ...styles.muted, margin: 0 }}>
-        {t('Review available direct and group conversations before sharing them with this workspace. Text, available images, and videos can be imported. Start with the last 30 days; nothing is imported automatically.')}
+        {t('Review available direct and group conversations before sharing them with this workspace. Text, available images, videos, and audio can be imported. Start with the last 30 days; nothing is imported automatically.')}
       </p>
       {!reviewing && (
         <div>
@@ -314,11 +314,11 @@ export const WhatsAppHistoryImport = () => {
               )}
             </div>
           )}
-          <p style={{ ...styles.muted, margin: 0 }}>{t('Select all covers loaded conversations with messages only. Chats without messages must be selected individually. New People are created only for selected unmatched direct contacts. Group participants are not created as People. Available images and videos up to 64 MB are imported; older media may be unavailable. Calls and other attachments are excluded.')}</p>
+          <p style={{ ...styles.muted, margin: 0 }}>{t('Select all covers loaded conversations with messages only. Chats without messages must be selected individually. New People are created only for selected unmatched direct contacts. Group participants are not created as People. Available images, videos, and audio up to 64 MB are imported; older media may be unavailable. Calls and other attachments are excluded.')}</p>
           {selected.length > 0 && (
             <label style={{ display: 'flex', alignItems: 'flex-start', gap: themeCssVariables.spacing[2] }}>
               <FrontComponentCheckbox checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} aria-label={t('Acknowledge workspace sharing')} />
-              <span style={styles.muted}>{t('I understand selected direct contacts, group conversations, participants, messages, images, and videos will be visible to workspace members with access to these records.')}</span>
+              <span style={styles.muted}>{t('I understand selected direct contacts, group conversations, participants, messages, images, videos, and audio will be visible to workspace members with access to these records.')}</span>
             </label>
           )}
           <div style={{ display: 'flex', gap: themeCssVariables.spacing[2], alignItems: 'center' }}>

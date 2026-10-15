@@ -44,7 +44,7 @@ export type BridgeMessageEvent = {
   sentAt: string;
   senderId?: string;
   senderName?: string;
-  media?: { kind: 'image' | 'video'; mimeType: string; fileName: string; sizeBytes?: number };
+  media?: { kind: 'image' | 'video' | 'audio'; mimeType: string; fileName: string; sizeBytes?: number };
 };
 
 export const applicationClient = () => new CoreApiClient({ runAs: 'application' });
@@ -125,7 +125,7 @@ const findMessageByExternalId = async (client: CoreApiClient, externalId: string
   const result = await client.query({
     whatsappMessages: {
       __args: { filter: { externalId: { eq: externalId } }, first: 1 },
-      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true } } },
+      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true, url: true } } },
     },
   });
 
@@ -384,11 +384,58 @@ export const findMessageByRequestId = async (client: CoreApiClient, requestId: s
   const result = await client.query({
     whatsappMessages: {
       __args: { filter: { requestId: { eq: requestId } }, first: 1 },
-      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true } },
+      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true } } },
     },
   });
 
   return result.whatsappMessages?.edges?.[0]?.node as Message | undefined;
+};
+
+const syncConversationNames = async (client: CoreApiClient, accountId: string): Promise<void> => {
+  let after: string | undefined;
+
+  for (let page = 0; page < 100; page += 1) {
+    const result = await client.query({
+      whatsappConversations: {
+        __args: { filter: { accountId: { eq: accountId } }, first: 100, after },
+        edges: { node: { id: true, chatId: true, name: true } },
+        pageInfo: { hasNextPage: true, endCursor: true },
+      },
+    });
+    const connection = result.whatsappConversations;
+    const conversations = (connection?.edges ?? []).map(({ node }) => node);
+    if (conversations.length > 0) {
+      const names = await bridgeJsonRequest<{ chatId: string; name: string }[]>('/history/names', {
+        chatIds: conversations.map((conversation) => conversation.chatId).filter((chatId): chatId is string => typeof chatId === 'string'),
+      });
+      const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name]));
+
+      for (const conversation of conversations) {
+        if (!conversation.chatId) {
+          continue;
+        }
+        const name = nameByChatId.get(conversation.chatId)?.trim().slice(0, 120);
+        if (name && !/^\+?\d+$/.test(name) && name !== conversation.name) {
+          await client.mutation({
+            updateWhatsappConversation: {
+              __args: { id: conversation.id, data: { name } },
+              id: true,
+            },
+          });
+        }
+      }
+    }
+
+    if (!connection?.pageInfo?.hasNextPage) {
+      return;
+    }
+    after = connection.pageInfo.endCursor ?? undefined;
+    if (!after) {
+      throw new Error('Conversation pagination stopped unexpectedly');
+    }
+  }
+
+  throw new Error('Conversation name sync limit reached');
 };
 
 export const syncMessages = async (): Promise<{ imported: number; ignored: number }> => {
@@ -399,53 +446,61 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
     return { imported: 0, ignored: 0 };
   }
 
-  const events = await bridgeJsonRequest<BridgeMessageEvent[]>('/events');
+  const client = applicationClient();
+  const accountId = await ensureAccount(client, phoneNumber);
 
-  if (events.length === 0) {
+  const { leaseId, events } = await bridgeJsonRequest<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
+
+  if (!leaseId || events.length === 0) {
+    await syncConversationNames(client, accountId).catch(() => undefined);
     return { imported: 0, ignored: 0 };
   }
 
-  const client = applicationClient();
-  const accountId = await ensureAccount(client, phoneNumber);
-  const peopleByPhone = await findPeopleByPhone(client);
-
+  let completed = false;
   let imported = 0;
   let ignored = 0;
+  try {
+    const peopleByPhone = await findPeopleByPhone(client);
 
-  const firstMediaIndex = events.findIndex((event) => event.media);
-  for (const event of firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1)) {
-    const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(event.chatId);
-    if (!/^[a-f\d]{64}$/.test(event.eventId) || (!/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) && !isGroup) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
-      throw new Error('Invalid bridge event');
-    }
+    const firstMediaIndex = events.findIndex((event) => event.media);
+    for (const event of firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1)) {
+      const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(event.chatId);
+      if (!/^[a-f\d]{64}$/.test(event.eventId) || (!/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) && !isGroup) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
+        throw new Error('Invalid bridge event');
+      }
 
-    if (isGroup) {
-      const conversation = await findConversation(client, accountId, event.chatId);
+      if (isGroup) {
+        const conversation = await findConversation(client, accountId, event.chatId);
 
-      if (conversation) {
-        imported += await importHistoryMessages(client, accountId, event.chatId, conversation.name, [event]);
-      } else {
+        if (conversation) {
+          imported += await importHistoryMessages(client, accountId, event.chatId, conversation.name, [event]);
+        } else {
+          ignored += 1;
+        }
+
+        await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+        continue;
+      }
+
+      const candidates = peopleByPhone.get(event.chatId.split('@')[0]) ?? [];
+
+      if (candidates.length !== 1) {
         ignored += 1;
+        await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+        continue;
+      }
+
+      if (await importMessageForPerson(client, accountId, event, candidates[0])) {
+        imported += 1;
       }
 
       await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
-      continue;
     }
 
-    const candidates = peopleByPhone.get(event.chatId.split('@')[0]) ?? [];
-
-    if (candidates.length !== 1) {
-      ignored += 1;
-      await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
-      continue;
-    }
-
-    if (await importMessageForPerson(client, accountId, event, candidates[0])) {
-      imported += 1;
-    }
-
-    await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+    completed = true;
+  } finally {
+    await bridgeJsonRequest('/events/release', { leaseId, completed }).catch(() => undefined);
   }
-
+  await syncConversationNames(client, accountId).catch(() => undefined);
   return { imported, ignored };
 };

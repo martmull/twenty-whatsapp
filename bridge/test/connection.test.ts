@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import type { Chat, WAMessage } from '@whiskeysockets/baileys';
+import { proto, type Chat, type WAMessage } from '@whiskeysockets/baileys';
 
 import { WhatsAppConnection, type ConnectionStatus } from '../src/connection.js';
 import { createEncryptedAuthState } from '../src/encrypted-auth-state.js';
+import type { MessageEvent } from '../src/message-event.js';
 
 class RecordingConnection extends WhatsAppConnection {
   connectCount = 0;
@@ -18,6 +19,100 @@ class RecordingConnection extends WhatsAppConnection {
     return { state: 'connected' };
   }
 }
+
+test('bridge waiters wake when new data is available', async () => {
+  const connection = new WhatsAppConnection(join(tmpdir(), 'twenty-whatsapp-updates-test'), randomBytes(32));
+  const initial = await connection.waitForChange('');
+  assert.equal(initial.changed, true);
+
+  const waiting = connection.waitForChange(initial.cursor);
+  connection.notifyChange();
+  const update = await waiting;
+  assert.equal(update.changed, true);
+  assert.notEqual(update.cursor, initial.cursor);
+});
+
+test('a sent message remains available for a recipient retry after bridge restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-retry-'));
+  const encryptionKey = randomBytes(32);
+  const chatId = '15551234567@s.whatsapp.net';
+  let messageId = '';
+  const connection = new WhatsAppConnection(directory, encryptionKey);
+
+  try {
+    Object.defineProperty(connection, 'socket', { value: {
+      sendMessage: async (_jid: string, _content: unknown, options?: { messageId?: string }) => {
+        messageId = options?.messageId ?? '';
+        assert.ok(messageId);
+        assert.equal((await connection.getSentMessage({ id: messageId }))?.conversation, 'Hello');
+        return { key: { id: messageId, remoteJid: chatId, fromMe: true }, message: proto.Message.create({ conversation: 'Hello' }) };
+      },
+    } });
+    Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
+
+    assert.equal((await connection.sendText(randomUUID(), chatId, 'Hello', '+15557654321')).state, 'sent');
+    const restarted = new WhatsAppConnection(directory, encryptionKey);
+    assert.equal((await restarted.getSentMessage({ id: messageId, remoteJid: chatId }))?.conversation, 'Hello');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an attachment is sent once and its payload is available for a recipient retry', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-media-send-'));
+  const encryptionKey = randomBytes(32);
+  const connection = new WhatsAppConnection(directory, encryptionKey);
+  const chatId = '15551234567@s.whatsapp.net';
+  const requestId = randomUUID();
+  let sendCount = 0;
+  let messageId = '';
+
+  try {
+    Object.defineProperty(connection, 'socket', { value: {
+      sendMessage: async (_jid: string, content: { image?: Buffer; video?: Buffer; document?: Buffer; caption?: string }, options?: { messageId?: string }) => {
+        sendCount += 1;
+        messageId = options?.messageId ?? '';
+        assert.equal(_jid, chatId);
+        assert.equal(content.caption, 'Look');
+        assert.equal(content.image?.toString(), 'image bytes');
+        return { key: { id: messageId, remoteJid: chatId, fromMe: true }, message: proto.Message.create({ imageMessage: { caption: 'Look' } }) };
+      },
+    } });
+    Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
+
+    const first = await connection.sendMedia(requestId, chatId, '+15557654321', 'image', 'image/png', 'photo.png', 'Look', Buffer.from('image bytes'));
+    assert.equal(first.state, 'sent');
+    assert.equal((await connection.sendMedia(requestId, chatId, '+15557654321', 'image', 'image/png', 'photo.png', 'Look', Buffer.from('image bytes'))).state, 'sent');
+    assert.equal(sendCount, 1);
+    const restarted = new WhatsAppConnection(directory, encryptionKey);
+    assert.ok((await restarted.getSentMessage({ id: messageId }))?.imageMessage);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('only one importer claims a queued batch and completion wakes other viewers', async () => {
+  class QueuedConnection extends WhatsAppConnection {
+    override async getEvents(): Promise<MessageEvent[]> {
+      return [{
+        eventId: 'a'.repeat(64), chatId: '15551234567@s.whatsapp.net',
+        providerMessageId: 'message-1', direction: 'inbound', text: 'Hello', sentAt: new Date().toISOString(),
+      }];
+    }
+  }
+
+  const connection = new QueuedConnection(join(tmpdir(), 'twenty-whatsapp-claim-test'), randomBytes(32));
+  const claimed = await connection.claimEvents();
+  assert.equal(claimed.events.length, 1);
+  assert.ok(claimed.leaseId);
+  assert.deepEqual(await connection.claimEvents(), { events: [] });
+
+  const cursor = (await connection.waitForChange('')).cursor;
+  const waiting = connection.waitForChange(cursor);
+  assert.deepEqual(connection.releaseEvents(claimed.leaseId, true), { released: true });
+  assert.equal((await waiting).changed, true);
+  assert.ok((await connection.claimEvents()).leaseId);
+});
 
 test('bridge startup resumes only a saved linked device', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-resume-'));
@@ -90,6 +185,44 @@ test('history uses the sender profile name when no saved contact name is availab
 
     const candidates = await connection.getHistoryCandidates(0, 0, 20);
     assert.equal(candidates.items[0].name, 'Alex Martin');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('contact name changes wake viewers and replace saved names', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-name-updates-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const chatId = '15551234567@s.whatsapp.net';
+
+  try {
+    await connection.recordHistory([{ id: chatId, name: 'Alex' }], []);
+    const cursor = (await connection.waitForChange('')).cursor;
+    const waiting = connection.waitForChange(cursor);
+    await connection.recordHistory([{ id: chatId, name: 'Alex Martin' }], []);
+
+    assert.equal((await waiting).changed, true);
+    assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: 'Alex Martin' }]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('numeric group titles resolve in the background and wake viewers', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-group-name-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const chatId = '120363123456789012@g.us';
+
+  try {
+    await connection.recordHistory([], [], false, [{ id: chatId, name: chatId.split('@')[0] }]);
+    Object.defineProperty(connection, 'socket', { value: { groupMetadata: async () => ({ subject: 'Family group' }) } });
+    Object.defineProperty(connection, 'status', { value: { state: 'connected' } });
+    const cursor = (await connection.waitForChange('')).cursor;
+    const waiting = connection.waitForChange(cursor);
+
+    assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: chatId.split('@')[0] }]);
+    assert.equal((await waiting).changed, true);
+    assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: 'Family group' }]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -245,7 +378,7 @@ test('history candidates use the latest chat activity when messages are not capt
   }
 });
 
-test('image and video history stays ordered and exposes media details without decryption keys', async () => {
+test('image, video, and audio history stays ordered and exposes media details without decryption keys', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-media-order-'));
   const connection = new WhatsAppConnection(directory, randomBytes(32));
   const olderId = '111111111111111111@g.us';
@@ -256,12 +389,13 @@ test('image and video history stays ordered and exposes media details without de
       { key: { remoteJid: olderId, id: 'text-1', fromMe: false }, message: { conversation: 'Old text' }, messageTimestamp: 1_700_000_000 },
       { key: { remoteJid: newerId, id: 'image-1', fromMe: false }, message: { imageMessage: { mimetype: 'image/jpeg', mediaKey: randomBytes(32), directPath: '/image', fileLength: 1024 } }, messageTimestamp: 1_700_086_400 },
       { key: { remoteJid: newerId, id: 'video-1', fromMe: true }, message: { videoMessage: { mimetype: 'video/mp4', caption: 'A short clip', mediaKey: randomBytes(32), directPath: '/video', fileLength: 2048 } }, messageTimestamp: 1_700_086_401 },
+      { key: { remoteJid: newerId, id: 'audio-1', fromMe: false }, message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus', ptt: true, mediaKey: randomBytes(32), directPath: '/audio', fileLength: 4096 } }, messageTimestamp: 1_700_086_402 },
     ]);
 
     const candidates = await connection.getHistoryCandidates(0, 0, 20, 'group');
     assert.equal(candidates.items[0].chatId, newerId);
-    assert.equal(candidates.items[0].messageCount, 2);
-    assert.equal(candidates.items[0].lastMessageAt, new Date(1_700_086_401_000).toISOString());
+    assert.equal(candidates.items[0].messageCount, 3);
+    assert.equal(candidates.items[0].lastMessageAt, new Date(1_700_086_402_000).toISOString());
     const history = await connection.getHistoryMessages(newerId, 0, 0, 10);
     assert.equal(history.messages[0].text, '[Image]');
     assert.equal(history.messages[0].media?.kind, 'image');
@@ -271,12 +405,18 @@ test('image and video history stays ordered and exposes media details without de
     assert.equal(nextPage.messages[0].text, 'A short clip');
     assert.equal(nextPage.messages[0].media?.kind, 'video');
     assert.equal(nextPage.messages[0].direction, 'outbound');
+    const audioPage = await connection.getHistoryMessages(newerId, 0, nextPage.nextOffset ?? 0, 10);
+    assert.equal(audioPage.messages[0].text, '[Audio]');
+    assert.equal(audioPage.messages[0].media?.kind, 'audio');
+    assert.equal(audioPage.messages[0].media?.mimeType, 'audio/ogg');
+    assert.equal(audioPage.messages[0].media?.sizeBytes, 4096);
     assert.equal(JSON.stringify(history).includes('mediaKey'), false);
     const savedReferences = await readdir(join(directory, 'media-references'));
-    assert.equal(savedReferences.length, 2);
+    assert.equal(savedReferences.length, 3);
     const encryptedReference = await readFile(join(directory, 'media-references', savedReferences[0]), 'utf8');
     assert.equal(encryptedReference.includes('/image'), false);
     assert.equal(encryptedReference.includes('/video'), false);
+    assert.equal(encryptedReference.includes('/audio'), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

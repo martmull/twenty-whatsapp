@@ -40,7 +40,7 @@ export const toMessageEvent = (message: WAMessage, mappedChatId?: string): Messa
   const eventId = messageEventId(chatId, providerMessageId);
   const media = describeMedia(message, eventId);
   const text = message.message?.conversation ?? message.message?.extendedTextMessage?.text
-    ?? (media ? media.caption?.trim().slice(0, 4096) || (media.summary.kind === 'image' ? '[Image]' : '[Video]') : undefined);
+    ?? (media ? media.caption?.trim().slice(0, 4096) || (media.summary.kind === 'image' ? '[Image]' : media.summary.kind === 'video' ? '[Video]' : '[Audio]') : undefined);
 
   if (
     !text || text.length > 4096
