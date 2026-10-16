@@ -70,13 +70,14 @@ export class WhatsAppConnection {
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
   private readonly sendingMessageIds = new Set<string>();
-  private changeCursor = randomUUID();
-  private readonly changeListeners = new Set<() => void>();
+  private ackedSinceClaim = 0;
   private syncLease: { id: string; expiresAt: number } | undefined;
 
   constructor(
     private readonly directory: string,
     private readonly encryptionKey: Buffer,
+    // Called when Twenty should import queued events (see the bridge webhook in server.ts).
+    private readonly onEventsQueued: () => void = () => undefined,
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
@@ -210,7 +211,6 @@ export class WhatsAppConnection {
       }
       if (namesChanged) {
         this.groupMembersCache.clear();
-        this.notifyChange();
       }
     };
 
@@ -429,6 +429,7 @@ export class WhatsAppConnection {
 
     const leaseId = randomUUID();
     this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000 };
+    this.ackedSinceClaim = 0;
     try {
       const events = await this.getEvents();
       if (events.length === 0) {
@@ -442,39 +443,17 @@ export class WhatsAppConnection {
     }
   }
 
-  releaseEvents(leaseId: string, completed: boolean): { released: boolean } {
+  async releaseEvents(leaseId: string, completed: boolean): Promise<{ released: boolean }> {
     if (this.syncLease?.id !== leaseId) {
       return { released: false };
     }
 
     this.syncLease = undefined;
-    if (completed) {
-      this.notifyChange();
+    // A sync handles a limited batch: ask for another one while it makes progress.
+    if (completed && this.ackedSinceClaim > 0 && (await this.events.list(1)).length > 0) {
+      this.onEventsQueued();
     }
     return { released: true };
-  }
-
-  notifyChange(): void {
-    this.changeCursor = randomUUID();
-    for (const listener of this.changeListeners) {
-      listener();
-    }
-  }
-
-  async waitForChange(cursor: string): Promise<{ cursor: string; changed: boolean }> {
-    if (cursor !== this.changeCursor) {
-      return { cursor: this.changeCursor, changed: true };
-    }
-
-    return new Promise((resolve) => {
-      const finish = () => {
-        clearTimeout(timeout);
-        this.changeListeners.delete(finish);
-        resolve({ cursor: this.changeCursor, changed: cursor !== this.changeCursor });
-      };
-      const timeout = setTimeout(finish, 20_000);
-      this.changeListeners.add(finish);
-    });
   }
 
   async ackEvents(eventIds: string[]): Promise<{ acknowledged: number }> {
@@ -484,6 +463,7 @@ export class WhatsAppConnection {
       }
 
       await this.events.delete(eventId);
+      this.ackedSinceClaim += 1;
     }
 
     return { acknowledged: eventIds.length };
@@ -664,7 +644,7 @@ export class WhatsAppConnection {
             await this.phoneNumbers.write(remoteJid, { chatId: event.chatId });
           }
           await this.events.write(event.eventId, event);
-          this.notifyChange();
+          this.onEventsQueued();
         }
       }
     });
@@ -728,7 +708,7 @@ export class WhatsAppConnection {
           state: 'connected',
           phoneNumber: socket.user?.id?.split(':')[0],
         };
-        this.notifyChange();
+        this.onEventsQueued();
         void socket.groupFetchAllParticipating().then((groups) => {
           if (generation === this.generation) {
             return this.recordHistory(Object.values(groups).map((group) => ({ id: group.id, name: group.subject })), []);
@@ -744,12 +724,10 @@ export class WhatsAppConnection {
 
         if (this.intentionallyDisconnected || statusCode === DisconnectReason.loggedOut) {
           this.status = { state: 'disconnected' };
-          this.notifyChange();
           return;
         }
 
         this.status = { state: 'reconnecting' };
-        this.notifyChange();
         this.reconnectTimer = setTimeout(() => void this.connect(), 5_000);
       }
     });
@@ -765,7 +743,6 @@ export class WhatsAppConnection {
     this.socket = undefined;
     this.groupMembersCache.clear();
     this.status = { state: 'disconnected' };
-    this.notifyChange();
 
     try {
       await socket?.logout();

@@ -20,18 +20,6 @@ class RecordingConnection extends WhatsAppConnection {
   }
 }
 
-test('bridge waiters wake when new data is available', async () => {
-  const connection = new WhatsAppConnection(join(tmpdir(), 'twenty-whatsapp-updates-test'), randomBytes(32));
-  const initial = await connection.waitForChange('');
-  assert.equal(initial.changed, true);
-
-  const waiting = connection.waitForChange(initial.cursor);
-  connection.notifyChange();
-  const update = await waiting;
-  assert.equal(update.changed, true);
-  assert.notEqual(update.cursor, initial.cursor);
-});
-
 test('a sent message remains available for a recipient retry after bridge restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-retry-'));
   const encryptionKey = randomBytes(32);
@@ -91,7 +79,7 @@ test('an attachment is sent once and its payload is available for a recipient re
   }
 });
 
-test('only one importer claims a queued batch and completion wakes other viewers', async () => {
+test('only one importer claims a queued batch at a time', async () => {
   class QueuedConnection extends WhatsAppConnection {
     override async getEvents(): Promise<MessageEvent[]> {
       return [{
@@ -107,10 +95,7 @@ test('only one importer claims a queued batch and completion wakes other viewers
   assert.ok(claimed.leaseId);
   assert.deepEqual(await connection.claimEvents(), { events: [] });
 
-  const cursor = (await connection.waitForChange('')).cursor;
-  const waiting = connection.waitForChange(cursor);
-  assert.deepEqual(connection.releaseEvents(claimed.leaseId, true), { released: true });
-  assert.equal((await waiting).changed, true);
+  assert.deepEqual(await connection.releaseEvents(claimed.leaseId, true), { released: true });
   assert.ok((await connection.claimEvents()).leaseId);
 });
 
@@ -190,25 +175,22 @@ test('history uses the sender profile name when no saved contact name is availab
   }
 });
 
-test('contact name changes wake viewers and replace saved names', async () => {
+test('contact name changes replace saved names', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-name-updates-'));
   const connection = new WhatsAppConnection(directory, randomBytes(32));
   const chatId = '15551234567@s.whatsapp.net';
 
   try {
     await connection.recordHistory([{ id: chatId, name: 'Alex' }], []);
-    const cursor = (await connection.waitForChange('')).cursor;
-    const waiting = connection.waitForChange(cursor);
     await connection.recordHistory([{ id: chatId, name: 'Alex Martin' }], []);
 
-    assert.equal((await waiting).changed, true);
     assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: 'Alex Martin' }]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test('numeric group titles resolve in the background and wake viewers', async () => {
+test('numeric group titles resolve in the background', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-group-name-'));
   const connection = new WhatsAppConnection(directory, randomBytes(32));
   const chatId = '120363123456789012@g.us';
@@ -217,11 +199,9 @@ test('numeric group titles resolve in the background and wake viewers', async ()
     await connection.recordHistory([], [], false, [{ id: chatId, name: chatId.split('@')[0] }]);
     Object.defineProperty(connection, 'socket', { value: { groupMetadata: async () => ({ subject: 'Family group' }) } });
     Object.defineProperty(connection, 'status', { value: { state: 'connected' } });
-    const cursor = (await connection.waitForChange('')).cursor;
-    const waiting = connection.waitForChange(cursor);
 
     assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: chatId.split('@')[0] }]);
-    assert.equal((await waiting).changed, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
     assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: 'Family group' }]);
   } finally {
     await rm(directory, { recursive: true, force: true });

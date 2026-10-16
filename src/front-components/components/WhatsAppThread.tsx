@@ -50,6 +50,18 @@ type InboxData = {
   connectionState: 'disconnected' | 'pairing' | 'connected' | 'reconnecting' | 'unavailable';
 };
 
+const POLL_INTERVAL_MS = 5_000;
+// Every Nth poll reloads anyway, to pick up connection changes.
+const FULL_RELOAD_EVERY = 12;
+
+// Cheap check through the REST API: the newest conversation activity visible to this member.
+const fetchLatestActivity = async (personId?: string): Promise<string | undefined> => {
+  const response = await new RestApiClient().get<{ data?: { whatsappConversations?: { lastMessageAt?: string }[] } }>('/rest/whatsappConversations', {
+    query: { order_by: 'lastMessageAt[DescNullsLast]', limit: 1, ...(personId ? { filter: `personId[eq]:"${personId}"` } : {}) },
+  });
+  return response.data?.whatsappConversations?.[0]?.lastMessageAt;
+};
+
 type WhatsAppThreadProps = { personId?: string };
 
 const formatTime = (value?: string | null) => value
@@ -122,11 +134,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
 
   useEffect(() => {
     let active = true;
-    const refresh = async (sync = false) => {
+    let lastActivity: string | undefined;
+    let polls = 0;
+    const refresh = async () => {
       try {
-        if (sync) {
-          await new RestApiClient().post('/s/whatsapp/messages/sync', {}).catch(() => undefined);
-        }
         const requestedId = selectedIdRef.current;
         const next = await new RestApiClient().post<InboxData>('/s/whatsapp/messages/list', {
           ...(personId ? { personId } : {}),
@@ -149,32 +160,20 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
       }
     };
 
-    const watch = async () => {
-      await refresh();
-      let cursor = '';
+    void refresh();
+    const timer = setInterval(async () => {
+      polls += 1;
+      const activity = await fetchLatestActivity(personId).catch(() => lastActivity);
 
-      while (active) {
-        try {
-          const update = await new RestApiClient().post<{ cursor: string; changed: boolean }>('/s/whatsapp/messages/updates', { cursor });
-          if (!active) break;
-          cursor = update.cursor;
-          if (update.changed) {
-            await refresh(true);
-          }
-        } catch {
-          if (!active) break;
-          await new Promise((resolve) => setTimeout(resolve, 15_000));
-          if (active) {
-            await refresh(true);
-          }
-        }
+      if (active && (activity !== lastActivity || polls % FULL_RELOAD_EVERY === 0)) {
+        lastActivity = activity;
+        await refresh();
       }
-    };
-
-    void watch();
+    }, POLL_INTERVAL_MS);
 
     return () => {
       active = false;
+      clearInterval(timer);
     };
   }, [personId]);
 

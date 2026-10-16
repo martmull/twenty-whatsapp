@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { resolve } from 'node:path';
 
@@ -7,6 +7,7 @@ import { isGroupChatId } from './message-event.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
 const keyHex = process.env.WHATSAPP_SESSION_KEY;
+const webhookUrl = process.env.TWENTY_WEBHOOK_URL;
 
 if (!token || !keyHex || !/^[a-f\d]{64}$/i.test(keyHex)) {
   throw new Error('Set WHATSAPP_BRIDGE_TOKEN and a 32-byte hex WHATSAPP_SESSION_KEY');
@@ -15,10 +16,35 @@ if (!token || !keyHex || !/^[a-f\d]{64}$/i.test(keyHex)) {
 const log = (message: string, data: Record<string, unknown> = {}) =>
   process.stdout.write(`${JSON.stringify({ time: new Date().toISOString(), message, ...data })}\n`);
 
+// Tells Twenty that events are queued. Calls within one second are merged into one.
+let webhookTimer: NodeJS.Timeout | undefined;
+const notifyTwenty = () => {
+  if (!webhookUrl || webhookTimer) return;
+
+  webhookTimer = setTimeout(async () => {
+    webhookTimer = undefined;
+    const body = JSON.stringify({ sentAt: new Date().toISOString() });
+    const signature = createHmac('sha256', token).update(body).digest('hex');
+
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-whatsapp-signature': signature },
+        body,
+        signal: AbortSignal.timeout(130_000),
+      });
+      if (!response.ok) log('Twenty webhook failed', { status: response.status });
+    } catch (error) {
+      log('Twenty webhook unreachable', { error: String(error) });
+    }
+  }, 1_000);
+};
+
 const expectedToken = Buffer.from(token);
 const connection = new WhatsAppConnection(
   resolve(process.env.WHATSAPP_DATA_DIR ?? './data/session'),
   Buffer.from(keyHex, 'hex'),
+  notifyTwenty,
 );
 
 const isAuthorized = (header: string | undefined) => {
@@ -69,19 +95,10 @@ const jsonRoutes: Record<string, Route> = {
   'GET /status': () => connection.getStatus(),
   'POST /connect': () => connection.connect(),
   'POST /disconnect': () => connection.disconnect(),
-  'GET /events': () => connection.getEvents(),
   'POST /events/claim': () => connection.claimEvents(),
   'POST /events/release': (body) => {
     check(typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId) && typeof body.completed === 'boolean');
     return connection.releaseEvents(body.leaseId as string, body.completed as boolean);
-  },
-  'POST /events/wait': (body) => {
-    check(typeof body.cursor === 'string' && (body.cursor === '' || /^[a-f\d-]{36}$/i.test(body.cursor)), 'Invalid cursor');
-    return connection.waitForChange(body.cursor as string);
-  },
-  'POST /events/notify': () => {
-    connection.notifyChange();
-    return { notified: true };
   },
   'POST /events/ack': (body) => {
     check(Array.isArray(body.eventIds) && body.eventIds.every((id) => typeof id === 'string'));
@@ -177,5 +194,5 @@ const port = Number(process.env.WHATSAPP_BRIDGE_PORT ?? 8765);
 await connection.resume();
 
 server.listen(port, host, () => {
-  log('WhatsApp bridge listening', { host, port });
+  log('WhatsApp bridge listening', { host, port, webhook: Boolean(webhookUrl) });
 });

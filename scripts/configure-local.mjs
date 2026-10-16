@@ -33,6 +33,12 @@ try {
   await writeFile(envPath, env, { mode: 0o600, flag: 'wx' });
 }
 
+// The bridge calls this route when messages arrive (signed with the bridge token).
+if (!/^TWENTY_WEBHOOK_URL=/m.test(env)) {
+  env += 'TWENTY_WEBHOOK_URL=' + remote.apiUrl + '/s/whatsapp/bridge/events\n';
+  await writeFile(envPath, env, { mode: 0o600 });
+}
+
 const token = env.match(/^WHATSAPP_BRIDGE_TOKEN=(.+)$/m)?.[1];
 
 if (!token) {

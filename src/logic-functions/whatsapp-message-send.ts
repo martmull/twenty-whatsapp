@@ -163,7 +163,6 @@ const handler = route<SendRequest>('whatsapp-message-send', async (event, logger
     await client.mutation({
       updateWhatsappConversation: { __args: { id: conversationId, data: { lastMessageAt: new Date().toISOString(), lastPreview: messageText.slice(0, 160) } }, id: true },
     });
-    await bridgePost('/events/notify').catch(() => undefined);
   }
 
   return { messageId: message.id, state: receipt.state };
