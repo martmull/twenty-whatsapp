@@ -1,6 +1,6 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
-import { bridgeJsonRequest, bridgeRequest } from 'src/logic-functions/bridge-request';
+import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
 import {
   applicationClient,
@@ -67,7 +67,7 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
     throw new Error('Invalid history range');
   }
 
-  const status = await bridgeRequest('/status');
+  const status = await getBridgeStatus();
 
   if (status.state !== 'connected' || !status.phoneNumber) {
     throw new Error('WhatsApp is disconnected');
@@ -77,7 +77,7 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
     if (!/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(request.chatId ?? '')) {
       throw new Error('Invalid group ID');
     }
-    return bridgeJsonRequest<GroupMember[]>('/history/members', { chatId: request.chatId });
+    return bridgePost<GroupMember[]>('/history/members', { chatId: request.chatId });
   }
 
   const client = applicationClient();
@@ -93,7 +93,7 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
     if (kind !== 'all' && kind !== 'direct' && kind !== 'group') {
       throw new Error('Invalid history kind');
     }
-    const history = await bridgeJsonRequest<HistoryList>('/history/list', { rangeDays: request.rangeDays, kind, offset, limit: 20 });
+    const history = await bridgePost<HistoryList>('/history/list', { rangeDays: request.rangeDays, kind, offset, limit: 20 }, 30_000);
     const peopleByPhone = await findPeopleByPhone(client);
 
     return {
@@ -125,12 +125,12 @@ const handler = async (event: RoutePayload<HistoryRequest>) => {
     throw new Error('Cannot import the linked account as a contact');
   }
 
-  const history = await bridgeJsonRequest<HistoryMessages>('/history/messages', {
+  const history = await bridgePost<HistoryMessages>('/history/messages', {
     chatId: request.chatId,
     rangeDays: request.rangeDays,
     offset: request.offset,
     limit: 25,
-  });
+  }, 30_000);
   const accountId = await ensureAccount(client, `+${status.phoneNumber.replace(/\D/g, '')}`);
   for (const message of history.messages) {
     if (message.chatId !== request.chatId) {

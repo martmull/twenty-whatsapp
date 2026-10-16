@@ -1,6 +1,6 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
-import { bridgeRequest } from 'src/logic-functions/bridge-request';
+import { bridgePost, type BridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
 
 const handler = async (event: RoutePayload<{ ownsNumber?: boolean; acceptsRisk?: boolean }>) => {
@@ -12,7 +12,7 @@ const handler = async (event: RoutePayload<{ ownsNumber?: boolean; acceptsRisk?:
     throw new Error('Only workspace administrators can connect WhatsApp');
   }
 
-  return bridgeRequest('/connect');
+  return bridgePost<BridgeStatus>('/connect');
 };
 
 export default defineLogicFunction({

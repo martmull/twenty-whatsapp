@@ -1,6 +1,6 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
-import { bridgeJsonRequest, bridgeRequest } from 'src/logic-functions/bridge-request';
+import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { applicationClient, type Conversation, type Message, userClient } from 'src/logic-functions/message-data';
 
 type ListRequest = { personId?: string; conversationId?: string };
@@ -62,9 +62,9 @@ const handler = async (event: RoutePayload<ListRequest>) => {
     messages = (messageResult.whatsappMessages?.edges ?? []).map(({ node }) => node as Message).reverse();
   }
 
-  const status = await bridgeRequest('/status').catch(() => ({ state: 'unavailable' as const }));
+  const status = await getBridgeStatus().catch(() => ({ state: 'unavailable' as const }));
   const groupMembers = selected?.chatId.endsWith('@g.us') && status.state === 'connected'
-    ? await bridgeJsonRequest<GroupMember[]>('/history/members', { chatId: selected.chatId }).catch(() => undefined)
+    ? await bridgePost<GroupMember[]>('/history/members', { chatId: selected.chatId }).catch(() => undefined)
     : undefined;
 
   return { conversations, selectedConversationId: selected?.id, messages, groupMembers, connectionState: status.state };

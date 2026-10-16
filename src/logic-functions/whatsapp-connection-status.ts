@@ -1,13 +1,13 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
-import { bridgeRequest } from 'src/logic-functions/bridge-request';
+import { getBridgeStatus } from 'src/logic-functions/bridge-request';
 
 const handler = async (event: RoutePayload) => {
   if (!event.userWorkspaceId) {
     throw new Error('Authentication required');
   }
 
-  return bridgeRequest('/status');
+  return getBridgeStatus();
 };
 
 export default defineLogicFunction({

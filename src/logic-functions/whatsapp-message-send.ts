@@ -1,6 +1,6 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
-import { bridgeJsonRequest, bridgeRequest } from 'src/logic-functions/bridge-request';
+import { bridgeFetch, bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { applicationClient, findMessageByRequestId, userClient } from 'src/logic-functions/message-data';
 
 type Attachment = { fileId: string; label: string; mimeType: string; size: number };
@@ -43,19 +43,14 @@ export const downloadAttachment = async (attachment: Attachment, signedUrl: stri
 };
 
 const sendAttachment = async (requestId: string, chatId: string, accountPhoneNumber: string, caption: string, attachment: Attachment, signedUrl: string): Promise<SendReceipt> => {
-  const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;
-  const bridgeToken = process.env.WHATSAPP_BRIDGE_TOKEN;
-  if (!bridgeUrl || !bridgeToken) throw new Error('WhatsApp bridge variables are not configured');
   const bytes = await downloadAttachment(attachment, signedUrl);
   const kind = mediaKindForMimeType(attachment.mimeType);
   const metadata = Buffer.from(JSON.stringify({ requestId, chatId, accountPhoneNumber, kind, mimeType: attachment.mimeType, fileName: attachment.label, caption })).toString('base64');
-  const response = await fetch(new URL('/send/media', bridgeUrl), {
+  const response = await bridgeFetch('/send/media', {
     method: 'POST',
-    headers: { authorization: `Bearer ${bridgeToken}`, 'content-type': 'application/octet-stream', 'x-whatsapp-media': metadata },
+    headers: { 'content-type': 'application/octet-stream', 'x-whatsapp-media': metadata },
     body: new Uint8Array(bytes).buffer,
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!response.ok) throw new Error(`WhatsApp bridge returned ${response.status}`);
+  }, 120_000);
   return await response.json() as SendReceipt;
 };
 
@@ -88,7 +83,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
     throw new Error('Conversation unavailable');
   }
 
-  const status = await bridgeRequest('/status');
+  const status = await getBridgeStatus();
 
   if (status.state !== 'connected') {
     throw new Error('WhatsApp is disconnected');
@@ -138,7 +133,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
 
   const receipt = attachment
     ? await sendAttachment(requestId, chatId, `+${connectedPhoneNumber}`, caption, attachment, message.media![0].url!)
-    : await bridgeJsonRequest<SendReceipt>('/send', { requestId, chatId, text: caption, accountPhoneNumber: `+${connectedPhoneNumber}` });
+    : await bridgePost<SendReceipt>('/send', { requestId, chatId, text: caption, accountPhoneNumber: `+${connectedPhoneNumber}` });
 
   if (receipt.state === 'sent') {
     await client.mutation({
@@ -153,7 +148,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
         id: true,
       },
     });
-    await bridgeJsonRequest('/events/notify').catch(() => undefined);
+    await bridgePost('/events/notify').catch(() => undefined);
   }
 
   return { messageId: message.id, state: receipt.state };

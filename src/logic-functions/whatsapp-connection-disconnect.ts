@@ -1,6 +1,6 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
-import { bridgeRequest } from 'src/logic-functions/bridge-request';
+import { bridgePost, getBridgeStatus, type BridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
 import { applicationClient } from 'src/logic-functions/message-data';
 
@@ -13,8 +13,8 @@ const handler = async (event: RoutePayload) => {
     throw new Error('Only workspace administrators can disconnect WhatsApp');
   }
 
-  const status = await bridgeRequest('/status');
-  const result = await bridgeRequest('/disconnect');
+  const status = await getBridgeStatus();
+  const result = await bridgePost<BridgeStatus>('/disconnect');
   const phoneNumber = status.phoneNumber ? `+${status.phoneNumber.replace(/\D/g, '')}` : undefined;
 
   if (phoneNumber) {

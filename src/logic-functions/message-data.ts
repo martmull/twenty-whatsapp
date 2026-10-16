@@ -1,6 +1,6 @@
 import { CoreApiClient } from 'twenty-client-sdk/core';
 
-import { bridgeJsonRequest, bridgeRequest } from 'src/logic-functions/bridge-request';
+import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { importMessageMedia } from 'src/logic-functions/message-media';
 
 export type Conversation = {
@@ -405,7 +405,7 @@ const syncConversationNames = async (client: CoreApiClient, accountId: string): 
     const connection = result.whatsappConversations;
     const conversations = (connection?.edges ?? []).map(({ node }) => node);
     if (conversations.length > 0) {
-      const names = await bridgeJsonRequest<{ chatId: string; name: string }[]>('/history/names', {
+      const names = await bridgePost<{ chatId: string; name: string }[]>('/history/names', {
         chatIds: conversations.map((conversation) => conversation.chatId).filter((chatId): chatId is string => typeof chatId === 'string'),
       });
       const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name]));
@@ -439,7 +439,7 @@ const syncConversationNames = async (client: CoreApiClient, accountId: string): 
 };
 
 export const syncMessages = async (): Promise<{ imported: number; ignored: number }> => {
-  const status = await bridgeRequest('/status');
+  const status = await getBridgeStatus();
   const phoneNumber = status.phoneNumber ? `+${digits(status.phoneNumber)}` : undefined;
 
   if (!phoneNumber || status.state !== 'connected') {
@@ -449,7 +449,7 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
   const client = applicationClient();
   const accountId = await ensureAccount(client, phoneNumber);
 
-  const { leaseId, events } = await bridgeJsonRequest<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
+  const { leaseId, events } = await bridgePost<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
 
   if (!leaseId || events.length === 0) {
     await syncConversationNames(client, accountId).catch(() => undefined);
@@ -478,7 +478,7 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
           ignored += 1;
         }
 
-        await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+        await bridgePost('/events/ack', { eventIds: [event.eventId] });
         continue;
       }
 
@@ -486,7 +486,7 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
 
       if (candidates.length !== 1) {
         ignored += 1;
-        await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+        await bridgePost('/events/ack', { eventIds: [event.eventId] });
         continue;
       }
 
@@ -494,12 +494,12 @@ export const syncMessages = async (): Promise<{ imported: number; ignored: numbe
         imported += 1;
       }
 
-      await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
+      await bridgePost('/events/ack', { eventIds: [event.eventId] });
     }
 
     completed = true;
   } finally {
-    await bridgeJsonRequest('/events/release', { leaseId, completed }).catch(() => undefined);
+    await bridgePost('/events/release', { leaseId, completed }).catch(() => undefined);
   }
   await syncConversationNames(client, accountId).catch(() => undefined);
   return { imported, ignored };

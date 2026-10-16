@@ -7,7 +7,8 @@ import { type ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 
 import { WHATSAPP_MESSAGE_MEDIA_FIELD_ID } from 'src/constants/whatsapp-media-field';
-import { bridgeMediaRequest } from 'src/logic-functions/bridge-request';
+import { bridgeFetch } from 'src/logic-functions/bridge-request';
+import { isEventId } from 'src/logic-functions/utils/validators';
 
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
 
@@ -51,11 +52,12 @@ const putMedia = async (body: ReadableStream<Uint8Array>, sizeBytes: number, url
 };
 
 export const importMessageMedia = async (event: MediaEvent): Promise<{ fileId: string; label: string } | undefined> => {
-  if (!event.media) {
+  if (!event.media || !isEventId(event.eventId)) {
     return undefined;
   }
 
-  const response = await bridgeMediaRequest(event.eventId);
+  // Media can expire on WhatsApp's side; the message is still imported without it.
+  const response = await bridgeFetch(`/media/${event.eventId}`, {}, 55_000).catch(() => undefined);
   if (!response) {
     return undefined;
   }

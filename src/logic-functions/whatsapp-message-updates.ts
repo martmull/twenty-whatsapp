@@ -1,6 +1,6 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
-import { bridgeJsonRequest } from 'src/logic-functions/bridge-request';
+import { bridgePost } from 'src/logic-functions/bridge-request';
 
 type UpdatesRequest = { cursor?: string };
 type UpdatesResponse = { cursor: string; changed: boolean };
@@ -15,7 +15,7 @@ const handler = async (event: RoutePayload<UpdatesRequest>): Promise<UpdatesResp
     throw new Error('Invalid update cursor');
   }
 
-  return bridgeJsonRequest<UpdatesResponse>('/events/wait', { cursor });
+  return bridgePost<UpdatesResponse>('/events/wait', { cursor }, 25_000);
 };
 
 export default defineLogicFunction({
