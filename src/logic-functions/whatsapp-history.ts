@@ -1,29 +1,25 @@
 import { defineLogicFunction } from 'twenty-sdk/define';
+import { enqueueJobs, getJobs } from 'twenty-sdk/logic-function';
+
+import { HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
 
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
-import {
-  applicationClient,
-  ensureAccount,
-  findPeopleByPhones,
-  importChatMessages,
-  personName,
-  userClient,
-  type BridgeMessageEvent,
-  type Person,
-} from 'src/logic-functions/message-data';
+import { applicationClient, findPeopleByPhones, personName } from 'src/logic-functions/message-data';
+import type { HistoryImportJob } from 'src/logic-functions/whatsapp-history-import-job';
 import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
 import { chatNumber, digits, isChatId, isGroupChatId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
 
+type ImportChat = { chatId: string; createPerson?: boolean; firstName?: string; lastName?: string };
+
 type HistoryRequest = {
-  action?: 'list' | 'import' | 'members';
+  action?: 'list' | 'import' | 'progress' | 'members';
   rangeDays?: 0 | 30 | 90;
   kind?: 'all' | 'direct' | 'group';
   offset?: number;
   chatId?: string;
-  createPerson?: boolean;
-  firstName?: string;
-  lastName?: string;
+  chats?: ImportChat[];
+  jobIds?: string[];
 };
 
 type HistoryCandidate = {
@@ -33,7 +29,12 @@ type HistoryCandidate = {
   messageCount: number;
   lastMessageAt?: string;
 };
-type HistoryMessages = { name: string; messages: BridgeMessageEvent[]; total: number; nextOffset?: number };
+
+// getJobs and enqueueJobs both take at most 200 jobs.
+const MAX_JOBS = 200;
+
+const isOptionalName = (value: unknown) =>
+  value === undefined || (typeof value === 'string' && value.trim() !== '' && value.length <= 80);
 
 const listCandidates = async (request: HistoryRequest) => {
   const offset = request.offset ?? 0;
@@ -78,68 +79,6 @@ const listCandidates = async (request: HistoryRequest) => {
   };
 };
 
-// Finds the Person for a direct chat, creating or renaming them as the admin asked.
-const resolvePerson = async (
-  request: HistoryRequest,
-  chatId: string,
-  historyName: string,
-): Promise<{ person: Person; createdPerson: boolean }> => {
-  const matches = (await findPeopleByPhones(applicationClient(), [chatNumber(chatId)])).get(chatNumber(chatId)) ?? [];
-
-  if (matches.length > 1) {
-    throw new HttpError(409, 'More than one Person has this phone number');
-  }
-
-  for (const value of [request.firstName, request.lastName]) {
-    if (value !== undefined && (typeof value !== 'string' || value.length > 80 || !value.trim())) {
-      throw new HttpError(400, 'Invalid Person name');
-    }
-  }
-
-  const [suggestedFirstName = '', ...suggestedLastName] = isPhoneLikeName(historyName)
-    ? []
-    : historyName.trim().split(/\s+/);
-  const firstName = request.firstName?.trim() || suggestedFirstName;
-  const lastName = request.lastName?.trim() || suggestedLastName.join(' ');
-  const existing = matches[0];
-
-  if (!existing) {
-    if (request.createPerson !== true) throw new HttpError(409, 'This contact is not matched to a Person');
-    if (!firstName) throw new HttpError(400, 'Enter a first name for this contact');
-
-    // Created as the admin, so their own permissions apply.
-    const created = await userClient().mutation({
-      createPerson: {
-        __args: {
-          data: {
-            name: { firstName, lastName },
-            phones: {
-              primaryPhoneNumber: `+${chatNumber(chatId)}`,
-              primaryPhoneCountryCode: '',
-              primaryPhoneCallingCode: '',
-              additionalPhones: null,
-            },
-          },
-        },
-        id: true,
-      },
-    });
-    const id = created.createPerson?.id;
-    if (!id) throw new Error('Could not create Person');
-
-    return { person: { id, name: { firstName, lastName } }, createdPerson: true };
-  }
-
-  if (isPhoneLikeName(personName(existing)) && firstName) {
-    await userClient().mutation({
-      updatePerson: { __args: { id: existing.id, data: { name: { firstName, lastName } } }, id: true },
-    });
-    return { person: { ...existing, name: { firstName, lastName } }, createdPerson: false };
-  }
-
-  return { person: existing, createdPerson: false };
-};
-
 const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) => {
   requireUser(event);
 
@@ -149,7 +88,19 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
 
   const request = event.body ?? {};
 
-  if (request.rangeDays !== 0 && request.rangeDays !== 30 && request.rangeDays !== 90) {
+  // Import jobs report their state by job ID; the page polls this while an import runs.
+  if (request.action === 'progress') {
+    const jobIds = request.jobIds;
+    if (!Array.isArray(jobIds) || jobIds.length > MAX_JOBS || !jobIds.every((id) => typeof id === 'string')) {
+      throw new HttpError(400, 'Invalid job IDs');
+    }
+    const jobs = await getJobs(jobIds);
+    return { jobs: jobs.map(({ jobId, state, failedReason }) => ({ jobId, state, failedReason })) };
+  }
+
+  const rangeDays = request.rangeDays;
+
+  if (rangeDays !== 0 && rangeDays !== 30 && rangeDays !== 90) {
     throw new HttpError(400, 'Invalid history range');
   }
 
@@ -168,31 +119,45 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     return listCandidates(request);
   }
 
-  const chatId = request.chatId;
+  if (request.action !== 'import') {
+    throw new HttpError(400, 'Invalid history request');
+  }
 
-  if (request.action !== 'import' || !isChatId(chatId) || !Number.isInteger(request.offset) || request.offset! < 0) {
+  const chats = request.chats;
+  const ownNumber = digits(status.phoneNumber);
+
+  if (
+    !Array.isArray(chats) ||
+    chats.length === 0 ||
+    chats.length > MAX_JOBS ||
+    chats.some(
+      (chat) =>
+        !isChatId(chat.chatId) ||
+        chatNumber(chat.chatId) === ownNumber ||
+        !isOptionalName(chat.firstName) ||
+        !isOptionalName(chat.lastName),
+    )
+  ) {
     throw new HttpError(400, 'Invalid history import request');
   }
 
-  if (chatNumber(chatId) === digits(status.phoneNumber)) {
-    throw new HttpError(400, 'Cannot import the linked account as a contact');
-  }
+  // One background job per chat: the import keeps going if the page is closed.
+  const { jobIds } = await enqueueJobs({
+    logicFunctionUniversalIdentifier: HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER,
+    jobs: chats.map((chat) => ({
+      payload: {
+        chatId: chat.chatId,
+        rangeDays,
+        createPerson: chat.createPerson === true,
+        firstName: chat.firstName,
+        lastName: chat.lastName,
+      } satisfies HistoryImportJob,
+    })),
+    retryLimit: 3,
+  });
 
-  const history = await bridgePost<HistoryMessages>(
-    '/history/messages',
-    { chatId, rangeDays: request.rangeDays, offset: request.offset, limit: 25 },
-    30_000,
-  );
-  const client = applicationClient();
-  const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
-  const { person, createdPerson } = isGroupChatId(chatId)
-    ? { person: undefined, createdPerson: false }
-    : await resolvePerson(request, chatId, history.name);
-  const name = person ? personName(person) || chatNumber(chatId) : history.name.slice(0, 120);
-  const imported = await importChatMessages(client, accountId, chatId, name, history.messages, person);
-
-  logger.info('Imported history page', { imported, offset: request.offset, createdPerson });
-  return { imported, total: history.total, nextOffset: history.nextOffset, createdPerson };
+  logger.info('Queued history import', { chats: chats.length });
+  return { jobIds };
 });
 
 export default defineLogicFunction({

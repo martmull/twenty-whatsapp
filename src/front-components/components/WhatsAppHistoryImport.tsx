@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { enqueueSnackbar, t } from 'twenty-sdk/front-component';
 import { Callout } from 'twenty-ui/components';
 import { Tag } from 'twenty-ui/primitives/data-display';
@@ -26,7 +26,28 @@ type HistoryCandidate = {
   renameable?: boolean;
 };
 
-type ImportResult = { imported: number; total: number; nextOffset?: number; createdPerson: boolean };
+type JobStatus = { jobId: string; state: string; failedReason?: string | null };
+
+// The running import's job IDs, kept so the progress shows again after a reload.
+const JOB_IDS_KEY = 'whatsapp-history-import-jobs';
+
+const storedJobIds = (): string[] => {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(JOB_IDS_KEY) ?? '[]');
+    return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+
+const storeJobIds = (jobIds: string[]) => {
+  try {
+    if (jobIds.length) localStorage.setItem(JOB_IDS_KEY, JSON.stringify(jobIds));
+    else localStorage.removeItem(JOB_IDS_KEY);
+  } catch {
+    // Without storage the progress just doesn't survive a reload.
+  }
+};
 
 const isPhoneLikeName = (name: string) => /^\+?\d+$/.test(name.trim());
 
@@ -53,8 +74,10 @@ export const WhatsAppHistoryImport = () => {
   const [names, setNames] = useState<Record<string, Name>>({});
   const [members, setMembers] = useState<Record<string, GroupMember[]>>({});
   const [working, setWorking] = useState(false);
-  // Import progress from 0 to 100, undefined when no import is running.
-  const [progress, setProgress] = useState<number>();
+  // One background job per imported chat; empty when no import is running.
+  const [jobIds, setJobIds] = useState<string[]>(storedJobIds);
+  const [finishedJobs, setFinishedJobs] = useState(0);
+  const importing = jobIds.length > 0;
 
   const load = async (range: RangeDays, kind: ChatFilter, offset = 0) => {
     setWorking(true);
@@ -106,41 +129,69 @@ export const WhatsAppHistoryImport = () => {
     }
 
     setWorking(true);
-    let imported = 0;
-
     try {
-      for (const [index, item] of chosen.entries()) {
-        setProgress((100 * index) / chosen.length);
-        let offset: number | undefined = 0;
-
-        // The server imports one page at a time and tells us where to continue.
-        while (offset !== undefined) {
-          const result: ImportResult = await callApp<ImportResult>('history', {
-            action: 'import',
-            rangeDays,
+      const result = await callApp<{ jobIds: string[] }>('history', {
+        action: 'import',
+        rangeDays,
+        chats: chosen.map((item) => {
+          const name = nameFor(item);
+          return {
             chatId: item.chatId,
-            offset,
             createPerson: item.match === 'new',
-            ...(needsName(item) ? nameFor(item) : {}),
-          });
-          imported += result.imported;
-          offset = result.nextOffset;
-          // Each chat is an equal share of the bar, filled as its pages are imported.
-          const chatDone = offset === undefined || result.total === 0 ? 1 : offset / result.total;
-          setProgress((100 * (index + chatDone)) / chosen.length);
-        }
-      }
-
-      void enqueueSnackbar({ message: `${t('Imported messages')}: ${imported}`, variant: 'success' });
+            ...(needsName(item)
+              ? { firstName: name.firstName.trim() || undefined, lastName: name.lastName.trim() || undefined }
+              : {}),
+          };
+        }),
+      });
+      storeJobIds(result.jobIds);
+      setFinishedJobs(0);
+      setJobIds(result.jobIds);
       setSelected([]);
-      await load(rangeDays, chatFilter);
     } catch (error) {
-      showError(error, t('Import stopped. Retry to continue, duplicates are skipped.'));
+      showError(error, t('Could not start the import'));
     } finally {
       setWorking(false);
-      setProgress(undefined);
     }
   };
+
+  // Follow the import jobs until they have all finished.
+  useEffect(() => {
+    if (jobIds.length === 0) return;
+    let active = true;
+
+    const poll = async () => {
+      const result = await callApp<{ jobs: JobStatus[] }>('history', { action: 'progress', jobIds }).catch(
+        () => undefined,
+      );
+      if (!active || !result) return;
+
+      // A job the queue no longer returns finished long ago.
+      const running = result.jobs.filter((job) => job.state !== 'COMPLETED' && job.state !== 'FAILED');
+      const failed = result.jobs.filter((job) => job.state === 'FAILED');
+      setFinishedJobs(jobIds.length - running.length);
+
+      if (running.length === 0) {
+        void enqueueSnackbar(
+          failed.length
+            ? {
+                message: `${t('Chats not imported')}: ${failed.length}. ${t('Retry them, duplicates are skipped.')}`,
+                variant: 'warning',
+              }
+            : { message: t('History import complete'), variant: 'success' },
+        );
+        storeJobIds([]);
+        setJobIds([]);
+      }
+    };
+
+    void poll();
+    const timer = setInterval(poll, 2_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [jobIds]);
 
   const filterButton = (label: string, active: boolean, onClick: () => void) => (
     <Button
@@ -162,6 +213,8 @@ export const WhatsAppHistoryImport = () => {
           <Heading level={2} size="sm">
             {t('Import history')}
           </Heading>
+
+          {importing && <ProgressBar value={(100 * finishedJobs) / jobIds.length} ariaLabel={t('Import progress')} />}
 
           {!items && (
             <div>
@@ -302,14 +355,13 @@ export const WhatsAppHistoryImport = () => {
                   variant="solid"
                   color="accent"
                   size="sm"
-                  disabled={working || selected.length === 0}
-                  loading={progress !== undefined}
+                  disabled={working || importing || selected.length === 0}
+                  loading={importing}
                   onClick={() => void importSelected()}
                 >
                   {t('Import selected')} ({selected.length})
                 </Button>
               </div>
-              {progress !== undefined && <ProgressBar value={progress} ariaLabel={t('Import progress')} />}
             </>
           )}
         </div>
