@@ -44,21 +44,31 @@ const loadLastReadAt = async (userWorkspaceId: string, conversations: Conversati
 
   const result = await applicationClient().query({
     whatsappConversationReadStates: {
-      __args: { filter: { name: { in: conversations.map((conversation) => `${userWorkspaceId}:${conversation.id}`) } }, first: conversations.length },
+      __args: {
+        filter: { name: { in: conversations.map((conversation) => `${userWorkspaceId}:${conversation.id}`) } },
+        first: conversations.length,
+      },
       edges: { node: { name: true, lastReadAt: true } },
     },
   });
 
-  return new Map((result.whatsappConversationReadStates?.edges ?? []).map(({ node }: { node: { name: string; lastReadAt: string } }) => [node.name, node.lastReadAt]));
+  return new Map(
+    (result.whatsappConversationReadStates?.edges ?? []).map(
+      ({ node }: { node: { name: string; lastReadAt: string } }) => [node.name, node.lastReadAt],
+    ),
+  );
 };
 
 const handler = route<ListRequest>('whatsapp-message-list', async (event) => {
   const userWorkspaceId = requireUser(event);
   const { personId, conversationId, search, before } = event.body ?? {};
 
-  if ((personId && !isUuid(personId)) || (conversationId && !isUuid(conversationId)) ||
+  if (
+    (personId && !isUuid(personId)) ||
+    (conversationId && !isUuid(conversationId)) ||
     (search !== undefined && (typeof search !== 'string' || search.length > 100)) ||
-    (before !== undefined && !Number.isFinite(Date.parse(before)))) {
+    (before !== undefined && !Number.isFinite(Date.parse(before)))
+  ) {
     throw new HttpError(400, 'Invalid request');
   }
 
@@ -83,8 +93,11 @@ const handler = route<ListRequest>('whatsapp-message-list', async (event) => {
     }),
     getBridgeStatus().catch(() => ({ state: 'unavailable' as const })),
   ]);
-  const visibleConversations: Conversation[] = (result.whatsappConversations?.edges ?? []).map(({ node }: { node: Conversation }) => node);
-  const selected = visibleConversations.find((conversation) => conversation.id === conversationId) ?? visibleConversations[0];
+  const visibleConversations: Conversation[] = (result.whatsappConversations?.edges ?? []).map(
+    ({ node }: { node: Conversation }) => node,
+  );
+  const selected =
+    visibleConversations.find((conversation) => conversation.id === conversationId) ?? visibleConversations[0];
 
   const [lastReadAtByName, thread, groupMembers] = await Promise.all([
     loadLastReadAt(userWorkspaceId, visibleConversations),
@@ -96,10 +109,20 @@ const handler = route<ListRequest>('whatsapp-message-list', async (event) => {
 
   const conversations = visibleConversations.map((conversation) => {
     const lastReadAt = lastReadAtByName.get(`${userWorkspaceId}:${conversation.id}`);
-    return { ...conversation, lastReadAt, unread: Boolean(conversation.lastInboundAt && (!lastReadAt || conversation.lastInboundAt > lastReadAt)) };
+    return {
+      ...conversation,
+      lastReadAt,
+      unread: Boolean(conversation.lastInboundAt && (!lastReadAt || conversation.lastInboundAt > lastReadAt)),
+    };
   });
 
-  return { conversations, selectedConversationId: selected?.id, ...thread, groupMembers, connectionState: status.state };
+  return {
+    conversations,
+    selectedConversationId: selected?.id,
+    ...thread,
+    groupMembers,
+    connectionState: status.state,
+  };
 });
 
 export default defineLogicFunction({

@@ -14,11 +14,28 @@ type ConversationListProps = {
   onSelect: (conversationId: string) => void;
 };
 
-export const ConversationList = ({ conversations, selectedId, search, onSearchChange, onSelect }: ConversationListProps) => (
-  <aside style={{ borderRight: `1px solid ${themeCssVariables.border.color.medium}`, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+export const ConversationList = ({
+  conversations,
+  selectedId,
+  search,
+  onSearchChange,
+  onSelect,
+}: ConversationListProps) => (
+  <aside
+    style={{
+      borderRight: `1px solid ${themeCssVariables.border.color.medium}`,
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: 0,
+    }}
+  >
     {onSearchChange && (
       <div style={{ padding: themeCssVariables.spacing[2] }}>
-        <SearchInput value={search} placeholder={t('Search')} onChange={(event) => onSearchChange(event.target.value)} />
+        <SearchInput
+          value={search}
+          placeholder={t('Search')}
+          onChange={(event) => onSearchChange(event.target.value)}
+        />
       </div>
     )}
     <div style={{ overflowY: 'auto' }}>
@@ -29,7 +46,13 @@ export const ConversationList = ({ conversations, selectedId, search, onSearchCh
           onClick={() => onSelect(conversation.id)}
           startIcon={<Avatar name={conversation.name} colorSeed={conversation.id} size="md" />}
           description={conversation.lastPreview ?? ''}
-          endIcon={conversation.unread ? <NotificationCounter count={1} /> : <small>{formatTime(conversation.lastMessageAt)}</small>}
+          endIcon={
+            conversation.unread ? (
+              <NotificationCounter count={1} />
+            ) : (
+              <small>{formatTime(conversation.lastMessageAt)}</small>
+            )
+          }
         >
           <span style={{ fontWeight: conversation.unread ? 700 : undefined }}>{conversation.name}</span>
         </ListItem>

@@ -8,7 +8,8 @@ const handler = async () => {
   const logger = createLogger('whatsapp-message-sync');
   const result = await syncMessages(logger);
   await syncConversationNames(logger).catch((error) =>
-    logger.warn('Could not sync conversation names', { error: String(error) }));
+    logger.warn('Could not sync conversation names', { error: String(error) }),
+  );
 
   return result;
 };

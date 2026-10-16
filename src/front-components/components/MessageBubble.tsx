@@ -13,20 +13,33 @@ type MessageBubbleProps = {
 
 const MessageMedia = ({ message }: { message: Message }) => {
   const url = message.media?.[0]?.url;
-  const mediaStyle = { display: 'block', maxHeight: 360, maxWidth: '100%', borderRadius: themeCssVariables.border.radius.sm };
+  const mediaStyle = {
+    display: 'block',
+    maxHeight: 360,
+    maxWidth: '100%',
+    borderRadius: themeCssVariables.border.radius.sm,
+  };
 
   if (!message.mediaKind) return null;
   if (!url) return <div style={{ color: themeCssVariables.font.color.tertiary }}>{t('Media unavailable')}</div>;
 
   switch (message.mediaKind) {
     case 'IMAGE':
-      return <a href={url} target="_blank" rel="noopener noreferrer"><img src={url} alt={t('WhatsApp image')} loading="lazy" style={{ ...mediaStyle, objectFit: 'contain' }} /></a>;
+      return (
+        <a href={url} target="_blank" rel="noopener noreferrer">
+          <img src={url} alt={t('WhatsApp image')} loading="lazy" style={{ ...mediaStyle, objectFit: 'contain' }} />
+        </a>
+      );
     case 'VIDEO':
       return <video controls preload="metadata" src={url} style={mediaStyle} />;
     case 'AUDIO':
       return <audio controls preload="metadata" src={url} style={{ display: 'block', maxWidth: '100%', width: 320 }} />;
     default:
-      return <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>{message.media?.[0]?.label || t('Download file')}</a>;
+      return (
+        <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>
+          {message.media?.[0]?.label || t('Download file')}
+        </a>
+      );
   }
 };
 
@@ -34,18 +47,24 @@ export const MessageBubble = ({ message, senderName, highlighted }: MessageBubbl
   const outbound = message.direction === 'OUTBOUND';
 
   return (
-    <div style={{
-      alignSelf: outbound ? 'flex-end' : 'flex-start',
-      background: outbound ? themeCssVariables.color.green3 : themeCssVariables.background.primary,
-      border: `1px solid ${highlighted ? themeCssVariables.color.blue : themeCssVariables.border.color.medium}`,
-      borderRadius: themeCssVariables.border.radius.md,
-      color: themeCssVariables.font.color.primary,
-      display: 'grid',
-      gap: themeCssVariables.spacing[1],
-      maxWidth: '78%',
-      padding: `${themeCssVariables.spacing[2]} ${themeCssVariables.spacing[3]}`,
-    }}>
-      {senderName && <strong style={{ color: themeCssVariables.color.green11, fontSize: themeCssVariables.font.size.sm }}>{senderName}</strong>}
+    <div
+      style={{
+        alignSelf: outbound ? 'flex-end' : 'flex-start',
+        background: outbound ? themeCssVariables.color.green3 : themeCssVariables.background.primary,
+        border: `1px solid ${highlighted ? themeCssVariables.color.blue : themeCssVariables.border.color.medium}`,
+        borderRadius: themeCssVariables.border.radius.md,
+        color: themeCssVariables.font.color.primary,
+        display: 'grid',
+        gap: themeCssVariables.spacing[1],
+        maxWidth: '78%',
+        padding: `${themeCssVariables.spacing[2]} ${themeCssVariables.spacing[3]}`,
+      }}
+    >
+      {senderName && (
+        <strong style={{ color: themeCssVariables.color.green11, fontSize: themeCssVariables.font.size.sm }}>
+          {senderName}
+        </strong>
+      )}
       <MessageMedia message={message} />
       {!(message.mediaKind && PLACEHOLDER_TEXTS.includes(message.text)) && (
         <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>

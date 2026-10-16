@@ -13,7 +13,11 @@ const handler = route<{ sentAt?: string }>('whatsapp-bridge-webhook', async (eve
   const signature = event.headers['x-whatsapp-signature'] ?? '';
   const expected = token && event.rawBody ? createHmac('sha256', token).update(event.rawBody).digest('hex') : '';
 
-  if (!expected || signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+  if (
+    !expected ||
+    signature.length !== expected.length ||
+    !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+  ) {
     throw new HttpError(401, 'Invalid signature');
   }
 

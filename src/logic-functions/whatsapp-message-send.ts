@@ -1,7 +1,13 @@
 import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { bridgeFetch, bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
-import { applicationClient, findMessageByRequestId, MESSAGE_FIELDS, userClient, type Message } from 'src/logic-functions/message-data';
+import {
+  applicationClient,
+  findMessageByRequestId,
+  MESSAGE_FIELDS,
+  userClient,
+  type Message,
+} from 'src/logic-functions/message-data';
 import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
 import { digits, isChatId, isUuid } from 'src/logic-functions/utils/validators';
 
@@ -12,8 +18,10 @@ type SendReceipt = { state: 'unknown' | 'sent'; eventId?: string };
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
 
 const mediaKindForMimeType = (mimeType: string): 'image' | 'video' | 'document' =>
-  ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType) ? 'image'
-    : ['video/mp4', 'video/quicktime', 'video/3gpp'].includes(mimeType) ? 'video'
+  ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)
+    ? 'image'
+    : ['video/mp4', 'video/quicktime', 'video/3gpp'].includes(mimeType)
+      ? 'video'
       : 'document';
 
 // File names must not contain path separators or control characters.
@@ -24,14 +32,20 @@ const PLACEHOLDER_TEXT = { image: '[Image]', video: '[Video]', document: '[File]
 
 const isValidAttachment = (attachment: Attachment) =>
   isUuid(attachment.fileId) &&
-  Boolean(attachment.label) && attachment.label.length <= 255 && !UNSAFE_FILE_NAME.test(attachment.label) &&
+  Boolean(attachment.label) &&
+  attachment.label.length <= 255 &&
+  !UNSAFE_FILE_NAME.test(attachment.label) &&
   /^[\w.+-]+\/[\w.+-]+$/.test(attachment.mimeType) &&
-  Number.isSafeInteger(attachment.size) && attachment.size >= 1 && attachment.size <= MAX_MEDIA_BYTES;
+  Number.isSafeInteger(attachment.size) &&
+  attachment.size >= 1 &&
+  attachment.size <= MAX_MEDIA_BYTES;
 
 // Downloads a file the user uploaded to the message Media field, from the signed URL Twenty returned.
 export const downloadAttachment = async (attachment: Attachment, signedUrl: string): Promise<Buffer> => {
   const url = new URL(signedUrl);
-  const validFilePath = [`/file/FilesField/${attachment.fileId}`, `/file/files-field/${attachment.fileId}`].includes(url.pathname);
+  const validFilePath = [`/file/FilesField/${attachment.fileId}`, `/file/files-field/${attachment.fileId}`].includes(
+    url.pathname,
+  );
 
   if (!validFilePath || !url.searchParams.get('token')) {
     throw new Error('Invalid attachment URL');
@@ -60,21 +74,47 @@ export const downloadAttachment = async (attachment: Attachment, signedUrl: stri
   return Buffer.concat(chunks, size);
 };
 
-const sendToBridge = async (message: Message, chatId: string, accountPhoneNumber: string, caption: string, attachment?: Attachment): Promise<SendReceipt> => {
+const sendToBridge = async (
+  message: Message,
+  chatId: string,
+  accountPhoneNumber: string,
+  caption: string,
+  attachment?: Attachment,
+): Promise<SendReceipt> => {
   if (!attachment) {
-    return bridgePost<SendReceipt>('/send', { requestId: message.requestId, chatId, text: caption, accountPhoneNumber });
+    return bridgePost<SendReceipt>('/send', {
+      requestId: message.requestId,
+      chatId,
+      text: caption,
+      accountPhoneNumber,
+    });
   }
 
   const signedUrl = message.media?.[0]?.url;
   if (!signedUrl) throw new HttpError(409, 'Attachment is unavailable');
 
   const bytes = await downloadAttachment(attachment, signedUrl);
-  const metadata = { requestId: message.requestId, chatId, accountPhoneNumber, kind: mediaKindForMimeType(attachment.mimeType), mimeType: attachment.mimeType, fileName: attachment.label, caption };
-  const response = await bridgeFetch('/send/media', {
-    method: 'POST',
-    headers: { 'content-type': 'application/octet-stream', 'x-whatsapp-media': Buffer.from(JSON.stringify(metadata)).toString('base64') },
-    body: new Uint8Array(bytes).buffer,
-  }, 120_000);
+  const metadata = {
+    requestId: message.requestId,
+    chatId,
+    accountPhoneNumber,
+    kind: mediaKindForMimeType(attachment.mimeType),
+    mimeType: attachment.mimeType,
+    fileName: attachment.label,
+    caption,
+  };
+  const response = await bridgeFetch(
+    '/send/media',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'x-whatsapp-media': Buffer.from(JSON.stringify(metadata)).toString('base64'),
+      },
+      body: new Uint8Array(bytes).buffer,
+    },
+    120_000,
+  );
 
   return (await response.json()) as SendReceipt;
 };
@@ -84,8 +124,14 @@ const handler = route<SendRequest>('whatsapp-message-send', async (event, logger
   requireUser(event);
   const { conversationId, requestId, text, attachment } = event.body ?? {};
 
-  if (!isUuid(conversationId) || !isUuid(requestId) || typeof text !== 'string' || text.length > 4096 ||
-    (!attachment && !text.trim()) || (attachment && !isValidAttachment(attachment))) {
+  if (
+    !isUuid(conversationId) ||
+    !isUuid(requestId) ||
+    typeof text !== 'string' ||
+    text.length > 4096 ||
+    (!attachment && !text.trim()) ||
+    (attachment && !isValidAttachment(attachment))
+  ) {
     throw new HttpError(400, 'Invalid message');
   }
 
@@ -127,7 +173,12 @@ const handler = route<SendRequest>('whatsapp-message-send', async (event, logger
 
   let message = await findMessageByRequestId(client, requestId);
 
-  if (message && (message.conversationId !== conversationId || message.text !== messageText || message.media?.[0]?.fileId !== attachment?.fileId)) {
+  if (
+    message &&
+    (message.conversationId !== conversationId ||
+      message.text !== messageText ||
+      message.media?.[0]?.fileId !== attachment?.fileId)
+  ) {
     throw new HttpError(409, 'Request ID already used');
   }
 
@@ -143,7 +194,9 @@ const handler = route<SendRequest>('whatsapp-message-send', async (event, logger
             sentAt: new Date().toISOString(),
             deliveryState: 'UNKNOWN',
             requestId,
-            ...(attachment ? { mediaKind: mediaKind!.toUpperCase(), media: [{ fileId: attachment.fileId, label: attachment.label }] } : {}),
+            ...(attachment
+              ? { mediaKind: mediaKind!.toUpperCase(), media: [{ fileId: attachment.fileId, label: attachment.label }] }
+              : {}),
           },
         },
         ...MESSAGE_FIELDS,
@@ -158,14 +211,27 @@ const handler = route<SendRequest>('whatsapp-message-send', async (event, logger
   }
 
   const receipt = await sendToBridge(message, conversation.chatId, accountPhoneNumber, text, attachment);
-  logger.info('Message sent to bridge', { messageId: message.id, state: receipt.state, hasAttachment: Boolean(attachment) });
+  logger.info('Message sent to bridge', {
+    messageId: message.id,
+    state: receipt.state,
+    hasAttachment: Boolean(attachment),
+  });
 
   if (receipt.state === 'sent') {
     await client.mutation({
-      updateWhatsappMessage: { __args: { id: message.id, data: { deliveryState: 'SENT', externalId: receipt.eventId } }, id: true },
+      updateWhatsappMessage: {
+        __args: { id: message.id, data: { deliveryState: 'SENT', externalId: receipt.eventId } },
+        id: true,
+      },
     });
     await client.mutation({
-      updateWhatsappConversation: { __args: { id: conversationId, data: { lastMessageAt: new Date().toISOString(), lastPreview: messageText.slice(0, 160) } }, id: true },
+      updateWhatsappConversation: {
+        __args: {
+          id: conversationId,
+          data: { lastMessageAt: new Date().toISOString(), lastPreview: messageText.slice(0, 160) },
+        },
+        id: true,
+      },
     });
   }
 

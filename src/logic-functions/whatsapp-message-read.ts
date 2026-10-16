@@ -59,7 +59,10 @@ const handler = route<ReadRequest>('whatsapp-message-read', async (event) => {
   }
 
   await client.mutation({
-    updateWhatsappConversationReadState: { __args: { id: readState.id, data: { lastReadAt: readThroughAt } }, id: true },
+    updateWhatsappConversationReadState: {
+      __args: { id: readState.id, data: { lastReadAt: readThroughAt } },
+      id: true,
+    },
   });
 
   return { lastReadAt: readThroughAt };

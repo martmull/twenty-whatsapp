@@ -35,12 +35,13 @@ const suggestedName = (item: HistoryCandidate): Name => {
   return { firstName, lastName: lastName.join(' ') };
 };
 
-const matchTag = (match: HistoryCandidate['match']) => ({
-  matched: { label: t('Matched'), color: 'green' as const },
-  new: { label: t('New Person'), color: 'blue' as const },
-  ambiguous: { label: t('Several matches'), color: 'orange' as const },
-  group: { label: t('Group'), color: 'gray' as const },
-})[match];
+const matchTag = (match: HistoryCandidate['match']) =>
+  ({
+    matched: { label: t('Matched'), color: 'green' as const },
+    new: { label: t('New Person'), color: 'blue' as const },
+    ambiguous: { label: t('Several matches'), color: 'orange' as const },
+    group: { label: t('Group'), color: 'gray' as const },
+  })[match];
 
 export const WhatsAppHistoryImport = () => {
   const [rangeDays, setRangeDays] = useState<RangeDays>(30);
@@ -56,8 +57,13 @@ export const WhatsAppHistoryImport = () => {
   const load = async (range: RangeDays, kind: ChatFilter, offset = 0) => {
     setWorking(true);
     try {
-      const page = await callApp<{ items: HistoryCandidate[]; total: number }>('history', { action: 'list', rangeDays: range, kind, offset });
-      setItems((previous) => offset === 0 ? page.items : [...(previous ?? []), ...page.items]);
+      const page = await callApp<{ items: HistoryCandidate[]; total: number }>('history', {
+        action: 'list',
+        rangeDays: range,
+        kind,
+        offset,
+      });
+      setItems((previous) => (offset === 0 ? page.items : [...(previous ?? []), ...page.items]));
       setTotal(page.total);
     } catch (error) {
       showError(error, t('Could not load WhatsApp history'));
@@ -132,17 +138,32 @@ export const WhatsAppHistoryImport = () => {
   };
 
   const filterButton = (label: string, active: boolean, onClick: () => void) => (
-    <Button key={label} variant={active ? 'solid' : 'outline'} color={active ? 'accent' : 'neutral'} size="sm" disabled={working} onClick={onClick}>{label}</Button>
+    <Button
+      key={label}
+      variant={active ? 'solid' : 'outline'}
+      color={active ? 'accent' : 'neutral'}
+      size="sm"
+      disabled={working}
+      onClick={onClick}
+    >
+      {label}
+    </Button>
   );
 
   return (
     <Card.Root>
       <Card.Content>
         <div style={{ display: 'grid', gap: themeCssVariables.spacing[3], padding: themeCssVariables.spacing[4] }}>
-          <Heading level={2} size="sm">{t('Import history')}</Heading>
+          <Heading level={2} size="sm">
+            {t('Import history')}
+          </Heading>
 
           {!items && (
-            <div><Button variant="outline" size="sm" loading={working} onClick={() => void load(rangeDays, chatFilter)}>{t('Review available history')}</Button></div>
+            <div>
+              <Button variant="outline" size="sm" loading={working} onClick={() => void load(rangeDays, chatFilter)}>
+                {t('Review available history')}
+              </Button>
+            </div>
           )}
 
           {items && (
@@ -160,37 +181,102 @@ export const WhatsAppHistoryImport = () => {
               {items.length === 0 && !working && <Callout variant="info" title={t('No history in this range')} />}
 
               {items.map((item) => (
-                <div key={item.chatId} style={{ borderTop: `1px solid ${themeCssVariables.border.color.light}`, display: 'grid', gap: themeCssVariables.spacing[2], paddingTop: themeCssVariables.spacing[2] }}>
+                <div
+                  key={item.chatId}
+                  style={{
+                    borderTop: `1px solid ${themeCssVariables.border.color.light}`,
+                    display: 'grid',
+                    gap: themeCssVariables.spacing[2],
+                    paddingTop: themeCssVariables.spacing[2],
+                  }}
+                >
                   <label style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[3] }}>
                     <FrontComponentCheckbox
                       checked={selected.includes(item.chatId)}
                       disabled={working || item.match === 'ambiguous'}
-                      onChange={(event) => setSelected((previous) => event.target.checked ? [...previous, item.chatId] : previous.filter((id) => id !== item.chatId))}
+                      onChange={(event) =>
+                        setSelected((previous) =>
+                          event.target.checked
+                            ? [...previous, item.chatId]
+                            : previous.filter((id) => id !== item.chatId),
+                        )
+                      }
                     />
                     <span style={{ display: 'grid', flex: 1, minWidth: 0 }}>
                       <strong>{item.name}</strong>
-                      <Text style={{ color: themeCssVariables.font.color.tertiary, fontSize: themeCssVariables.font.size.sm }}>
-                        {item.messageCount} {t('messages')}{item.lastMessageAt ? ` · ${formatTime(item.lastMessageAt)}` : ''}
+                      <Text
+                        style={{
+                          color: themeCssVariables.font.color.tertiary,
+                          fontSize: themeCssVariables.font.size.sm,
+                        }}
+                      >
+                        {item.messageCount} {t('messages')}
+                        {item.lastMessageAt ? ` · ${formatTime(item.lastMessageAt)}` : ''}
                       </Text>
                     </span>
                     {item.kind === 'group' && (
-                      <Button variant="ghost" size="sm" disabled={working} onClick={() => void toggleMembers(item.chatId)}>{t('Members')}</Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={working}
+                        onClick={() => void toggleMembers(item.chatId)}
+                      >
+                        {t('Members')}
+                      </Button>
                     )}
-                    <Tag color={matchTag(item.match).color} variant="soft" preventShrink>{matchTag(item.match).label}</Tag>
+                    <Tag color={matchTag(item.match).color} variant="soft" preventShrink>
+                      {matchTag(item.match).label}
+                    </Tag>
                   </label>
 
                   {members[item.chatId] && (
-                    <Text style={{ color: themeCssVariables.font.color.secondary, fontSize: themeCssVariables.font.size.sm, paddingLeft: themeCssVariables.spacing[6] }}>
-                      {members[item.chatId].map((member) => member.isMe ? t('You') : member.displayName || member.phoneNumber || member.id).join(', ')}
+                    <Text
+                      style={{
+                        color: themeCssVariables.font.color.secondary,
+                        fontSize: themeCssVariables.font.size.sm,
+                        paddingLeft: themeCssVariables.spacing[6],
+                      }}
+                    >
+                      {members[item.chatId]
+                        .map((member) =>
+                          member.isMe ? t('You') : member.displayName || member.phoneNumber || member.id,
+                        )
+                        .join(', ')}
                     </Text>
                   )}
 
                   {needsName(item) && selected.includes(item.chatId) && (
-                    <div style={{ display: 'flex', gap: themeCssVariables.spacing[2], paddingLeft: themeCssVariables.spacing[6] }}>
-                      <Input placeholder={t('First name')} value={nameFor(item).firstName} maxLength={80} disabled={working}
-                        onChange={(event) => setNames((previous) => ({ ...previous, [item.chatId]: { ...nameFor(item), firstName: event.target.value } }))} />
-                      <Input placeholder={t('Last name')} value={nameFor(item).lastName} maxLength={80} disabled={working}
-                        onChange={(event) => setNames((previous) => ({ ...previous, [item.chatId]: { ...nameFor(item), lastName: event.target.value } }))} />
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: themeCssVariables.spacing[2],
+                        paddingLeft: themeCssVariables.spacing[6],
+                      }}
+                    >
+                      <Input
+                        placeholder={t('First name')}
+                        value={nameFor(item).firstName}
+                        maxLength={80}
+                        disabled={working}
+                        onChange={(event) =>
+                          setNames((previous) => ({
+                            ...previous,
+                            [item.chatId]: { ...nameFor(item), firstName: event.target.value },
+                          }))
+                        }
+                      />
+                      <Input
+                        placeholder={t('Last name')}
+                        value={nameFor(item).lastName}
+                        maxLength={80}
+                        disabled={working}
+                        onChange={(event) =>
+                          setNames((previous) => ({
+                            ...previous,
+                            [item.chatId]: { ...nameFor(item), lastName: event.target.value },
+                          }))
+                        }
+                      />
                     </div>
                   )}
                 </div>
@@ -198,9 +284,23 @@ export const WhatsAppHistoryImport = () => {
 
               <div style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2] }}>
                 {items.length < total && (
-                  <Button variant="outline" size="sm" disabled={working} onClick={() => void load(rangeDays, chatFilter, items.length)}>{t('Load more')}</Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={working}
+                    onClick={() => void load(rangeDays, chatFilter, items.length)}
+                  >
+                    {t('Load more')}
+                  </Button>
                 )}
-                <Button variant="solid" color="accent" size="sm" disabled={working || selected.length === 0} loading={working && progress !== ''} onClick={() => void importSelected()}>
+                <Button
+                  variant="solid"
+                  color="accent"
+                  size="sm"
+                  disabled={working || selected.length === 0}
+                  loading={working && progress !== ''}
+                  onClick={() => void importSelected()}
+                >
                   {t('Import selected')} ({selected.length})
                 </Button>
                 {progress && <Text>{progress}</Text>}

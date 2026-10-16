@@ -16,7 +16,8 @@ const getMediaFieldMetadataId = async (): Promise<string> => {
         edges: { node: { fieldsList: { id: true, universalIdentifier: true } } },
       },
     });
-    const field = result.objects.edges.flatMap((edge) => edge.node.fieldsList ?? [])
+    const field = result.objects.edges
+      .flatMap((edge) => edge.node.fieldsList ?? [])
       .find((candidate) => candidate.universalIdentifier === MESSAGE_MEDIA_FIELD_ID);
     if (field) {
       mediaFieldMetadataId = field.id;

@@ -5,7 +5,5 @@ export const canManageConnection = async (): Promise<boolean> => {
     currentUser: { currentUserWorkspace: { permissionFlags: true } },
   });
 
-  return (currentUser.currentUserWorkspace?.permissionFlags ?? []).includes(
-    'APPLICATIONS',
-  );
+  return (currentUser.currentUserWorkspace?.permissionFlags ?? []).includes('APPLICATIONS');
 };

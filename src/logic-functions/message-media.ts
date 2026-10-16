@@ -17,7 +17,12 @@ type MediaEvent = {
   media?: { kind: 'image' | 'video' | 'audio'; mimeType: string; fileName: string; sizeBytes?: number };
 };
 
-const putMedia = async (body: ReadableStream<Uint8Array>, sizeBytes: number, url: string, contentType: string): Promise<void> => {
+const putMedia = async (
+  body: ReadableStream<Uint8Array>,
+  sizeBytes: number,
+  url: string,
+  contentType: string,
+): Promise<void> => {
   const target = new URL(url);
   const request = target.protocol === 'https:' ? httpsRequest : httpRequest;
   const upload = request(target, {
@@ -69,22 +74,24 @@ export const importMessageMedia = async (event: MediaEvent): Promise<{ fileId: s
   }
 
   const metadataClient = new MetadataApiClient();
-  const result = await metadataClient.mutation({
-    createFileUpload: {
-      __args: {
-        filename: event.media.fileName,
-        size: sizeBytes,
-        fileFolder: 'FilesField',
-        fieldMetadataUniversalIdentifier: MESSAGE_MEDIA_FIELD_ID,
+  const result = await metadataClient
+    .mutation({
+      createFileUpload: {
+        __args: {
+          filename: event.media.fileName,
+          size: sizeBytes,
+          fileFolder: 'FilesField',
+          fieldMetadataUniversalIdentifier: MESSAGE_MEDIA_FIELD_ID,
+        },
+        fileId: true,
+        uploadUrl: true,
+        contentType: true,
       },
-      fileId: true,
-      uploadUrl: true,
-      contentType: true,
-    },
-  }).catch(async (error: unknown) => {
-    await response.body?.cancel().catch(() => undefined);
-    throw error;
-  });
+    })
+    .catch(async (error: unknown) => {
+      await response.body?.cancel().catch(() => undefined);
+      throw error;
+    });
   const target = result.createFileUpload;
   if (!target?.fileId || !target.uploadUrl || !target.contentType) {
     await response.body.cancel();

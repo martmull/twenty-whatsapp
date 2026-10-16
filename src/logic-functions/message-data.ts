@@ -3,7 +3,15 @@ import { CoreApiClient } from 'twenty-client-sdk/core';
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { importMessageMedia } from 'src/logic-functions/message-media';
 import type { Logger } from 'src/logic-functions/utils/logger';
-import { chatNumber, digits, isChatId, isDirectChatId, isEventId, isGroupChatId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
+import {
+  chatNumber,
+  digits,
+  isChatId,
+  isDirectChatId,
+  isEventId,
+  isGroupChatId,
+  isPhoneLikeName,
+} from 'src/logic-functions/utils/validators';
 
 export type Conversation = {
   id: string;
@@ -53,18 +61,40 @@ export type BridgeMessageEvent = {
 export const applicationClient = () => new CoreApiClient({ runAs: 'application' });
 export const userClient = () => new CoreApiClient({ runAs: 'user' });
 
-export const CONVERSATION_FIELDS = { id: true, name: true, chatId: true, personId: true, accountId: true, lastMessageAt: true, lastInboundAt: true, lastPreview: true } as const;
-export const MESSAGE_FIELDS = { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, senderId: true, senderName: true, mediaKind: true, media: { fileId: true, label: true, url: true } } as const;
+export const CONVERSATION_FIELDS = {
+  id: true,
+  name: true,
+  chatId: true,
+  personId: true,
+  accountId: true,
+  lastMessageAt: true,
+  lastInboundAt: true,
+  lastPreview: true,
+} as const;
+export const MESSAGE_FIELDS = {
+  id: true,
+  conversationId: true,
+  externalId: true,
+  direction: true,
+  text: true,
+  sentAt: true,
+  deliveryState: true,
+  requestId: true,
+  senderId: true,
+  senderName: true,
+  mediaKind: true,
+  media: { fileId: true, label: true, url: true },
+} as const;
 
 export const isValidBridgeEvent = (event: BridgeMessageEvent) =>
   isEventId(event.eventId) &&
   isChatId(event.chatId) &&
-  Boolean(event.text) && event.text.length <= 4096 &&
+  Boolean(event.text) &&
+  event.text.length <= 4096 &&
   (!event.direction || event.direction === 'inbound' || event.direction === 'outbound') &&
   Number.isFinite(Date.parse(event.sentAt));
 
-export const personName = (person: Person) =>
-  [person.name.firstName, person.name.lastName].filter(Boolean).join(' ');
+export const personName = (person: Person) => [person.name.firstName, person.name.lastName].filter(Boolean).join(' ');
 
 const personPhone = (person: Person): string => {
   const phone = person.phones?.primaryPhoneNumber ?? '';
@@ -101,8 +131,17 @@ export const findPeopleByPhones = async (client: CoreApiClient, numbers: string[
 
   const result = await client.query({
     people: {
-      __args: { filter: { phones: { primaryPhoneNumber: { in: [...wanted].flatMap(storedPhoneVariants) } } }, first: 200 },
-      edges: { node: { id: true, name: { firstName: true, lastName: true }, phones: { primaryPhoneNumber: true, primaryPhoneCallingCode: true } } },
+      __args: {
+        filter: { phones: { primaryPhoneNumber: { in: [...wanted].flatMap(storedPhoneVariants) } } },
+        first: 200,
+      },
+      edges: {
+        node: {
+          id: true,
+          name: { firstName: true, lastName: true },
+          phones: { primaryPhoneNumber: true, primaryPhoneCallingCode: true },
+        },
+      },
     },
   });
 
@@ -148,7 +187,11 @@ export const ensureAccount = async (client: CoreApiClient, phoneNumber: string):
   return account.id;
 };
 
-export const findConversation = async (client: CoreApiClient, accountId: string, chatId: string): Promise<Conversation | undefined> => {
+export const findConversation = async (
+  client: CoreApiClient,
+  accountId: string,
+  chatId: string,
+): Promise<Conversation | undefined> => {
   const result = await client.query({
     whatsappConversations: {
       __args: { filter: { accountId: { eq: accountId }, chatId: { eq: chatId } }, first: 1 },
@@ -159,7 +202,10 @@ export const findConversation = async (client: CoreApiClient, accountId: string,
   return result.whatsappConversations?.edges?.[0]?.node as Conversation | undefined;
 };
 
-export const findMessageByRequestId = async (client: CoreApiClient, requestId: string): Promise<Message | undefined> => {
+export const findMessageByRequestId = async (
+  client: CoreApiClient,
+  requestId: string,
+): Promise<Message | undefined> => {
   const result = await client.query({
     whatsappMessages: {
       __args: { filter: { requestId: { eq: requestId } }, first: 1 },
@@ -223,7 +269,10 @@ export const importChatMessages = async (
     conversation = { id, name, chatId, accountId, personId: person?.id };
   } else if (isPhoneLikeName(conversation.name) && name.trim() && !isPhoneLikeName(name)) {
     await client.mutation({
-      updateWhatsappConversation: { __args: { id: conversation.id, data: { name: name.trim().slice(0, 120) } }, id: true },
+      updateWhatsappConversation: {
+        __args: { id: conversation.id, data: { name: name.trim().slice(0, 120) } },
+        id: true,
+      },
     });
   }
 
@@ -237,7 +286,9 @@ export const importChatMessages = async (
       edges: { node: { externalId: true } },
     },
   });
-  const existingIds = new Set((existing.whatsappMessages?.edges ?? []).map(({ node }: { node: { externalId: string } }) => node.externalId));
+  const existingIds = new Set(
+    (existing.whatsappMessages?.edges ?? []).map(({ node }: { node: { externalId: string } }) => node.externalId),
+  );
   const missing = events.filter((event) => !existingIds.has(event.eventId));
 
   if (missing.length > 0) {
@@ -271,9 +322,12 @@ export const importChatMessages = async (
   }
 
   const latest = events.reduce((current, event) => (event.sentAt > current.sentAt ? event : current));
-  const latestInbound = events.filter((event) => event.direction !== 'outbound').sort((left, right) => right.sentAt.localeCompare(left.sentAt))[0];
+  const latestInbound = events
+    .filter((event) => event.direction !== 'outbound')
+    .sort((left, right) => right.sentAt.localeCompare(left.sentAt))[0];
   const updateLastMessage = !conversation.lastMessageAt || latest.sentAt >= conversation.lastMessageAt;
-  const updateLastInbound = latestInbound && (!conversation.lastInboundAt || latestInbound.sentAt >= conversation.lastInboundAt);
+  const updateLastInbound =
+    latestInbound && (!conversation.lastInboundAt || latestInbound.sentAt >= conversation.lastInboundAt);
 
   if (updateLastMessage || updateLastInbound) {
     await client.mutation({
@@ -345,7 +399,14 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
           const matches = people.get(chatNumber(chatId)) ?? [];
 
           if (matches.length === 1) {
-            imported += await importChatMessages(client, accountId, chatId, personName(matches[0]) || chatNumber(chatId), chatEvents, matches[0]);
+            imported += await importChatMessages(
+              client,
+              accountId,
+              chatId,
+              personName(matches[0]) || chatNumber(chatId),
+              chatEvents,
+              matches[0],
+            );
           } else {
             ignored += chatEvents.length;
           }
@@ -354,7 +415,10 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
         await bridgePost('/events/ack', { eventIds: chatEvents.map((event) => event.eventId) });
       } catch (error) {
         // Keep the chat's events queued for the next sync and carry on with the other chats.
-        logger.error('Could not import chat', { chatId, error: error instanceof Error ? error.message : String(error) });
+        logger.error('Could not import chat', {
+          chatId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
@@ -381,10 +445,14 @@ export const syncConversationNames = async (logger: Logger): Promise<void> => {
         pageInfo: { hasNextPage: true, endCursor: true },
       },
     });
-    const conversations: { id: string; chatId: string; name: string }[] = (result.whatsappConversations?.edges ?? []).map(({ node }: { node: { id: string; chatId: string; name: string } }) => node);
+    const conversations: { id: string; chatId: string; name: string }[] = (
+      result.whatsappConversations?.edges ?? []
+    ).map(({ node }: { node: { id: string; chatId: string; name: string } }) => node);
 
     if (conversations.length > 0) {
-      const names = await bridgePost<{ chatId: string; name: string }[]>('/history/names', { chatIds: conversations.map((conversation) => conversation.chatId) });
+      const names = await bridgePost<{ chatId: string; name: string }[]>('/history/names', {
+        chatIds: conversations.map((conversation) => conversation.chatId),
+      });
       const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name.trim().slice(0, 120)]));
 
       for (const conversation of conversations) {

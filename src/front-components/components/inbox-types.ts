@@ -42,6 +42,5 @@ export type InboxData = {
   connectionState: ConnectionState;
 };
 
-export const formatTime = (value?: string | null) => value
-  ? new Date(value).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
-  : '';
+export const formatTime = (value?: string | null) =>
+  value ? new Date(value).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '';

@@ -26,7 +26,13 @@ type HistoryRequest = {
   lastName?: string;
 };
 
-type HistoryCandidate = { chatId: string; kind: 'direct' | 'group'; name: string; messageCount: number; lastMessageAt?: string };
+type HistoryCandidate = {
+  chatId: string;
+  kind: 'direct' | 'group';
+  name: string;
+  messageCount: number;
+  lastMessageAt?: string;
+};
 type HistoryMessages = { name: string; messages: BridgeMessageEvent[]; total: number; nextOffset?: number };
 
 const listCandidates = async (request: HistoryRequest) => {
@@ -38,7 +44,10 @@ const listCandidates = async (request: HistoryRequest) => {
   }
 
   const history = await bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
-    '/history/list', { rangeDays: request.rangeDays, kind, offset, limit: 20 }, 30_000);
+    '/history/list',
+    { rangeDays: request.rangeDays, kind, offset, limit: 20 },
+    30_000,
+  );
   const directNumbers = history.items.filter((item) => item.kind === 'direct').map((item) => chatNumber(item.chatId));
   const peopleByPhone = await findPeopleByPhones(applicationClient(), directNumbers);
 
@@ -52,12 +61,16 @@ const listCandidates = async (request: HistoryRequest) => {
       const matches = peopleByPhone.get(chatNumber(item.chatId)) ?? [];
       const matchedName = matches.length === 1 ? personName(matches[0]) : undefined;
       // A Person named after their phone number can be renamed during import.
-      const renameable = matches.length === 1 && isPhoneLikeName(matchedName || '') && digits(matchedName || '') === chatNumber(item.chatId);
+      const renameable =
+        matches.length === 1 &&
+        isPhoneLikeName(matchedName || '') &&
+        digits(matchedName || '') === chatNumber(item.chatId);
 
       return {
         ...item,
         name: renameable ? item.name : matchedName || item.name,
-        match: matches.length === 1 ? 'matched' as const : matches.length > 1 ? 'ambiguous' as const : 'new' as const,
+        match:
+          matches.length === 1 ? ('matched' as const) : matches.length > 1 ? ('ambiguous' as const) : ('new' as const),
         personName: matchedName,
         renameable,
       };
@@ -66,7 +79,11 @@ const listCandidates = async (request: HistoryRequest) => {
 };
 
 // Finds the Person for a direct chat, creating or renaming them as the admin asked.
-const resolvePerson = async (request: HistoryRequest, chatId: string, historyName: string): Promise<{ person: Person; createdPerson: boolean }> => {
+const resolvePerson = async (
+  request: HistoryRequest,
+  chatId: string,
+  historyName: string,
+): Promise<{ person: Person; createdPerson: boolean }> => {
   const matches = (await findPeopleByPhones(applicationClient(), [chatNumber(chatId)])).get(chatNumber(chatId)) ?? [];
 
   if (matches.length > 1) {
@@ -79,7 +96,9 @@ const resolvePerson = async (request: HistoryRequest, chatId: string, historyNam
     }
   }
 
-  const [suggestedFirstName = '', ...suggestedLastName] = isPhoneLikeName(historyName) ? [] : historyName.trim().split(/\s+/);
+  const [suggestedFirstName = '', ...suggestedLastName] = isPhoneLikeName(historyName)
+    ? []
+    : historyName.trim().split(/\s+/);
   const firstName = request.firstName?.trim() || suggestedFirstName;
   const lastName = request.lastName?.trim() || suggestedLastName.join(' ');
   const existing = matches[0];
@@ -94,7 +113,12 @@ const resolvePerson = async (request: HistoryRequest, chatId: string, historyNam
         __args: {
           data: {
             name: { firstName, lastName },
-            phones: { primaryPhoneNumber: `+${chatNumber(chatId)}`, primaryPhoneCountryCode: '', primaryPhoneCallingCode: '', additionalPhones: null },
+            phones: {
+              primaryPhoneNumber: `+${chatNumber(chatId)}`,
+              primaryPhoneCountryCode: '',
+              primaryPhoneCallingCode: '',
+              additionalPhones: null,
+            },
           },
         },
         id: true,
@@ -154,7 +178,11 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     throw new HttpError(400, 'Cannot import the linked account as a contact');
   }
 
-  const history = await bridgePost<HistoryMessages>('/history/messages', { chatId, rangeDays: request.rangeDays, offset: request.offset, limit: 25 }, 30_000);
+  const history = await bridgePost<HistoryMessages>(
+    '/history/messages',
+    { chatId, rangeDays: request.rangeDays, offset: request.offset, limit: 25 },
+    30_000,
+  );
   const client = applicationClient();
   const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
   const { person, createdPerson } = isGroupChatId(chatId)

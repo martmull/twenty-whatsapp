@@ -10,11 +10,13 @@ export default defineHealthCheck({
     const status = await getBridgeStatus().catch(() => undefined);
 
     if (!status) {
-      return { status: 'ERROR', title: 'WhatsApp bridge unreachable', description: 'Check that the bridge is running and its URL and token are set.' };
+      return {
+        status: 'ERROR',
+        title: 'WhatsApp bridge unreachable',
+        description: 'Check that the bridge is running and its URL and token are set.',
+      };
     }
 
-    return status.state === 'connected'
-      ? { status: 'OK' }
-      : { status: 'WARNING', title: 'WhatsApp not connected' };
+    return status.state === 'connected' ? { status: 'OK' } : { status: 'WARNING', title: 'WhatsApp not connected' };
   },
 });

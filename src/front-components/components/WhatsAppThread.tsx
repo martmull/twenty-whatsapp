@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
-import { AppPath, enqueueSnackbar, navigate, t, useColorScheme, type UploadedFrontComponentFile } from 'twenty-sdk/front-component';
+import {
+  AppPath,
+  enqueueSnackbar,
+  navigate,
+  t,
+  useColorScheme,
+  type UploadedFrontComponentFile,
+} from 'twenty-sdk/front-component';
 import { getPublicAssetUrl } from 'twenty-sdk/utils';
 import { Callout } from 'twenty-ui/components';
 import { Button } from 'twenty-ui/primitives/input';
@@ -23,9 +30,16 @@ type SendResult = { state: 'sent' | 'unknown' };
 
 // Cheap check through the REST API: the newest conversation activity visible to this member.
 const fetchLatestActivity = async (personId?: string): Promise<string | undefined> => {
-  const response = await new RestApiClient().get<{ data?: { whatsappConversations?: { lastMessageAt?: string }[] } }>('/rest/whatsappConversations', {
-    query: { order_by: 'lastMessageAt[DescNullsLast]', limit: 1, ...(personId ? { filter: `personId[eq]:"${personId}"` } : {}) },
-  });
+  const response = await new RestApiClient().get<{ data?: { whatsappConversations?: { lastMessageAt?: string }[] } }>(
+    '/rest/whatsappConversations',
+    {
+      query: {
+        order_by: 'lastMessageAt[DescNullsLast]',
+        limit: 1,
+        ...(personId ? { filter: `personId[eq]:"${personId}"` } : {}),
+      },
+    },
+  );
   return response.data?.whatsappConversations?.[0]?.lastMessageAt;
 };
 
@@ -54,10 +68,15 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
     }).catch(() => ({ lastReadAt: undefined }));
 
     if (lastReadAt) {
-      setData((previous) => previous && {
-        ...previous,
-        conversations: previous.conversations.map((item) => item.id === conversation.id ? { ...item, lastReadAt, unread: false } : item),
-      });
+      setData(
+        (previous) =>
+          previous && {
+            ...previous,
+            conversations: previous.conversations.map((item) =>
+              item.id === conversation.id ? { ...item, lastReadAt, unread: false } : item,
+            ),
+          },
+      );
     }
   };
 
@@ -124,7 +143,10 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
   const selectConversation = (conversationId: string) => {
     selectedIdRef.current = conversationId;
     textRequestRef.current = undefined;
-    setData((previous) => previous && { ...previous, selectedConversationId: conversationId, messages: [], groupMembers: undefined });
+    setData(
+      (previous) =>
+        previous && { ...previous, selectedConversationId: conversationId, messages: [], groupMembers: undefined },
+    );
     void load();
   };
 
@@ -134,7 +156,10 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
     if (!conversationId || !oldest) return;
 
     try {
-      const page = await callApp<{ messages: Message[]; hasMoreMessages: boolean }>('messages/list', { conversationId, before: oldest.sentAt });
+      const page = await callApp<{ messages: Message[]; hasMoreMessages: boolean }>('messages/list', {
+        conversationId,
+        before: oldest.sentAt,
+      });
       if (conversationId !== selectedIdRef.current) return;
       setOlderMessages((previous) => [...page.messages, ...previous]);
       setHasOlderMessages(page.hasMoreMessages);
@@ -154,14 +179,19 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
 
     try {
       for (const pending of files) {
-        const uploaded = uploadedRef.current.get(pending.id) ?? await uploadWhatsAppAttachment(pending.file);
+        const uploaded = uploadedRef.current.get(pending.id) ?? (await uploadWhatsAppAttachment(pending.file));
         uploadedRef.current.set(pending.id, uploaded);
 
         const result = await callApp<SendResult>('messages/send', {
           conversationId,
           requestId: pending.id,
           text: caption,
-          attachment: { fileId: uploaded.fileId, label: pending.file.name, mimeType: uploaded.mimeType || pending.file.type || 'application/octet-stream', size: uploaded.size },
+          attachment: {
+            fileId: uploaded.fileId,
+            label: pending.file.name,
+            mimeType: uploaded.mimeType || pending.file.type || 'application/octet-stream',
+            size: uploaded.size,
+          },
         });
 
         remainingFiles = remainingFiles.filter((item) => item.id !== pending.id);
@@ -173,14 +203,21 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
         if (textRequestRef.current?.text !== caption) {
           textRequestRef.current = { text: caption, requestId: createRequestId() };
         }
-        const result = await callApp<SendResult>('messages/send', { conversationId, requestId: textRequestRef.current.requestId, text: caption });
+        const result = await callApp<SendResult>('messages/send', {
+          conversationId,
+          requestId: textRequestRef.current.requestId,
+          text: caption,
+        });
         if (result.state !== 'sent') throw new Error('unconfirmed');
         textRequestRef.current = undefined;
         caption = '';
       }
     } catch (error) {
       if (error instanceof Error && error.message === 'unconfirmed') {
-        void enqueueSnackbar({ message: t('Delivery not confirmed. Check WhatsApp before retrying.'), variant: 'warning' });
+        void enqueueSnackbar({
+          message: t('Delivery not confirmed. Check WhatsApp before retrying.'),
+          variant: 'warning',
+        });
       } else {
         showError(error, t('Could not send the message'));
       }
@@ -194,7 +231,10 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
 
   const selected = data?.conversations.find((conversation) => conversation.id === data.selectedConversationId);
   const connected = data?.connectionState === 'connected';
-  const messages = [...olderMessages, ...(data?.messages ?? []).filter((message) => !olderMessages.some((older) => older.id === message.id))];
+  const messages = [
+    ...olderMessages,
+    ...(data?.messages ?? []).filter((message) => !olderMessages.some((older) => older.id === message.id)),
+  ];
   const memberNames = new Map<string, string>();
   for (const member of data?.groupMembers ?? []) {
     if (!member.displayName) continue;
@@ -206,34 +246,41 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
   const showList = !personId || (data?.conversations.length ?? 0) > 1;
 
   return (
-    <section style={{
-      boxSizing: 'border-box',
-      color: themeCssVariables.font.color.primary,
-      display: 'grid',
-      fontFamily: themeCssVariables.font.family,
-      gap: themeCssVariables.spacing[2],
-      gridTemplateRows: 'auto minmax(0, 1fr)',
-      height: personId ? 'calc(100dvh - 140px)' : '100%',
-      minHeight: personId ? 420 : 560,
-      padding: personId ? 0 : themeCssVariables.spacing[3],
-    }}>
+    <section
+      style={{
+        boxSizing: 'border-box',
+        color: themeCssVariables.font.color.primary,
+        display: 'grid',
+        fontFamily: themeCssVariables.font.family,
+        gap: themeCssVariables.spacing[2],
+        gridTemplateRows: 'auto minmax(0, 1fr)',
+        height: personId ? 'calc(100dvh - 140px)' : '100%',
+        minHeight: personId ? 420 : 560,
+        padding: personId ? 0 : themeCssVariables.spacing[3],
+      }}
+    >
       <div>
         {data && !connected && (
           <Callout
             variant="warning"
             title={t('WhatsApp is not connected')}
-            action={{ label: t('Open settings'), onClick: () => void navigate(AppPath.SettingsCatchAll, { '*': 'applications' }) }}
+            action={{
+              label: t('Open settings'),
+              onClick: () => void navigate(AppPath.SettingsCatchAll, { '*': 'applications' }),
+            }}
           />
         )}
       </div>
-      <div style={{
-        border: `1px solid ${themeCssVariables.border.color.medium}`,
-        borderRadius: themeCssVariables.border.radius.md,
-        display: 'grid',
-        gridTemplateColumns: showList ? 'minmax(220px, 30%) minmax(0, 1fr)' : 'minmax(0, 1fr)',
-        minHeight: 0,
-        overflow: 'hidden',
-      }}>
+      <div
+        style={{
+          border: `1px solid ${themeCssVariables.border.color.medium}`,
+          borderRadius: themeCssVariables.border.radius.md,
+          display: 'grid',
+          gridTemplateColumns: showList ? 'minmax(220px, 30%) minmax(0, 1fr)' : 'minmax(0, 1fr)',
+          minHeight: 0,
+          overflow: 'hidden',
+        }}
+      >
         {showList && (
           <ConversationList
             conversations={data?.conversations ?? []}
@@ -245,31 +292,52 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
         )}
         <div style={{ display: 'grid', gridTemplateRows: 'minmax(0, 1fr) auto', minHeight: 0, minWidth: 0 }}>
           {/* column-reverse keeps the view pinned to the newest message (the sandbox cannot scroll programmatically). */}
-          <div key={data?.selectedConversationId} style={{
-            backgroundColor: themeCssVariables.background.secondary,
-            backgroundImage: `url("${getPublicAssetUrl(isDark ? 'whatsapp-wallpaper-dark.png' : 'whatsapp-wallpaper.png')}")`,
-            backgroundSize: '485px auto',
-            display: 'flex',
-            flexDirection: 'column-reverse',
-            gap: themeCssVariables.spacing[2],
-            overflowY: 'auto',
-            padding: themeCssVariables.spacing[3],
-          }}>
-            {messages.slice().reverse().map((message) => (
-              <MessageBubble
-                key={message.id}
-                message={message}
-                senderName={isGroup && message.direction === 'INBOUND' ? memberNames.get(message.senderId ?? '') || message.senderName || message.senderId?.split('@')[0] : undefined}
-                highlighted={Boolean(selected?.unread && message.direction === 'INBOUND' && (!selected.lastReadAt || message.sentAt > selected.lastReadAt))}
-              />
-            ))}
+          <div
+            key={data?.selectedConversationId}
+            style={{
+              backgroundColor: themeCssVariables.background.secondary,
+              backgroundImage: `url("${getPublicAssetUrl(isDark ? 'whatsapp-wallpaper-dark.png' : 'whatsapp-wallpaper.png')}")`,
+              backgroundSize: '485px auto',
+              display: 'flex',
+              flexDirection: 'column-reverse',
+              gap: themeCssVariables.spacing[2],
+              overflowY: 'auto',
+              padding: themeCssVariables.spacing[3],
+            }}
+          >
+            {messages
+              .slice()
+              .reverse()
+              .map((message) => (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  senderName={
+                    isGroup && message.direction === 'INBOUND'
+                      ? memberNames.get(message.senderId ?? '') || message.senderName || message.senderId?.split('@')[0]
+                      : undefined
+                  }
+                  highlighted={Boolean(
+                    selected?.unread &&
+                    message.direction === 'INBOUND' &&
+                    (!selected.lastReadAt || message.sentAt > selected.lastReadAt),
+                  )}
+                />
+              ))}
             {hasOlderMessages && (
               <div style={{ alignSelf: 'center' }}>
-                <Button variant="soft" size="sm" onClick={() => void loadOlderMessages()}>{t('Load older messages')}</Button>
+                <Button variant="soft" size="sm" onClick={() => void loadOlderMessages()}>
+                  {t('Load older messages')}
+                </Button>
               </div>
             )}
           </div>
-          <MessageComposer key={data?.selectedConversationId} disabled={!selected || !connected} sending={sending} onSend={send} />
+          <MessageComposer
+            key={data?.selectedConversationId}
+            disabled={!selected || !connected}
+            sending={sending}
+            onSend={send}
+          />
         </div>
       </div>
     </section>

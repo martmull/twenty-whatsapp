@@ -21,12 +21,13 @@ type ConnectionStatus = {
   canManage: boolean;
 };
 
-const stateTag = (state: ConnectionStatus['state'] = 'disconnected') => ({
-  connected: { label: t('Connected'), color: 'green' as const },
-  pairing: { label: t('Waiting for scan'), color: 'orange' as const },
-  reconnecting: { label: t('Reconnecting'), color: 'orange' as const },
-  disconnected: { label: t('Not connected'), color: 'gray' as const },
-})[state];
+const stateTag = (state: ConnectionStatus['state'] = 'disconnected') =>
+  ({
+    connected: { label: t('Connected'), color: 'green' as const },
+    pairing: { label: t('Waiting for scan'), color: 'orange' as const },
+    reconnecting: { label: t('Reconnecting'), color: 'orange' as const },
+    disconnected: { label: t('Not connected'), color: 'gray' as const },
+  })[state];
 
 const WhatsAppSettings = () => {
   const [status, setStatus] = useState<ConnectionStatus>();
@@ -39,9 +40,10 @@ const WhatsAppSettings = () => {
 
   useEffect(() => {
     let active = true;
-    const refresh = () => callApp<ConnectionStatus>('connection/status')
-      .then((next) => active && setStatus(next))
-      .catch((error) => showError(error, t('WhatsApp bridge unavailable')));
+    const refresh = () =>
+      callApp<ConnectionStatus>('connection/status')
+        .then((next) => active && setStatus(next))
+        .catch((error) => showError(error, t('WhatsApp bridge unavailable')));
 
     void refresh();
     const timer = setInterval(refresh, pollMs);
@@ -54,7 +56,9 @@ const WhatsAppSettings = () => {
   const perform = async (action: 'start' | 'disconnect') => {
     setWorking(true);
     try {
-      setStatus(await callApp<ConnectionStatus>(`connection/${action}`, action === 'start' ? { ownsNumber, acceptsRisk } : {}));
+      setStatus(
+        await callApp<ConnectionStatus>(`connection/${action}`, action === 'start' ? { ownsNumber, acceptsRisk } : {}),
+      );
     } catch (error) {
       showError(error, action === 'start' ? t('Could not start pairing') : t('Could not disconnect'));
     } finally {
@@ -65,20 +69,37 @@ const WhatsAppSettings = () => {
   const tag = stateTag(status?.state);
 
   return (
-    <main style={{ display: 'grid', gap: themeCssVariables.spacing[4], maxWidth: 840, padding: themeCssVariables.spacing[4] }}>
+    <main
+      style={{
+        display: 'grid',
+        gap: themeCssVariables.spacing[4],
+        maxWidth: 840,
+        padding: themeCssVariables.spacing[4],
+      }}
+    >
       <Card.Root>
         <Card.Content>
           <div style={{ display: 'grid', gap: themeCssVariables.spacing[4], padding: themeCssVariables.spacing[4] }}>
             <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between' }}>
-              <Heading level={2} size="sm">{t('WhatsApp connection')}</Heading>
-              <Tag color={tag.color} variant="soft" preventShrink>{tag.label}</Tag>
+              <Heading level={2} size="sm">
+                {t('WhatsApp connection')}
+              </Heading>
+              <Tag color={tag.color} variant="soft" preventShrink>
+                {tag.label}
+              </Tag>
             </div>
 
             {status?.state === 'connected' && (
               <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between' }}>
                 <Text>{status.phoneNumber ? `+${status.phoneNumber}` : ''}</Text>
                 {status.canManage && (
-                  <Button variant="outline" color="danger" size="sm" disabled={working} onClick={() => void perform('disconnect')}>
+                  <Button
+                    variant="outline"
+                    color="danger"
+                    size="sm"
+                    disabled={working}
+                    onClick={() => void perform('disconnect')}
+                  >
                     {t('Disconnect')}
                   </Button>
                 )}
@@ -86,14 +107,20 @@ const WhatsAppSettings = () => {
             )}
 
             {status?.state === 'pairing' && status.canManage && (
-              <div style={{ alignItems: 'center', display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[4] }}>
-                {status.qrDataUrl?.startsWith('data:image/png;base64,')
-                  ? <img src={status.qrDataUrl} alt={t('WhatsApp pairing QR code')} width={248} height={248} />
-                  : <Text style={{ width: 248 }}>{t('Waiting for a QR code…')}</Text>}
+              <div
+                style={{ alignItems: 'center', display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[4] }}
+              >
+                {status.qrDataUrl?.startsWith('data:image/png;base64,') ? (
+                  <img src={status.qrDataUrl} alt={t('WhatsApp pairing QR code')} width={248} height={248} />
+                ) : (
+                  <Text style={{ width: 248 }}>{t('Waiting for a QR code…')}</Text>
+                )}
                 <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
                   <Text>{t('In WhatsApp, open Linked devices and scan this code.')}</Text>
                   <div>
-                    <Button variant="outline" size="sm" disabled={working} onClick={() => void perform('disconnect')}>{t('Cancel')}</Button>
+                    <Button variant="outline" size="sm" disabled={working} onClick={() => void perform('disconnect')}>
+                      {t('Cancel')}
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -101,17 +128,35 @@ const WhatsAppSettings = () => {
 
             {status?.state === 'disconnected' && status.canManage && (
               <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
-                <Callout variant="warning" title={t('Unofficial connection')} description={t('This links WhatsApp as a web device. WhatsApp may restrict or disconnect the number.')} />
+                <Callout
+                  variant="warning"
+                  title={t('Unofficial connection')}
+                  description={t(
+                    'This links WhatsApp as a web device. WhatsApp may restrict or disconnect the number.',
+                  )}
+                />
                 <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
-                  <FrontComponentCheckbox checked={ownsNumber} onChange={(event) => setOwnsNumber(event.target.checked)} />
+                  <FrontComponentCheckbox
+                    checked={ownsNumber}
+                    onChange={(event) => setOwnsNumber(event.target.checked)}
+                  />
                   {t('I control this WhatsApp number')}
                 </label>
                 <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
-                  <FrontComponentCheckbox checked={acceptsRisk} onChange={(event) => setAcceptsRisk(event.target.checked)} />
+                  <FrontComponentCheckbox
+                    checked={acceptsRisk}
+                    onChange={(event) => setAcceptsRisk(event.target.checked)}
+                  />
                   {t('I accept that it may be disconnected')}
                 </label>
                 <div>
-                  <Button variant="solid" color="accent" size="sm" disabled={working || !ownsNumber || !acceptsRisk} onClick={() => void perform('start')}>
+                  <Button
+                    variant="solid"
+                    color="accent"
+                    size="sm"
+                    disabled={working || !ownsNumber || !acceptsRisk}
+                    onClick={() => void perform('start')}
+                  >
                     {t('Show QR code')}
                   </Button>
                 </div>

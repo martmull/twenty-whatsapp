@@ -8,7 +8,9 @@ export const callApp = <TResponse>(path: string, body: Record<string, unknown> =
 // Error text returned by our routes (`{ error }`), or the given fallback.
 export const errorMessage = (error: unknown, fallback: string) => {
   const body = error instanceof RestApiClientError ? error.body : undefined;
-  return typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string' ? body.error : fallback;
+  return typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string'
+    ? body.error
+    : fallback;
 };
 
 export const showError = (error: unknown, fallback: string) => {

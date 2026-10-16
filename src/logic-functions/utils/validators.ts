@@ -1,8 +1,6 @@
-export const isUuid = (value: unknown): value is string =>
-  typeof value === 'string' && /^[a-f\d-]{36}$/i.test(value);
+export const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d-]{36}$/i.test(value);
 
-export const isEventId = (value: unknown): value is string =>
-  typeof value === 'string' && /^[a-f\d]{64}$/.test(value);
+export const isEventId = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{64}$/.test(value);
 
 export const isDirectChatId = (value: unknown): value is string =>
   typeof value === 'string' && /^\d{7,15}@s\.whatsapp\.net$/.test(value);
@@ -10,8 +8,7 @@ export const isDirectChatId = (value: unknown): value is string =>
 export const isGroupChatId = (value: unknown): value is string =>
   typeof value === 'string' && /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(value);
 
-export const isChatId = (value: unknown): value is string =>
-  isDirectChatId(value) || isGroupChatId(value);
+export const isChatId = (value: unknown): value is string => isDirectChatId(value) || isGroupChatId(value);
 
 export const digits = (value: string) => value.replace(/\D/g, '');
 

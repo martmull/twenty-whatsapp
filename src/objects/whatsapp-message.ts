@@ -1,4 +1,11 @@
-import { defineObject, FieldType, MetadataReadability, MetadataWritability, OnDeleteAction, RelationType } from 'twenty-sdk/define';
+import {
+  defineObject,
+  FieldType,
+  MetadataReadability,
+  MetadataWritability,
+  OnDeleteAction,
+  RelationType,
+} from 'twenty-sdk/define';
 
 import {
   CONVERSATION_MESSAGES_FIELD_ID,
@@ -33,9 +40,19 @@ export default defineObject({
       icon: 'IconMessage',
       relationTargetObjectMetadataUniversalIdentifier: WHATSAPP_CONVERSATION_OBJECT_ID,
       relationTargetFieldMetadataUniversalIdentifier: CONVERSATION_MESSAGES_FIELD_ID,
-      universalSettings: { relationType: RelationType.MANY_TO_ONE, onDelete: OnDeleteAction.CASCADE, joinColumnName: 'conversationId' },
+      universalSettings: {
+        relationType: RelationType.MANY_TO_ONE,
+        onDelete: OnDeleteAction.CASCADE,
+        joinColumnName: 'conversationId',
+      },
     },
-    { universalIdentifier: MESSAGE_EXTERNAL_ID_FIELD_ID, type: FieldType.TEXT, name: 'externalId', label: 'External ID', icon: 'IconHash' },
+    {
+      universalIdentifier: MESSAGE_EXTERNAL_ID_FIELD_ID,
+      type: FieldType.TEXT,
+      name: 'externalId',
+      label: 'External ID',
+      icon: 'IconHash',
+    },
     {
       universalIdentifier: '82f14710-891f-4ec8-bc16-ef22970892a1',
       type: FieldType.SELECT,
@@ -47,10 +64,34 @@ export default defineObject({
         { value: 'OUTBOUND', label: 'Outgoing', color: 'green', position: 1 },
       ],
     },
-    { universalIdentifier: '49a8f773-cbff-4f6f-abc6-3895d1654557', type: FieldType.TEXT, name: 'text', label: 'Text', icon: 'IconMessage' },
-    { universalIdentifier: '4f9301ce-6bfa-4d8c-9cd7-3ffddfb64ead', type: FieldType.TEXT, name: 'senderId', label: 'Sender ID', icon: 'IconUser' },
-    { universalIdentifier: 'd3f895b7-987b-4704-aea7-bdef4b504ad7', type: FieldType.TEXT, name: 'senderName', label: 'Sender name', icon: 'IconUser' },
-    { universalIdentifier: MESSAGE_SENT_AT_FIELD_ID, type: FieldType.DATE_TIME, name: 'sentAt', label: 'Sent at', icon: 'IconCalendar' },
+    {
+      universalIdentifier: '49a8f773-cbff-4f6f-abc6-3895d1654557',
+      type: FieldType.TEXT,
+      name: 'text',
+      label: 'Text',
+      icon: 'IconMessage',
+    },
+    {
+      universalIdentifier: '4f9301ce-6bfa-4d8c-9cd7-3ffddfb64ead',
+      type: FieldType.TEXT,
+      name: 'senderId',
+      label: 'Sender ID',
+      icon: 'IconUser',
+    },
+    {
+      universalIdentifier: 'd3f895b7-987b-4704-aea7-bdef4b504ad7',
+      type: FieldType.TEXT,
+      name: 'senderName',
+      label: 'Sender name',
+      icon: 'IconUser',
+    },
+    {
+      universalIdentifier: MESSAGE_SENT_AT_FIELD_ID,
+      type: FieldType.DATE_TIME,
+      name: 'sentAt',
+      label: 'Sent at',
+      icon: 'IconCalendar',
+    },
     {
       universalIdentifier: 'ad82109e-4533-4564-a1b0-2c685d2226bb',
       type: FieldType.SELECT,
@@ -64,6 +105,12 @@ export default defineObject({
         { value: 'RECEIVED', label: 'Received', color: 'blue', position: 2 },
       ],
     },
-    { universalIdentifier: MESSAGE_REQUEST_ID_FIELD_ID, type: FieldType.TEXT, name: 'requestId', label: 'Request ID', icon: 'IconHash' },
+    {
+      universalIdentifier: MESSAGE_REQUEST_ID_FIELD_ID,
+      type: FieldType.TEXT,
+      name: 'requestId',
+      label: 'Request ID',
+      icon: 'IconHash',
+    },
   ],
 });

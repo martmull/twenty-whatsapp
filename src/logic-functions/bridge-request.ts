@@ -29,12 +29,20 @@ export const bridgeFetch = async (path: string, init: RequestInit = {}, timeoutM
   return response;
 };
 
-export const bridgePost = async <TResponse>(path: string, body: Record<string, unknown> = {}, timeoutMs?: number): Promise<TResponse> => {
-  const response = await bridgeFetch(path, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  }, timeoutMs);
+export const bridgePost = async <TResponse>(
+  path: string,
+  body: Record<string, unknown> = {},
+  timeoutMs?: number,
+): Promise<TResponse> => {
+  const response = await bridgeFetch(
+    path,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+    timeoutMs,
+  );
 
   return (await response.json()) as TResponse;
 };

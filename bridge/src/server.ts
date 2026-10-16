@@ -86,7 +86,11 @@ const check = (condition: unknown, message = 'Invalid request'): void => {
 
 const isRange = (value: unknown): value is 0 | 30 | 90 => value === 0 || value === 30 || value === 90;
 const isPage = (offset: unknown, limit: unknown, maxLimit: number) =>
-  Number.isInteger(offset) && (offset as number) >= 0 && Number.isInteger(limit) && (limit as number) >= 1 && (limit as number) <= maxLimit;
+  Number.isInteger(offset) &&
+  (offset as number) >= 0 &&
+  Number.isInteger(limit) &&
+  (limit as number) >= 1 &&
+  (limit as number) <= maxLimit;
 const requireConnected = () => check(connection.getStatus().state === 'connected', 'WhatsApp is disconnected');
 
 type Route = (body: Record<string, unknown>) => unknown;
@@ -97,7 +101,9 @@ const jsonRoutes: Record<string, Route> = {
   'POST /disconnect': () => connection.disconnect(),
   'POST /events/claim': () => connection.claimEvents(),
   'POST /events/release': (body) => {
-    check(typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId) && typeof body.completed === 'boolean');
+    check(
+      typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId) && typeof body.completed === 'boolean',
+    );
     return connection.releaseEvents(body.leaseId as string, body.completed as boolean);
   },
   'POST /events/ack': (body) => {
@@ -105,22 +111,48 @@ const jsonRoutes: Record<string, Route> = {
     return connection.ackEvents(body.eventIds as string[]);
   },
   'POST /send': (body) => {
-    check(typeof body.requestId === 'string' && typeof body.chatId === 'string' && typeof body.text === 'string' && typeof body.accountPhoneNumber === 'string');
-    return connection.sendText(body.requestId as string, body.chatId as string, body.text as string, body.accountPhoneNumber as string);
+    check(
+      typeof body.requestId === 'string' &&
+        typeof body.chatId === 'string' &&
+        typeof body.text === 'string' &&
+        typeof body.accountPhoneNumber === 'string',
+    );
+    return connection.sendText(
+      body.requestId as string,
+      body.chatId as string,
+      body.text as string,
+      body.accountPhoneNumber as string,
+    );
   },
   'POST /history/list': (body) => {
     requireConnected();
-    check(isRange(body.rangeDays) && isPage(body.offset, body.limit, 50) && (body.kind === undefined || ['all', 'direct', 'group'].includes(body.kind as string)));
-    return connection.getHistoryCandidates(body.rangeDays as 0 | 30 | 90, body.offset as number, body.limit as number, body.kind as 'all' | 'direct' | 'group' | undefined);
+    check(
+      isRange(body.rangeDays) &&
+        isPage(body.offset, body.limit, 50) &&
+        (body.kind === undefined || ['all', 'direct', 'group'].includes(body.kind as string)),
+    );
+    return connection.getHistoryCandidates(
+      body.rangeDays as 0 | 30 | 90,
+      body.offset as number,
+      body.limit as number,
+      body.kind as 'all' | 'direct' | 'group' | undefined,
+    );
   },
   'POST /history/messages': (body) => {
     requireConnected();
     check(typeof body.chatId === 'string' && isRange(body.rangeDays) && isPage(body.offset, body.limit, 100));
-    return connection.getHistoryMessages(body.chatId as string, body.rangeDays as 0 | 30 | 90, body.offset as number, body.limit as number);
+    return connection.getHistoryMessages(
+      body.chatId as string,
+      body.rangeDays as 0 | 30 | 90,
+      body.offset as number,
+      body.limit as number,
+    );
   },
   'POST /history/names': (body) => {
     requireConnected();
-    check(Array.isArray(body.chatIds) && body.chatIds.length <= 100 && body.chatIds.every((id) => typeof id === 'string'));
+    check(
+      Array.isArray(body.chatIds) && body.chatIds.length <= 100 && body.chatIds.every((id) => typeof id === 'string'),
+    );
     return connection.getHistoryNames(body.chatIds as string[]);
   },
   'POST /history/members': (body) => {
@@ -133,14 +165,29 @@ const sendMedia = async (request: IncomingMessage) => {
   const encoded = request.headers['x-whatsapp-media'];
   check(typeof encoded === 'string' && encoded.length <= 12_000, 'Invalid media metadata');
   const media: Record<string, unknown> = JSON.parse(Buffer.from(encoded as string, 'base64').toString('utf8'));
-  check(typeof media.requestId === 'string' && typeof media.chatId === 'string' && typeof media.accountPhoneNumber === 'string' &&
-    ['image', 'video', 'document'].includes(media.kind as string) && typeof media.mimeType === 'string' &&
-    typeof media.fileName === 'string' && typeof media.caption === 'string', 'Invalid media metadata');
+  check(
+    typeof media.requestId === 'string' &&
+      typeof media.chatId === 'string' &&
+      typeof media.accountPhoneNumber === 'string' &&
+      ['image', 'video', 'document'].includes(media.kind as string) &&
+      typeof media.mimeType === 'string' &&
+      typeof media.fileName === 'string' &&
+      typeof media.caption === 'string',
+    'Invalid media metadata',
+  );
   const bytes = await readBuffer(request, 64 * 1024 * 1024);
   check(bytes.length > 0, 'Empty attachment');
 
-  return connection.sendMedia(media.requestId as string, media.chatId as string, media.accountPhoneNumber as string,
-    media.kind as 'image' | 'video' | 'document', media.mimeType as string, media.fileName as string, media.caption as string, bytes);
+  return connection.sendMedia(
+    media.requestId as string,
+    media.chatId as string,
+    media.accountPhoneNumber as string,
+    media.kind as 'image' | 'video' | 'document',
+    media.mimeType as string,
+    media.fileName as string,
+    media.caption as string,
+    bytes,
+  );
 };
 
 const server = createServer(async (request, response) => {
@@ -184,7 +231,9 @@ const server = createServer(async (request, response) => {
   } catch (error) {
     const isBadRequest = error instanceof BadRequest;
     log('Request failed', { route: routeKey, error: error instanceof Error ? error.message : String(error) });
-    response.writeHead(isBadRequest ? 400 : 500).end(JSON.stringify({ error: isBadRequest ? error.message : 'Bridge operation failed' }));
+    response
+      .writeHead(isBadRequest ? 400 : 500)
+      .end(JSON.stringify({ error: isBadRequest ? error.message : 'Bridge operation failed' }));
   }
 });
 

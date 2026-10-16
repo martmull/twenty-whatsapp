@@ -1,7 +1,4 @@
-import {
-  defineNavigationMenuItem,
-  NavigationMenuItemType,
-} from 'twenty-sdk/define';
+import { defineNavigationMenuItem, NavigationMenuItemType } from 'twenty-sdk/define';
 
 import {
   INBOX_NAVIGATION_UNIVERSAL_IDENTIFIER,

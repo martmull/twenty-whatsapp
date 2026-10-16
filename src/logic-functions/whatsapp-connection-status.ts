@@ -10,9 +10,7 @@ const handler = route('whatsapp-connection-status', async (event) => {
   const [status, canManage] = await Promise.all([getBridgeStatus(), canManageConnection()]);
 
   // Only admins may see the pairing QR code: whoever scans it links their WhatsApp account.
-  return canManage
-    ? { ...status, canManage }
-    : { state: status.state, phoneNumber: status.phoneNumber, canManage };
+  return canManage ? { ...status, canManage } : { state: status.state, phoneNumber: status.phoneNumber, canManage };
 });
 
 export default defineLogicFunction({

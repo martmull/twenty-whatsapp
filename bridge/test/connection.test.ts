@@ -28,14 +28,19 @@ test('a sent message remains available for a recipient retry after bridge restar
   const connection = new WhatsAppConnection(directory, encryptionKey);
 
   try {
-    Object.defineProperty(connection, 'socket', { value: {
-      sendMessage: async (_jid: string, _content: unknown, options?: { messageId?: string }) => {
-        messageId = options?.messageId ?? '';
-        assert.ok(messageId);
-        assert.equal((await connection.getSentMessage({ id: messageId }))?.conversation, 'Hello');
-        return { key: { id: messageId, remoteJid: chatId, fromMe: true }, message: proto.Message.create({ conversation: 'Hello' }) };
+    Object.defineProperty(connection, 'socket', {
+      value: {
+        sendMessage: async (_jid: string, _content: unknown, options?: { messageId?: string }) => {
+          messageId = options?.messageId ?? '';
+          assert.ok(messageId);
+          assert.equal((await connection.getSentMessage({ id: messageId }))?.conversation, 'Hello');
+          return {
+            key: { id: messageId, remoteJid: chatId, fromMe: true },
+            message: proto.Message.create({ conversation: 'Hello' }),
+          };
+        },
       },
-    } });
+    });
     Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
 
     assert.equal((await connection.sendText(randomUUID(), chatId, 'Hello', '+15557654321')).state, 'sent');
@@ -56,21 +61,53 @@ test('an attachment is sent once and its payload is available for a recipient re
   let messageId = '';
 
   try {
-    Object.defineProperty(connection, 'socket', { value: {
-      sendMessage: async (_jid: string, content: { image?: Buffer; video?: Buffer; document?: Buffer; caption?: string }, options?: { messageId?: string }) => {
-        sendCount += 1;
-        messageId = options?.messageId ?? '';
-        assert.equal(_jid, chatId);
-        assert.equal(content.caption, 'Look');
-        assert.equal(content.image?.toString(), 'image bytes');
-        return { key: { id: messageId, remoteJid: chatId, fromMe: true }, message: proto.Message.create({ imageMessage: { caption: 'Look' } }) };
+    Object.defineProperty(connection, 'socket', {
+      value: {
+        sendMessage: async (
+          _jid: string,
+          content: { image?: Buffer; video?: Buffer; document?: Buffer; caption?: string },
+          options?: { messageId?: string },
+        ) => {
+          sendCount += 1;
+          messageId = options?.messageId ?? '';
+          assert.equal(_jid, chatId);
+          assert.equal(content.caption, 'Look');
+          assert.equal(content.image?.toString(), 'image bytes');
+          return {
+            key: { id: messageId, remoteJid: chatId, fromMe: true },
+            message: proto.Message.create({ imageMessage: { caption: 'Look' } }),
+          };
+        },
       },
-    } });
+    });
     Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
 
-    const first = await connection.sendMedia(requestId, chatId, '+15557654321', 'image', 'image/png', 'photo.png', 'Look', Buffer.from('image bytes'));
+    const first = await connection.sendMedia(
+      requestId,
+      chatId,
+      '+15557654321',
+      'image',
+      'image/png',
+      'photo.png',
+      'Look',
+      Buffer.from('image bytes'),
+    );
     assert.equal(first.state, 'sent');
-    assert.equal((await connection.sendMedia(requestId, chatId, '+15557654321', 'image', 'image/png', 'photo.png', 'Look', Buffer.from('image bytes'))).state, 'sent');
+    assert.equal(
+      (
+        await connection.sendMedia(
+          requestId,
+          chatId,
+          '+15557654321',
+          'image',
+          'image/png',
+          'photo.png',
+          'Look',
+          Buffer.from('image bytes'),
+        )
+      ).state,
+      'sent',
+    );
     assert.equal(sendCount, 1);
     const restarted = new WhatsAppConnection(directory, encryptionKey);
     assert.ok((await restarted.getSentMessage({ id: messageId }))?.imageMessage);
@@ -82,10 +119,16 @@ test('an attachment is sent once and its payload is available for a recipient re
 test('only one importer claims a queued batch at a time', async () => {
   class QueuedConnection extends WhatsAppConnection {
     override async getEvents(): Promise<MessageEvent[]> {
-      return [{
-        eventId: 'a'.repeat(64), chatId: '15551234567@s.whatsapp.net',
-        providerMessageId: 'message-1', direction: 'inbound', text: 'Hello', sentAt: new Date().toISOString(),
-      }];
+      return [
+        {
+          eventId: 'a'.repeat(64),
+          chatId: '15551234567@s.whatsapp.net',
+          providerMessageId: 'message-1',
+          direction: 'inbound',
+          text: 'Hello',
+          sentAt: new Date().toISOString(),
+        },
+      ];
     }
   }
 
@@ -146,11 +189,17 @@ test('history review is encrypted, deduplicated, date limited, and paged', async
     assert.equal(all.total, 2);
     assert.equal(all.nextOffset, 1);
     assert.equal(all.messages[0].text, 'Older text');
-    assert.equal((await connection.getHistoryMessages('15551234567@s.whatsapp.net', 0, 1, 1)).messages[0].text, 'Private history text');
+    assert.equal(
+      (await connection.getHistoryMessages('15551234567@s.whatsapp.net', 0, 1, 1)).messages[0].text,
+      'Private history text',
+    );
 
     const { readFile, readdir } = await import('node:fs/promises');
     const files = await readdir(join(directory, 'history-chats'));
-    assert.equal((await readFile(join(directory, 'history-chats', files[0]))).includes(Buffer.from('Private history text')), false);
+    assert.equal(
+      (await readFile(join(directory, 'history-chats', files[0]))).includes(Buffer.from('Private history text')),
+      false,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -161,12 +210,17 @@ test('history uses the sender profile name when no saved contact name is availab
   const connection = new WhatsAppConnection(directory, randomBytes(32));
 
   try {
-    await connection.recordHistory([], [{
-      key: { remoteJid: '15551234567@s.whatsapp.net', id: 'named-1', fromMe: false },
-      pushName: 'Alex Martin',
-      message: { conversation: 'Hello' },
-      messageTimestamp: Math.floor(Date.now() / 1000),
-    }]);
+    await connection.recordHistory(
+      [],
+      [
+        {
+          key: { remoteJid: '15551234567@s.whatsapp.net', id: 'named-1', fromMe: false },
+          pushName: 'Alex Martin',
+          message: { conversation: 'Hello' },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ],
+    );
 
     const candidates = await connection.getHistoryCandidates(0, 0, 20);
     assert.equal(candidates.items[0].name, 'Alex Martin');
@@ -197,7 +251,9 @@ test('numeric group titles resolve in the background', async () => {
 
   try {
     await connection.recordHistory([], [], false, [{ id: chatId, name: chatId.split('@')[0] }]);
-    Object.defineProperty(connection, 'socket', { value: { groupMetadata: async () => ({ subject: 'Family group' }) } });
+    Object.defineProperty(connection, 'socket', {
+      value: { groupMetadata: async () => ({ subject: 'Family group' }) },
+    });
     Object.defineProperty(connection, 'status', { value: { state: 'connected' } });
 
     assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: chatId.split('@')[0] }]);
@@ -214,12 +270,18 @@ test('group history keeps the group title and message sender', async () => {
   const groupId = '120363123456789012@g.us';
 
   try {
-    await connection.recordHistory([{ id: groupId, name: 'Project team' }], [{
-      key: { remoteJid: groupId, participant: '15551234567@s.whatsapp.net', id: 'group-1', fromMe: false },
-      pushName: 'Alex Martin',
-      message: { conversation: 'Hello team' },
-      messageTimestamp: Math.floor(Date.now() / 1000),
-    }], true);
+    await connection.recordHistory(
+      [{ id: groupId, name: 'Project team' }],
+      [
+        {
+          key: { remoteJid: groupId, participant: '15551234567@s.whatsapp.net', id: 'group-1', fromMe: false },
+          pushName: 'Alex Martin',
+          message: { conversation: 'Hello team' },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ],
+      true,
+    );
 
     const candidates = await connection.getHistoryCandidates(0, 0, 20);
     assert.equal(candidates.items[0].name, 'Project team');
@@ -244,19 +306,30 @@ test('group members use available contact names without inventing names for unkn
   let metadataCalls = 0;
 
   try {
-    await connection.recordHistory([{ id: '15551234567@lid', lid: '15551234567@lid', jid: '15551234567@s.whatsapp.net', name: 'Alex Martin' }], [], false);
-    Object.defineProperty(connection, 'socket', { value: { groupMetadata: async () => {
-      metadataCalls += 1;
-      return { participants: [
-        { id: '15551234567@lid' },
-        { id: '15557654321@lid' },
-      ] };
-    } } });
+    await connection.recordHistory(
+      [{ id: '15551234567@lid', lid: '15551234567@lid', jid: '15551234567@s.whatsapp.net', name: 'Alex Martin' }],
+      [],
+      false,
+    );
+    Object.defineProperty(connection, 'socket', {
+      value: {
+        groupMetadata: async () => {
+          metadataCalls += 1;
+          return { participants: [{ id: '15551234567@lid' }, { id: '15557654321@lid' }] };
+        },
+      },
+    });
     Object.defineProperty(connection, 'status', { value: { state: 'connected' } });
 
     const members = await connection.getGroupMembers(groupId);
     assert.deepEqual(members, [
-      { id: '15551234567@lid', phoneNumber: '+15551234567', displayName: 'Alex Martin', firstName: 'Alex', lastName: 'Martin' },
+      {
+        id: '15551234567@lid',
+        phoneNumber: '+15551234567',
+        displayName: 'Alex Martin',
+        firstName: 'Alex',
+        lastName: 'Martin',
+      },
       { id: '15557654321@lid' },
     ]);
     assert.deepEqual(await connection.getGroupMembers(groupId), members);
@@ -272,12 +345,19 @@ test('missing group titles are recovered from live metadata before review and im
   const groupId = '120363123456789012@g.us';
 
   try {
-    await connection.recordHistory([], [{
-      key: { remoteJid: groupId, participant: '15551234567@s.whatsapp.net', id: 'group-title-1', fromMe: false },
-      message: { conversation: 'Hello team' },
-      messageTimestamp: Math.floor(Date.now() / 1000),
-    }]);
-    Object.defineProperty(connection, 'socket', { value: { groupMetadata: async () => ({ subject: 'Project team', participants: [] }) } });
+    await connection.recordHistory(
+      [],
+      [
+        {
+          key: { remoteJid: groupId, participant: '15551234567@s.whatsapp.net', id: 'group-title-1', fromMe: false },
+          message: { conversation: 'Hello team' },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ],
+    );
+    Object.defineProperty(connection, 'socket', {
+      value: { groupMetadata: async () => ({ subject: 'Project team', participants: [] }) },
+    });
     Object.defineProperty(connection, 'status', { value: { state: 'connected' } });
 
     assert.equal((await connection.getHistoryCandidates(30, 0, 20, 'group')).items[0].name, 'Project team');
@@ -293,16 +373,22 @@ test('a group sender name can name the same direct contact', async () => {
   const personId = '15551234567@s.whatsapp.net';
 
   try {
-    await connection.recordHistory([], [{
-      key: { remoteJid: personId, id: 'direct-1', fromMe: true },
-      message: { conversation: 'Hello' },
-      messageTimestamp: Math.floor(Date.now() / 1000),
-    }, {
-      key: { remoteJid: '120363123456789012@g.us', participant: personId, id: 'group-1', fromMe: false },
-      pushName: 'Alex Martin',
-      message: { conversation: 'Hi group' },
-      messageTimestamp: Math.floor(Date.now() / 1000),
-    }]);
+    await connection.recordHistory(
+      [],
+      [
+        {
+          key: { remoteJid: personId, id: 'direct-1', fromMe: true },
+          message: { conversation: 'Hello' },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+        {
+          key: { remoteJid: '120363123456789012@g.us', participant: personId, id: 'group-1', fromMe: false },
+          pushName: 'Alex Martin',
+          message: { conversation: 'Hi group' },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ],
+    );
 
     assert.equal((await connection.getHistoryCandidates(30, 0, 20, 'direct')).items[0].name, 'Alex Martin');
   } finally {
@@ -315,12 +401,12 @@ test('the linked number is identified as the current group member', async () => 
   const connection = new WhatsAppConnection(directory, randomBytes(32));
 
   try {
-    Object.defineProperty(connection, 'socket', { value: {
-      user: { id: '15551234567:4@s.whatsapp.net', lid: '777777777@lid' },
-      groupMetadata: async () => ({ participants: [
-        { id: '777777777@lid', jid: '15551234567@s.whatsapp.net' },
-      ] }),
-    } });
+    Object.defineProperty(connection, 'socket', {
+      value: {
+        user: { id: '15551234567:4@s.whatsapp.net', lid: '777777777@lid' },
+        groupMetadata: async () => ({ participants: [{ id: '777777777@lid', jid: '15551234567@s.whatsapp.net' }] }),
+      },
+    });
     Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15551234567' } });
 
     assert.deepEqual(await connection.getGroupMembers('120363123456789012@g.us'), [
@@ -365,12 +451,49 @@ test('image, video, and audio history stays ordered and exposes media details wi
   const newerId = '999999999999999999@g.us';
 
   try {
-    await connection.recordHistory([], [
-      { key: { remoteJid: olderId, id: 'text-1', fromMe: false }, message: { conversation: 'Old text' }, messageTimestamp: 1_700_000_000 },
-      { key: { remoteJid: newerId, id: 'image-1', fromMe: false }, message: { imageMessage: { mimetype: 'image/jpeg', mediaKey: randomBytes(32), directPath: '/image', fileLength: 1024 } }, messageTimestamp: 1_700_086_400 },
-      { key: { remoteJid: newerId, id: 'video-1', fromMe: true }, message: { videoMessage: { mimetype: 'video/mp4', caption: 'A short clip', mediaKey: randomBytes(32), directPath: '/video', fileLength: 2048 } }, messageTimestamp: 1_700_086_401 },
-      { key: { remoteJid: newerId, id: 'audio-1', fromMe: false }, message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus', ptt: true, mediaKey: randomBytes(32), directPath: '/audio', fileLength: 4096 } }, messageTimestamp: 1_700_086_402 },
-    ]);
+    await connection.recordHistory(
+      [],
+      [
+        {
+          key: { remoteJid: olderId, id: 'text-1', fromMe: false },
+          message: { conversation: 'Old text' },
+          messageTimestamp: 1_700_000_000,
+        },
+        {
+          key: { remoteJid: newerId, id: 'image-1', fromMe: false },
+          message: {
+            imageMessage: { mimetype: 'image/jpeg', mediaKey: randomBytes(32), directPath: '/image', fileLength: 1024 },
+          },
+          messageTimestamp: 1_700_086_400,
+        },
+        {
+          key: { remoteJid: newerId, id: 'video-1', fromMe: true },
+          message: {
+            videoMessage: {
+              mimetype: 'video/mp4',
+              caption: 'A short clip',
+              mediaKey: randomBytes(32),
+              directPath: '/video',
+              fileLength: 2048,
+            },
+          },
+          messageTimestamp: 1_700_086_401,
+        },
+        {
+          key: { remoteJid: newerId, id: 'audio-1', fromMe: false },
+          message: {
+            audioMessage: {
+              mimetype: 'audio/ogg; codecs=opus',
+              ptt: true,
+              mediaKey: randomBytes(32),
+              directPath: '/audio',
+              fileLength: 4096,
+            },
+          },
+          messageTimestamp: 1_700_086_402,
+        },
+      ],
+    );
 
     const candidates = await connection.getHistoryCandidates(0, 0, 20, 'group');
     assert.equal(candidates.items[0].chatId, newerId);

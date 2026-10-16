@@ -20,9 +20,10 @@ type MessageComposerProps = {
 };
 
 // Pasted files have no name; give them one so WhatsApp shows something sensible.
-const withName = (file: File) => file.name.trim()
-  ? file
-  : new File([file], `pasted-file-${Date.now()}.${file.type.split('/')[1] ?? 'bin'}`, { type: file.type });
+const withName = (file: File) =>
+  file.name.trim()
+    ? file
+    : new File([file], `pasted-file-${Date.now()}.${file.type.split('/')[1] ?? 'bin'}`, { type: file.type });
 
 export const MessageComposer = ({ disabled, sending, onSend }: MessageComposerProps) => {
   const [text, setText] = useState('');
@@ -45,8 +46,16 @@ export const MessageComposer = ({ disabled, sending, onSend }: MessageComposerPr
   return (
     <div
       onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer?.files ?? [])); }}
-      style={{ borderTop: `1px solid ${themeCssVariables.border.color.medium}`, display: 'grid', gap: themeCssVariables.spacing[2], padding: themeCssVariables.spacing[3] }}
+      onDrop={(event) => {
+        event.preventDefault();
+        addFiles(Array.from(event.dataTransfer?.files ?? []));
+      }}
+      style={{
+        borderTop: `1px solid ${themeCssVariables.border.color.medium}`,
+        display: 'grid',
+        gap: themeCssVariables.spacing[2],
+        padding: themeCssVariables.spacing[3],
+      }}
     >
       {files.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[2] }}>
@@ -54,7 +63,13 @@ export const MessageComposer = ({ disabled, sending, onSend }: MessageComposerPr
             <Chip
               key={pending.id}
               endElement={
-                <IconButton size="xs" variant="ghost" aria-label={t('Remove')} disabled={sending} onClick={() => setFiles((previous) => previous.filter((item) => item.id !== pending.id))}>
+                <IconButton
+                  size="xs"
+                  variant="ghost"
+                  aria-label={t('Remove')}
+                  disabled={sending}
+                  onClick={() => setFiles((previous) => previous.filter((item) => item.id !== pending.id))}
+                >
                   <IconX size={12} />
                 </IconButton>
               }
@@ -67,13 +82,18 @@ export const MessageComposer = ({ disabled, sending, onSend }: MessageComposerPr
       <div style={{ alignItems: 'flex-end', display: 'flex', gap: themeCssVariables.spacing[2] }}>
         {/* A transparent native input over the button: the sandbox only opens file pickers from a real click. */}
         <span style={{ position: 'relative' }}>
-          <IconButton variant="ghost" aria-label={t('Attach files')} disabled={disabled || sending}><IconPaperclip size={16} /></IconButton>
+          <IconButton variant="ghost" aria-label={t('Attach files')} disabled={disabled || sending}>
+            <IconPaperclip size={16} />
+          </IconButton>
           <input
             type="file"
             multiple
             aria-label={t('Attach files')}
             disabled={disabled || sending}
-            onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }}
+            onChange={(event) => {
+              addFiles(Array.from(event.target.files ?? []));
+              event.target.value = '';
+            }}
             style={{ cursor: 'pointer', inset: 0, opacity: 0, position: 'absolute' }}
           />
         </span>
@@ -90,7 +110,10 @@ export const MessageComposer = ({ disabled, sending, onSend }: MessageComposerPr
             onChange={(event) => setText(event.target.value)}
             onPaste={(event) => {
               const pasted = Array.from(event.clipboardData?.files ?? []);
-              if (pasted.length) { event.preventDefault(); addFiles(pasted); }
+              if (pasted.length) {
+                event.preventDefault();
+                addFiles(pasted);
+              }
             }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -100,7 +123,14 @@ export const MessageComposer = ({ disabled, sending, onSend }: MessageComposerPr
             }}
           />
         </div>
-        <IconButton variant="solid" color="accent" aria-label={t('Send')} loading={sending} disabled={!canSend} onClick={() => void send()}>
+        <IconButton
+          variant="solid"
+          color="accent"
+          aria-label={t('Send')}
+          loading={sending}
+          disabled={!canSend}
+          onClick={() => void send()}
+        >
           <IconSend size={16} />
         </IconButton>
       </div>

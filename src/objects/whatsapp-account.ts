@@ -20,7 +20,13 @@ export default defineObject({
   labelIdentifierFieldMetadataUniversalIdentifier: ACCOUNT_NAME_FIELD_ID,
   fields: [
     { universalIdentifier: ACCOUNT_NAME_FIELD_ID, type: FieldType.TEXT, name: 'name', label: 'Name', icon: 'IconAbc' },
-    { universalIdentifier: ACCOUNT_PHONE_FIELD_ID, type: FieldType.TEXT, name: 'phoneNumber', label: 'Phone number', icon: 'IconPhone' },
+    {
+      universalIdentifier: ACCOUNT_PHONE_FIELD_ID,
+      type: FieldType.TEXT,
+      name: 'phoneNumber',
+      label: 'Phone number',
+      icon: 'IconPhone',
+    },
     {
       universalIdentifier: '0f1b36e0-ed72-436b-aa2e-6b0ce0c548f0',
       type: FieldType.SELECT,
@@ -33,7 +39,13 @@ export default defineObject({
         { value: 'DISCONNECTED', label: 'Disconnected', color: 'gray', position: 1 },
       ],
     },
-    { universalIdentifier: '53c7aee5-b69a-49a3-adb5-974ff35f9c22', type: FieldType.DATE_TIME, name: 'acknowledgedAt', label: 'Acknowledged at', icon: 'IconCalendar' },
+    {
+      universalIdentifier: '53c7aee5-b69a-49a3-adb5-974ff35f9c22',
+      type: FieldType.DATE_TIME,
+      name: 'acknowledgedAt',
+      label: 'Acknowledged at',
+      icon: 'IconCalendar',
+    },
     {
       universalIdentifier: ACCOUNT_CONVERSATIONS_FIELD_ID,
       type: FieldType.RELATION,

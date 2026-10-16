@@ -33,7 +33,10 @@ const MEDIA_FORMATS: Record<string, string> = {
   'audio/webm': 'webm',
 };
 
-export const describeMedia = (message: WAMessage, eventId: string): { summary: MediaSummary; reference?: MediaReference; caption?: string } | undefined => {
+export const describeMedia = (
+  message: WAMessage,
+  eventId: string,
+): { summary: MediaSummary; reference?: MediaReference; caption?: string } | undefined => {
   const image = message.message?.imageMessage;
   const video = message.message?.videoMessage;
   const audio = message.message?.audioMessage;
@@ -45,9 +48,14 @@ export const describeMedia = (message: WAMessage, eventId: string): { summary: M
 
   const kind: MediaKind = image ? 'image' : video ? 'video' : 'audio';
   const suppliedMimeType = content.mimetype?.split(';')[0].trim().toLowerCase();
-  const mimeType = suppliedMimeType && MEDIA_FORMATS[suppliedMimeType] && suppliedMimeType.startsWith(`${kind}/`)
-    ? suppliedMimeType
-    : kind === 'image' ? 'image/jpeg' : kind === 'video' ? 'video/mp4' : 'audio/ogg';
+  const mimeType =
+    suppliedMimeType && MEDIA_FORMATS[suppliedMimeType] && suppliedMimeType.startsWith(`${kind}/`)
+      ? suppliedMimeType
+      : kind === 'image'
+        ? 'image/jpeg'
+        : kind === 'video'
+          ? 'video/mp4'
+          : 'audio/ogg';
   const size = Number(content.fileLength ?? 0);
   const summary: MediaSummary = {
     kind,
@@ -72,11 +80,15 @@ export const downloadMedia = async (reference: MediaReference): Promise<Buffer> 
     throw new Error('Media exceeds import size limit');
   }
 
-  const stream = await downloadContentFromMessage({
-    mediaKey: Buffer.from(reference.mediaKey, 'base64'),
-    directPath: reference.directPath,
-    url: reference.url,
-  }, reference.kind, { options: { timeout: 45_000 } });
+  const stream = await downloadContentFromMessage(
+    {
+      mediaKey: Buffer.from(reference.mediaKey, 'base64'),
+      directPath: reference.directPath,
+      url: reference.url,
+    },
+    reference.kind,
+    { options: { timeout: 45_000 } },
+  );
   const chunks: Buffer[] = [];
   let size = 0;
 

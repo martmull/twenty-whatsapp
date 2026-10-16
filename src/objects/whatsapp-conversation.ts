@@ -1,4 +1,11 @@
-import { defineObject, FieldType, MetadataWritability, OnDeleteAction, RelationType, STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS } from 'twenty-sdk/define';
+import {
+  defineObject,
+  FieldType,
+  MetadataWritability,
+  OnDeleteAction,
+  RelationType,
+  STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS,
+} from 'twenty-sdk/define';
 
 import {
   ACCOUNT_CONVERSATIONS_FIELD_ID,
@@ -24,8 +31,20 @@ export default defineObject({
   writability: MetadataWritability.APPLICATION,
   labelIdentifierFieldMetadataUniversalIdentifier: CONVERSATION_NAME_FIELD_ID,
   fields: [
-    { universalIdentifier: CONVERSATION_NAME_FIELD_ID, type: FieldType.TEXT, name: 'name', label: 'Name', icon: 'IconAbc' },
-    { universalIdentifier: CONVERSATION_CHAT_ID_FIELD_ID, type: FieldType.TEXT, name: 'chatId', label: 'Chat ID', icon: 'IconHash' },
+    {
+      universalIdentifier: CONVERSATION_NAME_FIELD_ID,
+      type: FieldType.TEXT,
+      name: 'name',
+      label: 'Name',
+      icon: 'IconAbc',
+    },
+    {
+      universalIdentifier: CONVERSATION_CHAT_ID_FIELD_ID,
+      type: FieldType.TEXT,
+      name: 'chatId',
+      label: 'Chat ID',
+      icon: 'IconHash',
+    },
     {
       universalIdentifier: CONVERSATION_ACCOUNT_FIELD_ID,
       type: FieldType.RELATION,
@@ -34,7 +53,11 @@ export default defineObject({
       icon: 'IconBrandWhatsapp',
       relationTargetObjectMetadataUniversalIdentifier: WHATSAPP_ACCOUNT_OBJECT_ID,
       relationTargetFieldMetadataUniversalIdentifier: ACCOUNT_CONVERSATIONS_FIELD_ID,
-      universalSettings: { relationType: RelationType.MANY_TO_ONE, onDelete: OnDeleteAction.CASCADE, joinColumnName: 'accountId' },
+      universalSettings: {
+        relationType: RelationType.MANY_TO_ONE,
+        onDelete: OnDeleteAction.CASCADE,
+        joinColumnName: 'accountId',
+      },
     },
     {
       universalIdentifier: CONVERSATION_PERSON_FIELD_ID,
@@ -45,7 +68,11 @@ export default defineObject({
       isNullable: true,
       relationTargetObjectMetadataUniversalIdentifier: STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS.person.universalIdentifier,
       relationTargetFieldMetadataUniversalIdentifier: PERSON_CONVERSATIONS_FIELD_ID,
-      universalSettings: { relationType: RelationType.MANY_TO_ONE, onDelete: OnDeleteAction.SET_NULL, joinColumnName: 'personId' },
+      universalSettings: {
+        relationType: RelationType.MANY_TO_ONE,
+        onDelete: OnDeleteAction.SET_NULL,
+        joinColumnName: 'personId',
+      },
     },
     {
       universalIdentifier: CONVERSATION_MESSAGES_FIELD_ID,
@@ -58,8 +85,29 @@ export default defineObject({
       universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
     // Rewritten on every message: kept out of the timeline.
-    { universalIdentifier: '4b32c71f-8c24-4429-8b16-05f6cd65ada6', type: FieldType.DATE_TIME, name: 'lastMessageAt', label: 'Last message at', icon: 'IconCalendar', isAuditLogged: false },
-    { universalIdentifier: 'be4b5c2e-817a-47e8-ace0-55459b4b3cbc', type: FieldType.DATE_TIME, name: 'lastInboundAt', label: 'Last incoming message at', icon: 'IconCalendar', isAuditLogged: false },
-    { universalIdentifier: '8161acfd-6177-4843-8e03-462ccf3b558b', type: FieldType.TEXT, name: 'lastPreview', label: 'Last preview', icon: 'IconMessage', isAuditLogged: false },
+    {
+      universalIdentifier: '4b32c71f-8c24-4429-8b16-05f6cd65ada6',
+      type: FieldType.DATE_TIME,
+      name: 'lastMessageAt',
+      label: 'Last message at',
+      icon: 'IconCalendar',
+      isAuditLogged: false,
+    },
+    {
+      universalIdentifier: 'be4b5c2e-817a-47e8-ace0-55459b4b3cbc',
+      type: FieldType.DATE_TIME,
+      name: 'lastInboundAt',
+      label: 'Last incoming message at',
+      icon: 'IconCalendar',
+      isAuditLogged: false,
+    },
+    {
+      universalIdentifier: '8161acfd-6177-4843-8e03-462ccf3b558b',
+      type: FieldType.TEXT,
+      name: 'lastPreview',
+      label: 'Last preview',
+      icon: 'IconMessage',
+      isAuditLogged: false,
+    },
   ],
 });
