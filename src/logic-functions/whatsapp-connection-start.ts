@@ -16,7 +16,7 @@ const handler = route<{ ownsNumber?: boolean; acceptsRisk?: boolean }>('whatsapp
   }
 
   logger.info('Starting pairing');
-  return bridgePost<BridgeStatus>('/connect');
+  return { ...(await bridgePost<BridgeStatus>('/connect')), canManage: true };
 });
 
 export default defineLogicFunction({

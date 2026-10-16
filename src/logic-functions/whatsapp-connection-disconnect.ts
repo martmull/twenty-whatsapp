@@ -34,7 +34,7 @@ const handler = route('whatsapp-connection-disconnect', async (event, logger) =>
     }
   }
 
-  return result;
+  return { ...result, canManage: true };
 });
 
 export default defineLogicFunction({
