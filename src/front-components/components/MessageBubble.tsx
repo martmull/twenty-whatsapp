@@ -6,7 +6,8 @@ import { formatTime, type Message } from 'src/front-components/components/inbox-
 const PLACEHOLDER_TEXTS = ['[Image]', '[Video]', '[Audio]', '[File]'];
 
 // http(s) URLs only, so a message can never produce a javascript: link.
-const URL_PATTERN = /(https?:\/\/[^\s]+)/g;
+// Trailing punctuation (as in "see https://example.com.") stays outside the link.
+const URL_PATTERN = /(https?:\/\/[^\s]*[^\s.,;:!?)\]'"])/gi;
 
 // Renders message text with its URLs as links opening in a new tab.
 const TextWithLinks = ({ text }: { text: string }) =>
