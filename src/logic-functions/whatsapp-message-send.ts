@@ -4,6 +4,7 @@ import { bridgeFetch, bridgePost, getBridgeStatus } from 'src/logic-functions/br
 import {
   applicationClient,
   findMessageByRequestId,
+  MEDIA_KIND_VALUES,
   MESSAGE_FIELDS,
   userClient,
   type Message,
@@ -195,7 +196,10 @@ const handler = route<SendRequest>('whatsapp-message-send', async (event, logger
             deliveryState: 'UNKNOWN',
             requestId,
             ...(attachment
-              ? { mediaKind: mediaKind!.toUpperCase(), media: [{ fileId: attachment.fileId, label: attachment.label }] }
+              ? {
+                  mediaKind: MEDIA_KIND_VALUES[mediaKind!],
+                  media: [{ fileId: attachment.fileId, label: attachment.label }],
+                }
               : {}),
           },
         },
