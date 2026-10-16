@@ -5,6 +5,7 @@ import {
   applicationClient,
   CONVERSATION_FIELDS,
   MESSAGE_FIELDS,
+  nodesOf,
   userClient,
   type Conversation,
   type Message,
@@ -32,7 +33,7 @@ const loadMessages = async (conversationId: string, before?: string) => {
   });
 
   return {
-    messages: (result.whatsappMessages?.edges ?? []).map(({ node }: { node: Message }) => node).reverse(),
+    messages: nodesOf<Message>(result.whatsappMessages).reverse(),
     hasMoreMessages: Boolean(result.whatsappMessages?.pageInfo?.hasNextPage),
   };
 };
@@ -53,9 +54,10 @@ const loadLastReadAt = async (userWorkspaceId: string, conversations: Conversati
   });
 
   return new Map(
-    (result.whatsappConversationReadStates?.edges ?? []).map(
-      ({ node }: { node: { name: string; lastReadAt: string } }) => [node.name, node.lastReadAt],
-    ),
+    nodesOf<{ name: string; lastReadAt: string }>(result.whatsappConversationReadStates).map((readState) => [
+      readState.name,
+      readState.lastReadAt,
+    ]),
   );
 };
 
@@ -93,9 +95,7 @@ const handler = route<ListRequest>('whatsapp-message-list', async (event) => {
     }),
     getBridgeStatus().catch(() => ({ state: 'unavailable' as const })),
   ]);
-  const visibleConversations: Conversation[] = (result.whatsappConversations?.edges ?? []).map(
-    ({ node }: { node: Conversation }) => node,
-  );
+  const visibleConversations = nodesOf<Conversation>(result.whatsappConversations);
   const selected =
     visibleConversations.find((conversation) => conversation.id === conversationId) ?? visibleConversations[0];
 

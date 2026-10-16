@@ -58,6 +58,11 @@ export type BridgeMessageEvent = {
   media?: { kind: 'image' | 'video' | 'audio'; mimeType: string; fileName: string; sizeBytes?: number };
 };
 
+// The records of a GraphQL connection (`edges[].node`), typed by the caller. The generated client
+// marks every field optional, so callers state the fields they selected.
+export const nodesOf = <T>(connection: { edges?: { node: unknown }[] } | null | undefined): T[] =>
+  (connection?.edges ?? []).map((edge) => edge.node as T);
+
 export const applicationClient = () => new CoreApiClient({ runAs: 'application' });
 export const userClient = () => new CoreApiClient({ runAs: 'user' });
 
@@ -287,7 +292,7 @@ export const importChatMessages = async (
     },
   });
   const existingIds = new Set(
-    (existing.whatsappMessages?.edges ?? []).map(({ node }: { node: { externalId: string } }) => node.externalId),
+    nodesOf<{ externalId: string }>(existing.whatsappMessages).map((message) => message.externalId),
   );
   const missing = events.filter((event) => !existingIds.has(event.eventId));
 
@@ -445,9 +450,7 @@ export const syncConversationNames = async (logger: Logger): Promise<void> => {
         pageInfo: { hasNextPage: true, endCursor: true },
       },
     });
-    const conversations: { id: string; chatId: string; name: string }[] = (
-      result.whatsappConversations?.edges ?? []
-    ).map(({ node }: { node: { id: string; chatId: string; name: string } }) => node);
+    const conversations = nodesOf<{ id: string; chatId: string; name: string }>(result.whatsappConversations);
 
     if (conversations.length > 0) {
       const names = await bridgePost<{ chatId: string; name: string }[]>('/history/names', {
