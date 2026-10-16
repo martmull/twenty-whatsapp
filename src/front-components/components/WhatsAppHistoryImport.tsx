@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
 import { t } from 'twenty-sdk/front-component';
 import { Callout } from 'twenty-ui/components';
@@ -31,12 +31,13 @@ type HistoryList = {
   historyReceivedAt?: string;
 };
 
-type ImportResult = {
-  imported: number;
-  total: number;
-  nextOffset?: number;
-  createdPerson: boolean;
+type QueueResult = {
+  queued: number;
+  createdPeople: number;
+  failures: { chatId: string; error: string }[];
 };
+
+type ImportProgress = { chatId: string; imported: number; total: number; state: 'queued' | 'failed' };
 
 type GroupMember = {
   id: string;
@@ -74,6 +75,49 @@ export const WhatsAppHistoryImport = () => {
   const [notice, setNotice] = useState('');
   // Import progress from 0 to 100, undefined when no import is running.
   const [progress, setProgress] = useState<number>();
+  const [importRunning, setImportRunning] = useState(false);
+
+  // The import runs in background jobs: check once on open, then poll while it runs.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const check = async () => {
+      try {
+        const tasks = await new RestApiClient().post<ImportProgress[]>('/s/whatsapp/history', { action: 'progress' });
+        if (cancelled) return;
+        const queued = tasks.filter((task) => task.state === 'queued');
+        const failed = tasks.filter((task) => task.state === 'failed').length;
+
+        if (queued.length === 0) {
+          setProgress(undefined);
+          if (importRunning) {
+            setImportRunning(false);
+            setNotice(
+              failed > 0
+                ? `${t('Import complete')}. ${failed} ${t('chats could not be imported; select them again to retry.')}`
+                : `${t('Import complete')}.`,
+            );
+          }
+          return;
+        }
+
+        const total = queued.reduce((sum, task) => sum + task.total, 0);
+        const imported = queued.reduce((sum, task) => sum + Math.min(task.imported, task.total), 0);
+        setProgress(total > 0 ? (100 * imported) / total : 0);
+        setImportRunning(true);
+      } catch {
+        // The bridge may be restarting; keep checking while an import runs.
+      }
+      if (!cancelled && importRunning) timer = setTimeout(check, 4_000);
+    };
+
+    void check();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [importRunning]);
 
   const load = async (
     range: RangeDays,
@@ -101,7 +145,6 @@ export const WhatsAppHistoryImport = () => {
       setError(t('Could not load WhatsApp history. Check the bridge and retry.'));
     } finally {
       setWorkingAction(null);
-      setProgress(undefined);
     }
   };
 
@@ -165,8 +208,6 @@ export const WhatsAppHistoryImport = () => {
     setWorkingAction('import');
     setError('');
     setNotice('');
-    let imported = 0;
-    let createdPeople = 0;
 
     try {
       const chosen = items.filter((item) => selected.includes(item.chatId));
@@ -182,42 +223,42 @@ export const WhatsAppHistoryImport = () => {
         return;
       }
 
-      for (const [index, item] of chosen.entries()) {
-        setProgress((100 * index) / chosen.length);
-        let offset = 0;
-
-        while (true) {
-          const result = (await new RestApiClient().post('/s/whatsapp/history', {
-            action: 'import',
-            rangeDays,
+      const result = (await new RestApiClient().post('/s/whatsapp/history', {
+        action: 'import',
+        rangeDays,
+        acknowledged,
+        chats: chosen.map((item) => {
+          const typed = item.match === 'new' || item.renameable ? names[item.chatId] : undefined;
+          return {
             chatId: item.chatId,
-            offset,
             createPerson: item.match === 'new',
-            ...(item.match === 'new' || item.renameable ? names[item.chatId] : {}),
-            acknowledged,
-          })) as ImportResult;
-          imported += result.imported;
-          createdPeople += Number(result.createdPerson);
-
-          if (result.nextOffset === undefined) {
-            break;
-          }
-
-          offset = result.nextOffset;
-          // Each chat is an equal share of the bar, filled as its pages are imported.
-          setProgress((100 * (index + (result.total ? offset / result.total : 1))) / chosen.length);
-        }
-      }
+            ...(typed?.firstName.trim() ? { firstName: typed.firstName.trim() } : {}),
+            ...(typed?.lastName.trim() ? { lastName: typed.lastName.trim() } : {}),
+          };
+        }),
+      })) as QueueResult;
 
       setSelected([]);
       setAcknowledged(false);
       await load(rangeDays, 0, 'import');
-      setNotice(`${t('Import complete')}: ${imported} ${t('messages')}, ${createdPeople} ${t('new People')}.`);
+      if (result.failures.length > 0) {
+        const nameByChatId = new Map(items.map((item) => [item.chatId, item.name]));
+        setError(
+          result.failures
+            .map((failure) => `${nameByChatId.get(failure.chatId) ?? failure.chatId}: ${failure.error}`)
+            .join('; '),
+        );
+      }
+      if (result.queued > 0) {
+        setNotice(
+          `${result.queued} ${t('chats queued')}, ${result.createdPeople} ${t('new People')}. ${t('Messages are imported in the background; you can leave this page.')}`,
+        );
+        setProgress(0);
+        setImportRunning(true);
+      }
     } catch {
       setNotice('');
-      setError(
-        t('Import stopped. Completed records were saved. Review and retry; duplicate messages will be skipped.'),
-      );
+      setError(t('Could not queue the import. Check the bridge and retry; duplicate messages will be skipped.'));
     } finally {
       setWorkingAction(null);
     }

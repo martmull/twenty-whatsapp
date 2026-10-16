@@ -18,6 +18,7 @@ import { toDataURL } from 'qrcode';
 
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
+import { HistoryImportQueue } from './history-import-queue.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
 import {
   isDirectChatId,
@@ -85,6 +86,7 @@ export class WhatsAppConnection {
   private readonly historyChats: EncryptedJsonStore<HistoryChat>;
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
+  readonly historyImports: HistoryImportQueue;
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
   private readonly pendingGroupNameLookups = new Set<string>();
   private readonly groupNameLookupQueue: string[] = [];
@@ -109,6 +111,10 @@ export class WhatsAppConnection {
     this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
     this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
     this.mediaReferences = new EncryptedJsonStore(join(directory, 'media-references'), encryptionKey);
+    this.historyImports = new HistoryImportQueue(join(directory, 'history-imports'), encryptionKey, async (chatId) => {
+      await this.historyWrites;
+      return (await this.historyChats.read(chatId))?.messages;
+    });
   }
 
   async recordHistory(

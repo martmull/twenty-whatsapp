@@ -1,12 +1,16 @@
 import { defineLogicFunction } from 'twenty-sdk/define';
 
+import { resumeHistoryImport } from 'src/logic-functions/history-import';
 import { syncConversationNames, syncMessages } from 'src/logic-functions/message-data';
 import { createLogger } from 'src/logic-functions/utils/logger';
 
-// Safety net: the bridge webhook imports messages as they arrive, this catches anything it missed.
+// Safety net: catches messages the webhook job missed and restarts a history import whose job chain was lost.
 const handler = async () => {
   const logger = createLogger('whatsapp-message-sync');
   const result = await syncMessages(logger);
+  await resumeHistoryImport(logger).catch((error) =>
+    logger.warn('Could not resume history import', { error: String(error) }),
+  );
   await syncConversationNames(logger).catch((error) =>
     logger.warn('Could not sync conversation names', { error: String(error) }),
   );

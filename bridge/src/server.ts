@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import { resolve } from 'node:path';
 
 import { WhatsAppConnection } from './connection.js';
-import { isGroupChatId } from './message-event.js';
+import { isGroupChatId, isSupportedChatId } from './message-event.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
 const keyHex = process.env.WHATSAPP_SESSION_KEY;
@@ -31,7 +31,7 @@ const notifyTwenty = () => {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-whatsapp-signature': signature },
         body,
-        signal: AbortSignal.timeout(130_000),
+        signal: AbortSignal.timeout(30_000),
       });
       if (!response.ok) log('Twenty webhook failed', { status: response.status });
     } catch (error) {
@@ -91,6 +91,11 @@ const isPage = (offset: unknown, limit: unknown, maxLimit: number) =>
   Number.isInteger(limit) &&
   (limit as number) >= 1 &&
   (limit as number) <= maxLimit;
+const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d-]{36}$/i.test(value);
+const isEventId = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{64}$/.test(value);
+const isCount = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 10_000;
+const isDelay = (value: unknown) =>
+  Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24 * 60 * 60_000;
 const requireConnected = () => check(connection.getStatus().state === 'connected', 'WhatsApp is disconnected');
 
 type Route = (body: Record<string, unknown>) => unknown;
@@ -155,6 +160,50 @@ const jsonRoutes: Record<string, Route> = {
     );
     return connection.getHistoryNames(body.chatIds as string[]);
   },
+  'POST /history/imports/queue': (body) => {
+    requireConnected();
+    check(
+      Array.isArray(body.tasks) &&
+        body.tasks.length >= 1 &&
+        body.tasks.length <= 50 &&
+        body.tasks.every(
+          (task: Record<string, unknown>) =>
+            isSupportedChatId(task?.chatId as string) && isUuid(task.conversationId) && isRange(task.rangeDays),
+        ),
+    );
+    return connection.historyImports.queue(
+      body.tasks as { chatId: string; conversationId: string; rangeDays: 0 | 30 | 90 }[],
+    );
+  },
+  'POST /history/imports/claim': (body) => {
+    requireConnected();
+    check(isUuid(body.runToken));
+    return connection.historyImports.claim(body.runToken as string);
+  },
+  'POST /history/imports/complete': (body) => {
+    check(
+      isUuid(body.leaseId) &&
+        (body.lastEventId === undefined || isEventId(body.lastEventId)) &&
+        isCount(body.imported) &&
+        isDelay(body.nextRunInMs),
+    );
+    return connection.historyImports.complete(
+      body.leaseId as string,
+      body.lastEventId as string | undefined,
+      body.imported as number,
+      body.nextRunInMs as number,
+    );
+  },
+  'POST /history/imports/release': (body) => {
+    check(isUuid(body.leaseId) && typeof body.failed === 'boolean' && isDelay(body.nextRunInMs));
+    return connection.historyImports.release(
+      body.leaseId as string,
+      body.failed as boolean,
+      body.nextRunInMs as number,
+    );
+  },
+  'POST /history/imports/resume': () => connection.historyImports.resume(),
+  'POST /history/imports/progress': () => connection.historyImports.progress(),
   'POST /history/members': (body) => {
     check(isGroupChatId(body.chatId as string), 'Invalid group ID');
     return connection.getGroupMembers(body.chatId as string);

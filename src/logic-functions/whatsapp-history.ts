@@ -2,30 +2,39 @@ import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
+import { enqueueHistoryImport } from 'src/logic-functions/history-import';
 import {
   applicationClient,
   ensureAccount,
+  ensureConversation,
+  findConversations,
   findPeopleByPhones,
-  importChatMessages,
   personName,
   userClient,
-  type BridgeMessageEvent,
   type Person,
 } from 'src/logic-functions/message-data';
+import type { Logger } from 'src/logic-functions/utils/logger';
 import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
 import { chatNumber, digits, isChatId, isGroupChatId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
 
+type ChatSelection = {
+  chatId?: string;
+  createPerson?: boolean;
+  firstName?: string;
+  lastName?: string;
+};
+
 type HistoryRequest = {
-  action?: 'list' | 'import' | 'members';
+  action?: 'list' | 'import' | 'members' | 'progress';
   rangeDays?: 0 | 30 | 90;
   kind?: 'all' | 'direct' | 'group';
   offset?: number;
   chatId?: string;
-  createPerson?: boolean;
   acknowledged?: boolean;
-  firstName?: string;
-  lastName?: string;
+  chats?: ChatSelection[];
 };
+
+const MAX_CHATS_PER_IMPORT = 50;
 
 type HistoryCandidate = {
   chatId: string;
@@ -34,7 +43,6 @@ type HistoryCandidate = {
   messageCount: number;
   lastMessageAt?: string;
 };
-type HistoryMessages = { name: string; messages: BridgeMessageEvent[]; total: number; nextOffset?: number };
 
 const listCandidates = async (request: HistoryRequest) => {
   const offset = request.offset ?? 0;
@@ -81,12 +89,11 @@ const listCandidates = async (request: HistoryRequest) => {
 
 // Finds the Person for a direct chat, creating or renaming them as the admin asked.
 const resolvePerson = async (
-  request: HistoryRequest,
+  request: ChatSelection,
   chatId: string,
   historyName: string,
+  matches: Person[],
 ): Promise<{ person: Person; createdPerson: boolean }> => {
-  const matches = (await findPeopleByPhones(applicationClient(), [chatNumber(chatId)])).get(chatNumber(chatId)) ?? [];
-
   if (matches.length > 1) {
     throw new HttpError(409, 'More than one Person has this phone number');
   }
@@ -141,6 +148,114 @@ const resolvePerson = async (
   return { person: existing, createdPerson: false };
 };
 
+// Creates the People and conversations of the selected chats, then hands the messages to the
+// background import. Chats that cannot be imported are reported without stopping the others.
+const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, logger: Logger) => {
+  const chats = request.chats;
+
+  if (
+    request.acknowledged !== true ||
+    !Array.isArray(chats) ||
+    chats.length === 0 ||
+    chats.length > MAX_CHATS_PER_IMPORT ||
+    !chats.every((chat) => isChatId(chat?.chatId)) ||
+    new Set(chats.map((chat) => chat.chatId)).size !== chats.length
+  ) {
+    throw new HttpError(400, 'Invalid history import request');
+  }
+
+  const chatIds = chats.map((chat) => chat.chatId as string);
+
+  if (chatIds.some((chatId) => chatNumber(chatId) === accountPhoneNumber)) {
+    throw new HttpError(400, 'Cannot import the linked account as a contact');
+  }
+
+  const client = applicationClient();
+  const [names, accountId] = await Promise.all([
+    bridgePost<{ chatId: string; name: string }[]>('/history/names', { chatIds }, 30_000),
+    ensureAccount(client, `+${accountPhoneNumber}`),
+  ]);
+  const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name]));
+  const [peopleByPhone, conversations] = await Promise.all([
+    findPeopleByPhones(client, chatIds.filter((chatId) => !isGroupChatId(chatId)).map(chatNumber)),
+    findConversations(client, accountId, chatIds),
+  ]);
+  const resolved: { chatId: string; name: string; person?: Person }[] = [];
+  const failures: { chatId: string; error: string }[] = [];
+  let createdPeople = 0;
+
+  for (const chat of chats) {
+    const chatId = chat.chatId as string;
+    const historyName = nameByChatId.get(chatId) ?? chatNumber(chatId);
+
+    try {
+      const { person, createdPerson } = isGroupChatId(chatId)
+        ? { person: undefined, createdPerson: false }
+        : await resolvePerson(chat, chatId, historyName, peopleByPhone.get(chatNumber(chatId)) ?? []);
+      createdPeople += Number(createdPerson);
+      resolved.push({
+        chatId,
+        name: person ? personName(person) || chatNumber(chatId) : historyName.slice(0, 120),
+        person,
+      });
+    } catch (error) {
+      if (!(error instanceof HttpError)) throw error;
+      failures.push({ chatId, error: error.message });
+    }
+  }
+
+  const missing = resolved.filter(({ chatId }) => !conversations.has(chatId));
+  const createdIdByChatId = new Map<string, string>();
+
+  if (missing.length > 0) {
+    const created = await client.mutation({
+      createWhatsappConversations: {
+        __args: {
+          data: missing.map(({ chatId, name, person }) => ({
+            name,
+            chatId,
+            accountId,
+            ...(person ? { personId: person.id } : {}),
+          })),
+        },
+        id: true,
+        chatId: true,
+      },
+    });
+    for (const { id, chatId } of created.createWhatsappConversations ?? []) {
+      if (id && chatId) createdIdByChatId.set(chatId, id);
+    }
+  }
+
+  const tasks: { chatId: string; conversationId: string; rangeDays: 0 | 30 | 90 }[] = [];
+
+  for (const { chatId, name, person } of resolved) {
+    const existing = conversations.get(chatId);
+    // ensureConversation renames an existing conversation still named after its phone number.
+    const conversationId = existing
+      ? (await ensureConversation(client, accountId, chatId, name, person, existing)).id
+      : createdIdByChatId.get(chatId);
+    if (!conversationId) throw new Error('Could not create WhatsApp conversation');
+    tasks.push({ chatId, conversationId, rangeDays: request.rangeDays as 0 | 30 | 90 });
+  }
+
+  if (tasks.length > 0) {
+    const { runToken } = await bridgePost<{ runToken?: string }>('/history/imports/queue', { tasks }, 30_000);
+
+    if (runToken) {
+      // The chats stay queued on the bridge; the cron restarts the import if this enqueue fails.
+      await enqueueHistoryImport(runToken, 0).catch((error: unknown) =>
+        logger.error('Could not start the history import', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+  }
+
+  logger.info('Queued history import', { queued: tasks.length, failed: failures.length, createdPeople });
+  return { queued: tasks.length, createdPeople, failures };
+};
+
 const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) => {
   requireUser(event);
 
@@ -149,6 +264,13 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
   }
 
   const request = event.body ?? {};
+
+  // Answered by the bridge alone, so polling it costs no Twenty API request.
+  if (request.action === 'progress') {
+    return bridgePost('/history/imports/progress', {}, 10_000).catch(() => {
+      throw new HttpError(502, 'WhatsApp bridge is unavailable');
+    });
+  }
 
   if (request.rangeDays !== 0 && request.rangeDays !== 30 && request.rangeDays !== 90) {
     throw new HttpError(400, 'Invalid history range');
@@ -169,44 +291,18 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     return listCandidates(request);
   }
 
-  const chatId = request.chatId;
-
-  if (
-    request.action !== 'import' ||
-    !isChatId(chatId) ||
-    !Number.isInteger(request.offset) ||
-    request.offset! < 0 ||
-    request.acknowledged !== true
-  ) {
-    throw new HttpError(400, 'Invalid history import request');
+  if (request.action === 'import') {
+    return queueImport(request, digits(status.phoneNumber), logger);
   }
 
-  if (chatNumber(chatId) === digits(status.phoneNumber)) {
-    throw new HttpError(400, 'Cannot import the linked account as a contact');
-  }
-
-  const history = await bridgePost<HistoryMessages>(
-    '/history/messages',
-    { chatId, rangeDays: request.rangeDays, offset: request.offset, limit: 25 },
-    30_000,
-  );
-  const client = applicationClient();
-  const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
-  const { person, createdPerson } = isGroupChatId(chatId)
-    ? { person: undefined, createdPerson: false }
-    : await resolvePerson(request, chatId, history.name);
-  const name = person ? personName(person) || chatNumber(chatId) : history.name.slice(0, 120);
-  const imported = await importChatMessages(client, accountId, chatId, name, history.messages, person);
-
-  logger.info('Imported history page', { imported, offset: request.offset, createdPerson });
-  return { imported, total: history.total, nextOffset: history.nextOffset, createdPerson };
+  throw new HttpError(400, 'Invalid history request');
 });
 
 export default defineLogicFunction({
   universalIdentifier: '6e6ef756-2022-4d4d-93af-3f1a95fe5a86',
   name: 'whatsapp-history',
-  description: 'Review and selectively import available WhatsApp history.',
-  timeoutSeconds: 120,
+  description: 'Review available WhatsApp history and queue selected chats for a background import.',
+  timeoutSeconds: 60,
   handler,
   httpRouteTriggerSettings: {
     path: '/whatsapp/history',

@@ -1,8 +1,9 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { defineLogicFunction } from 'twenty-sdk/define';
+import { enqueueJobs } from 'twenty-sdk/logic-function';
 
-import { syncMessages } from 'src/logic-functions/message-data';
+import { MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
 import { HttpError, route } from 'src/logic-functions/utils/route';
 
 const MAX_CLOCK_SKEW_MS = 5 * 60_000;
@@ -25,14 +26,17 @@ const handler = route<{ sentAt?: string }>('whatsapp-bridge-webhook', async (eve
     throw new HttpError(401, 'Expired request');
   }
 
-  return syncMessages(logger);
+  // Imported in a job so the bridge is answered at once; the 5-minute cron covers a lost job.
+  await enqueueJobs({ logicFunctionUniversalIdentifier: MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER, jobs: [{}] });
+  logger.info('Queued message sync');
+  return { queued: true };
 });
 
 export default defineLogicFunction({
   universalIdentifier: 'c65015f4-111b-47fb-92f0-263985d8523e',
   name: 'whatsapp-bridge-webhook',
-  description: 'Import new WhatsApp messages when the bridge signals them.',
-  timeoutSeconds: 120,
+  description: 'Queue a WhatsApp message import when the bridge signals new messages.',
+  timeoutSeconds: 30,
   handler,
   httpRouteTriggerSettings: {
     path: '/whatsapp/bridge/events',

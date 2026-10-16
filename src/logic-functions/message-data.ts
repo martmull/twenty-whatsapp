@@ -224,42 +224,121 @@ export const findMessageByRequestId = async (
   return result.whatsappMessages?.edges?.[0]?.node as Message | undefined;
 };
 
-const attachMedia = async (client: CoreApiClient, event: BridgeMessageEvent): Promise<void> => {
-  const result = await client.query({
+type StoreResult = { imported: number; lastProcessedEventId?: string; mediaUploads: number };
+
+// Stores the events not yet in Twenty, in order, with one existence query and one bulk create.
+// Media is uploaded first so it rides along in the create. Stops before a media message once the
+// deadline has passed; the caller resumes after lastProcessedEventId.
+export const storeMessages = async (
+  client: CoreApiClient,
+  conversationId: string,
+  events: BridgeMessageEvent[],
+  deadline = Number.POSITIVE_INFINITY,
+): Promise<StoreResult> => {
+  if (events.length === 0) {
+    return { imported: 0, mediaUploads: 0 };
+  }
+
+  const existing = await client.query({
     whatsappMessages: {
-      __args: { filter: { externalId: { eq: event.eventId } }, first: 1 },
-      edges: { node: { id: true, media: { fileId: true } } },
+      __args: { filter: { externalId: { in: events.map((event) => event.eventId) } }, first: events.length },
+      edges: { node: { id: true, externalId: true, media: { fileId: true } } },
     },
   });
-  const message = result.whatsappMessages?.edges?.[0]?.node;
+  const storedByEventId = new Map(
+    nodesOf<{ id: string; externalId: string; media?: { fileId: string }[] | null }>(existing.whatsappMessages).map(
+      (message) => [message.externalId, message],
+    ),
+  );
+  const toCreate: Record<string, unknown>[] = [];
+  let lastProcessedEventId: string | undefined;
+  let mediaUploads = 0;
 
-  if (!message || message.media?.length) {
+  for (const event of events) {
+    const stored = storedByEventId.get(event.eventId);
+    const needsMedia = Boolean(event.media) && !stored?.media?.length;
+
+    if (needsMedia) {
+      if (mediaUploads > 0 && Date.now() > deadline) break;
+      mediaUploads += 1;
+    }
+
+    const file = needsMedia ? await importMessageMedia(event) : undefined;
+
+    if (stored && file) {
+      await client.mutation({
+        updateWhatsappMessage: { __args: { id: stored.id, data: { media: [file] } }, id: true },
+      });
+    } else if (!stored) {
+      toCreate.push({
+        name: event.text.slice(0, 80),
+        conversationId,
+        externalId: event.eventId,
+        direction: event.direction === 'outbound' ? 'OUTBOUND' : 'INBOUND',
+        text: event.text,
+        sentAt: event.sentAt,
+        deliveryState: event.direction === 'outbound' ? 'SENT' : 'RECEIVED',
+        ...(event.media ? { mediaKind: MEDIA_KIND_VALUES[event.media.kind] } : {}),
+        ...(file ? { media: [file] } : {}),
+        ...(event.senderId ? { senderId: event.senderId } : {}),
+        ...(event.senderName ? { senderName: event.senderName } : {}),
+      });
+    }
+    lastProcessedEventId = event.eventId;
+  }
+
+  if (toCreate.length > 0) {
+    const created = await client.mutation({
+      createWhatsappMessages: { __args: { data: toCreate }, id: true },
+    });
+
+    if (created.createWhatsappMessages?.length !== toCreate.length) {
+      throw new Error('Could not create WhatsApp messages');
+    }
+  }
+
+  return { imported: toCreate.length, lastProcessedEventId, mediaUploads };
+};
+
+// Moves the conversation's last message and last inbound time forward, never backward.
+export const updateConversationSummary = async (
+  client: CoreApiClient,
+  conversation: Pick<Conversation, 'id' | 'lastMessageAt' | 'lastInboundAt'>,
+  latest: Pick<BridgeMessageEvent, 'sentAt' | 'text'> | undefined,
+  latestInboundAt: string | undefined,
+): Promise<void> => {
+  const updateLastMessage = latest && (!conversation.lastMessageAt || latest.sentAt >= conversation.lastMessageAt);
+  const updateLastInbound =
+    latestInboundAt && (!conversation.lastInboundAt || latestInboundAt >= conversation.lastInboundAt);
+
+  if (!updateLastMessage && !updateLastInbound) {
     return;
   }
 
-  const file = await importMessageMedia(event);
-
-  if (file) {
-    await client.mutation({
-      updateWhatsappMessage: { __args: { id: message.id, data: { media: [file] } }, id: true },
-    });
-  }
+  await client.mutation({
+    updateWhatsappConversation: {
+      __args: {
+        id: conversation.id,
+        data: {
+          ...(updateLastMessage ? { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } : {}),
+          ...(updateLastInbound ? { lastInboundAt: latestInboundAt } : {}),
+        },
+      },
+      id: true,
+    },
+  });
 };
 
-// Stores a batch of messages from one chat, creating the conversation when needed. Safe to retry.
-export const importChatMessages = async (
+// Returns the conversation of a chat, creating it (linked to the Person, if any) when needed.
+export const ensureConversation = async (
   client: CoreApiClient,
   accountId: string,
   chatId: string,
   name: string,
-  events: BridgeMessageEvent[],
-  person?: Person,
-): Promise<number> => {
-  if (!isChatId(chatId) || events.some((event) => event.chatId !== chatId || !isValidBridgeEvent(event))) {
-    throw new Error('Invalid bridge event');
-  }
-
-  let conversation = await findConversation(client, accountId, chatId);
+  person?: Pick<Person, 'id'>,
+  existing?: Conversation | null,
+): Promise<Conversation> => {
+  const conversation = existing === undefined ? await findConversation(client, accountId, chatId) : existing;
 
   if (!conversation) {
     const created = await client.mutation({
@@ -274,8 +353,10 @@ export const importChatMessages = async (
       throw new Error('Could not create WhatsApp conversation');
     }
 
-    conversation = { id, name, chatId, accountId, personId: person?.id };
-  } else if (isPhoneLikeName(conversation.name) && name.trim() && !isPhoneLikeName(name)) {
+    return { id, name, chatId, accountId, personId: person?.id };
+  }
+
+  if (isPhoneLikeName(conversation.name) && name.trim() && !isPhoneLikeName(name)) {
     await client.mutation({
       updateWhatsappConversation: {
         __args: { id: conversation.id, data: { name: name.trim().slice(0, 120) } },
@@ -284,75 +365,58 @@ export const importChatMessages = async (
     });
   }
 
-  if (events.length === 0) {
-    return 0;
+  return conversation;
+};
+
+// Stores a batch of messages from one chat, creating the conversation when needed. Safe to retry.
+export const importChatMessages = async (
+  client: CoreApiClient,
+  accountId: string,
+  chatId: string,
+  name: string,
+  events: BridgeMessageEvent[],
+  person?: Person,
+  existingConversation?: Conversation | null,
+): Promise<number> => {
+  if (!isChatId(chatId) || events.some((event) => event.chatId !== chatId || !isValidBridgeEvent(event))) {
+    throw new Error('Invalid bridge event');
   }
 
-  const existing = await client.query({
-    whatsappMessages: {
-      __args: { filter: { externalId: { in: events.map((event) => event.eventId) } }, first: events.length },
-      edges: { node: { externalId: true } },
+  const conversation = await ensureConversation(client, accountId, chatId, name, person, existingConversation);
+  const { imported } = await storeMessages(client, conversation.id, events);
+
+  if (events.length > 0) {
+    const latest = events.reduce((current, event) => (event.sentAt > current.sentAt ? event : current));
+    const latestInboundAt = events
+      .filter((event) => event.direction !== 'outbound')
+      .map((event) => event.sentAt)
+      .sort()
+      .pop();
+    await updateConversationSummary(client, conversation, latest, latestInboundAt);
+  }
+
+  return imported;
+};
+
+export const findConversations = async (
+  client: CoreApiClient,
+  accountId: string,
+  chatIds: string[],
+): Promise<Map<string, Conversation>> => {
+  if (chatIds.length === 0) {
+    return new Map();
+  }
+
+  const result = await client.query({
+    whatsappConversations: {
+      __args: { filter: { accountId: { eq: accountId }, chatId: { in: chatIds } }, first: chatIds.length },
+      edges: { node: CONVERSATION_FIELDS },
     },
   });
-  const existingIds = new Set(
-    nodesOf<{ externalId: string }>(existing.whatsappMessages).map((message) => message.externalId),
+
+  return new Map(
+    nodesOf<Conversation>(result.whatsappConversations).map((conversation) => [conversation.chatId, conversation]),
   );
-  const missing = events.filter((event) => !existingIds.has(event.eventId));
-
-  if (missing.length > 0) {
-    const created = await client.mutation({
-      createWhatsappMessages: {
-        __args: {
-          data: missing.map((event) => ({
-            name: event.text.slice(0, 80),
-            conversationId: conversation.id,
-            externalId: event.eventId,
-            direction: event.direction === 'outbound' ? 'OUTBOUND' : 'INBOUND',
-            text: event.text,
-            sentAt: event.sentAt,
-            deliveryState: event.direction === 'outbound' ? 'SENT' : 'RECEIVED',
-            ...(event.media ? { mediaKind: MEDIA_KIND_VALUES[event.media.kind] } : {}),
-            ...(event.senderId ? { senderId: event.senderId } : {}),
-            ...(event.senderName ? { senderName: event.senderName } : {}),
-          })),
-        },
-        id: true,
-      },
-    });
-
-    if (created.createWhatsappMessages?.length !== missing.length) {
-      throw new Error('Could not create WhatsApp messages');
-    }
-  }
-
-  for (const event of events.filter((item) => item.media)) {
-    await attachMedia(client, event);
-  }
-
-  const latest = events.reduce((current, event) => (event.sentAt > current.sentAt ? event : current));
-  const latestInbound = events
-    .filter((event) => event.direction !== 'outbound')
-    .sort((left, right) => right.sentAt.localeCompare(left.sentAt))[0];
-  const updateLastMessage = !conversation.lastMessageAt || latest.sentAt >= conversation.lastMessageAt;
-  const updateLastInbound =
-    latestInbound && (!conversation.lastInboundAt || latestInbound.sentAt >= conversation.lastInboundAt);
-
-  if (updateLastMessage || updateLastInbound) {
-    await client.mutation({
-      updateWhatsappConversation: {
-        __args: {
-          id: conversation.id,
-          data: {
-            ...(updateLastMessage ? { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } : {}),
-            ...(updateLastInbound ? { lastInboundAt: latestInbound.sentAt } : {}),
-          },
-        },
-        id: true,
-      },
-    });
-  }
-
-  return missing.length;
 };
 
 // Imports the messages queued by the bridge. Direct chats need exactly one matching Person;
@@ -365,8 +429,7 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
     return { imported: 0, ignored: 0 };
   }
 
-  const client = applicationClient();
-  const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
+  // Claimed before any Twenty query, so a sync with nothing to do costs no API request.
   const { leaseId, events } = await bridgePost<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
 
   if (!leaseId) {
@@ -378,6 +441,8 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
   let completed = false;
 
   try {
+    const client = applicationClient();
+    const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
     // Media uploads are slow: stop the batch after the first one, the bridge asks again for the rest.
     const firstMediaIndex = events.findIndex((event) => event.media);
     const batch = firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1);
@@ -386,7 +451,10 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
     for (const event of batch.filter(isValidBridgeEvent)) {
       eventsByChat.set(event.chatId, [...(eventsByChat.get(event.chatId) ?? []), event]);
     }
-    const people = await findPeopleByPhones(client, [...eventsByChat.keys()].filter(isDirectChatId).map(chatNumber));
+    const [people, conversations] = await Promise.all([
+      findPeopleByPhones(client, [...eventsByChat.keys()].filter(isDirectChatId).map(chatNumber)),
+      findConversations(client, accountId, [...eventsByChat.keys()]),
+    ]);
 
     if (invalid.length > 0) {
       logger.warn('Dropping invalid bridge events', { count: invalid.length });
@@ -395,11 +463,19 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
 
     for (const [chatId, chatEvents] of eventsByChat) {
       try {
-        if (isGroupChatId(chatId)) {
-          const conversation = await findConversation(client, accountId, chatId);
+        const conversation = conversations.get(chatId) ?? null;
 
+        if (isGroupChatId(chatId)) {
           if (conversation) {
-            imported += await importChatMessages(client, accountId, chatId, conversation.name, chatEvents);
+            imported += await importChatMessages(
+              client,
+              accountId,
+              chatId,
+              conversation.name,
+              chatEvents,
+              undefined,
+              conversation,
+            );
           } else {
             ignored += chatEvents.length;
           }
@@ -414,6 +490,7 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
               personName(matches[0]) || chatNumber(chatId),
               chatEvents,
               matches[0],
+              conversation,
             );
           } else {
             ignored += chatEvents.length;
