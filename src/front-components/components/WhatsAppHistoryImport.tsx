@@ -33,6 +33,7 @@ type HistoryList = {
 
 type ImportResult = {
   imported: number;
+  total: number;
   nextOffset?: number;
   createdPerson: boolean;
 };
@@ -71,6 +72,8 @@ export const WhatsAppHistoryImport = () => {
   const working = workingAction !== null;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // Import progress from 0 to 100, undefined when no import is running.
+  const [progress, setProgress] = useState<number>();
 
   const load = async (
     range: RangeDays,
@@ -98,6 +101,7 @@ export const WhatsAppHistoryImport = () => {
       setError(t('Could not load WhatsApp history. Check the bridge and retry.'));
     } finally {
       setWorkingAction(null);
+      setProgress(undefined);
     }
   };
 
@@ -179,7 +183,7 @@ export const WhatsAppHistoryImport = () => {
       }
 
       for (const [index, item] of chosen.entries()) {
-        setNotice(`${t('Importing')} ${index + 1} / ${chosen.length}…`);
+        setProgress((100 * index) / chosen.length);
         let offset = 0;
 
         while (true) {
@@ -200,6 +204,8 @@ export const WhatsAppHistoryImport = () => {
           }
 
           offset = result.nextOffset;
+          // Each chat is an equal share of the bar, filled as its pages are imported.
+          setProgress((100 * (index + (result.total ? offset / result.total : 1))) / chosen.length);
         }
       }
 
@@ -584,6 +590,28 @@ export const WhatsAppHistoryImport = () => {
             </span>
           </div>
         </>
+      )}
+      {progress !== undefined && (
+        <div
+          role="progressbar"
+          aria-label={t('Import progress')}
+          aria-valuenow={Math.round(progress)}
+          style={{
+            background: themeCssVariables.background.tertiary,
+            borderRadius: themeCssVariables.border.radius.sm,
+            height: 6,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              background: themeCssVariables.color.blue,
+              height: '100%',
+              transition: 'width 0.3s',
+              width: `${progress}%`,
+            }}
+          />
+        </div>
       )}
       {notice && (
         <p role="status" style={{ ...styles.muted, margin: 0 }}>

@@ -71,6 +71,22 @@ const fetchLatestActivity = async (personId?: string): Promise<string | undefine
 
 type WhatsAppThreadProps = { personId?: string };
 
+// http(s) URLs only, so a message can never produce a javascript: link.
+// Trailing punctuation (as in "see https://example.com.") stays outside the link.
+const URL_PATTERN = /(https?:\/\/[^\s]*[^\s.,;:!?)\]'"])/gi;
+
+// Renders message text with its URLs as links opening in a new tab.
+const TextWithLinks = ({ text }: { text: string }) =>
+  text.split(URL_PATTERN).map((part, index) =>
+    index % 2 === 1 ? (
+      <a key={index} href={part} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>
+        {part}
+      </a>
+    ) : (
+      part
+    ),
+  );
+
 const formatTime = (value?: string | null) =>
   value ? new Date(value).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '';
 
@@ -640,7 +656,9 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                     </div>
                   )}
                   {(!message.mediaKind || !['[Image]', '[Video]', '[Audio]', '[File]'].includes(message.text)) && (
-                    <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>
+                    <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
+                      <TextWithLinks text={message.text} />
+                    </div>
                   )}
                   <small
                     style={{ ...styles.label, color: isDark ? '#aebac1' : '#667781', display: 'block', marginTop: 6 }}
