@@ -8,7 +8,9 @@ import { PERSON_TAB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identif
 
 export default definePageLayoutTab({
   universalIdentifier: PERSON_TAB_UNIVERSAL_IDENTIFIER,
-  pageLayoutUniversalIdentifier: STANDARD_PAGE_LAYOUT_UNIVERSAL_IDENTIFIERS.personRecordPage.universalIdentifier,
+  pageLayoutUniversalIdentifier:
+    STANDARD_PAGE_LAYOUT_UNIVERSAL_IDENTIFIERS.personRecordPage
+      .universalIdentifier,
   title: 'WhatsApp',
   position: 25,
   icon: 'IconMessage',

@@ -2,36 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import makeWASocket, {
-  Browsers,
-  DisconnectReason,
-  generateMessageIDV2,
-  proto,
-  type AnyMediaMessageContent,
-  type Chat,
-  type Contact,
-  type WAMessage,
-  type WASocket,
-} from '@whiskeysockets/baileys';
+import makeWASocket, { Browsers, DisconnectReason, generateMessageIDV2, proto, type AnyMediaMessageContent, type Chat, type Contact, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
-import {
-  isDirectChatId,
-  isGroupChatId,
-  isSupportedChatId,
-  messageChatId,
-  messageEventId,
-  toMessageEvent,
-  type MessageEvent,
-} from './message-event.js';
-
-// File names must not contain path separators or control characters.
-// eslint-disable-next-line no-control-regex
-const UNSAFE_FILE_NAME = /[/\\\u0000-\u001f]/;
+import { isDirectChatId, isGroupChatId, isSupportedChatId, messageChatId, messageEventId, toMessageEvent, type MessageEvent } from './message-event.js';
 
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
@@ -92,14 +70,13 @@ export class WhatsAppConnection {
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
   private readonly sendingMessageIds = new Set<string>();
-  private ackedSinceClaim = 0;
+  private changeCursor = randomUUID();
+  private readonly changeListeners = new Set<() => void>();
   private syncLease: { id: string; expiresAt: number } | undefined;
 
   constructor(
     private readonly directory: string,
     private readonly encryptionKey: Buffer,
-    // Called when Twenty should import queued events (see the bridge webhook in server.ts).
-    private readonly onEventsQueued: () => void = () => undefined,
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
@@ -111,21 +88,11 @@ export class WhatsAppConnection {
     this.mediaReferences = new EncryptedJsonStore(join(directory, 'media-references'), encryptionKey);
   }
 
-  async recordHistory(
-    contacts: Contact[],
-    messages: WAMessage[],
-    fromHistorySync = false,
-    chats: Chat[] = [],
-  ): Promise<void> {
+  async recordHistory(contacts: Contact[], messages: WAMessage[], fromHistorySync = false, chats: Chat[] = []): Promise<void> {
     const write = async () => {
       let namesChanged = false;
       for (const contact of contacts) {
-        if (
-          contact.lid &&
-          contact.jid &&
-          /^\d{7,15}@lid$/.test(contact.lid) &&
-          /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)
-        ) {
+        if (contact.lid && contact.jid && /^\d{7,15}@lid$/.test(contact.lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)) {
           await this.phoneNumbers.write(contact.lid, { chatId: contact.jid });
         }
         const name = (contact.name || contact.notify || contact.verifiedName)?.trim().slice(0, 120);
@@ -144,18 +111,15 @@ export class WhatsAppConnection {
       for (const chat of chats) {
         if (chat.id && isSupportedChatId(chat.id)) {
           const seconds = Math.max(Number(chat.conversationTimestamp ?? 0), Number(chat.lastMessageRecvTimestamp ?? 0));
-          const lastMessageAt =
-            Number.isFinite(seconds) && seconds > 0 && seconds < 8_640_000_000_000
-              ? new Date(seconds * 1000).toISOString()
-              : undefined;
+          const lastMessageAt = Number.isFinite(seconds) && seconds > 0 && seconds < 8_640_000_000_000
+            ? new Date(seconds * 1000).toISOString()
+            : undefined;
           byChat.set(chat.id, { name: chat.name?.slice(0, 120) || undefined, lastMessageAt, messages: [] });
         }
       }
 
       for (const contact of contacts) {
-        const chatId =
-          contact.jid ??
-          (contact.id.endsWith('@lid') ? (await this.phoneNumbers.read(contact.id))?.chatId : contact.id);
+        const chatId = contact.jid ?? (contact.id.endsWith('@lid') ? (await this.phoneNumbers.read(contact.id))?.chatId : contact.id);
 
         if (chatId && isSupportedChatId(chatId)) {
           const candidate = byChat.get(chatId!) ?? { messages: [] };
@@ -188,16 +152,10 @@ export class WhatsAppConnection {
             }
           }
         }
-        const mappedChatId = remoteJid?.endsWith('@lid')
-          ? (await this.phoneNumbers.read(remoteJid))?.chatId
-          : undefined;
+        const mappedChatId = remoteJid?.endsWith('@lid') ? (await this.phoneNumbers.read(remoteJid))?.chatId : undefined;
         const chatId = messageChatId(message, mappedChatId);
 
-        if (
-          !chatId ||
-          !isSupportedChatId(chatId) ||
-          chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')
-        ) {
+        if (!chatId || !isSupportedChatId(chatId) || chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')) {
           continue;
         }
 
@@ -242,13 +200,8 @@ export class WhatsAppConnection {
         await this.historyChats.write(chatId, {
           chatId,
           name,
-          lastMessageAt: [candidate.lastMessageAt, existing?.lastMessageAt, existing?.messages.at(-1)?.sentAt]
-            .filter((value): value is string => Boolean(value))
-            .sort()
-            .at(-1),
-          messages: [...messagesById.values()].sort(
-            (left, right) => left.sentAt.localeCompare(right.sentAt) || left.eventId.localeCompare(right.eventId),
-          ),
+          lastMessageAt: [candidate.lastMessageAt, existing?.lastMessageAt, existing?.messages.at(-1)?.sentAt].filter((value): value is string => Boolean(value)).sort().at(-1),
+          messages: [...messagesById.values()].sort((left, right) => left.sentAt.localeCompare(right.sentAt) || left.eventId.localeCompare(right.eventId)),
         });
       }
 
@@ -257,6 +210,7 @@ export class WhatsAppConnection {
       }
       if (namesChanged) {
         this.groupMembersCache.clear();
+        this.notifyChange();
       }
     };
 
@@ -305,71 +259,50 @@ export class WhatsAppConnection {
         continue;
       }
       this.activeGroupNameLookups += 1;
-      void socket
-        .groupMetadata(chatId)
-        .then(async (metadata) => {
-          if (generation === this.generation && metadata.subject?.trim()) {
-            await this.recordHistory([{ id: chatId, name: metadata.subject }], []);
-          }
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          this.pendingGroupNameLookups.delete(chatId);
-          this.activeGroupNameLookups -= 1;
-          this.drainGroupNameLookups();
-        });
+      void socket.groupMetadata(chatId).then(async (metadata) => {
+        if (generation === this.generation && metadata.subject?.trim()) {
+          await this.recordHistory([{ id: chatId, name: metadata.subject }], []);
+        }
+      }).catch(() => undefined).finally(() => {
+        this.pendingGroupNameLookups.delete(chatId);
+        this.activeGroupNameLookups -= 1;
+        this.drainGroupNameLookups();
+      });
     }
   }
 
-  async getHistoryCandidates(
-    rangeDays: 0 | 30 | 90,
-    offset: number,
-    limit: number,
-    kind: 'all' | 'direct' | 'group' = 'all',
-  ): Promise<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }> {
+  async getHistoryCandidates(rangeDays: 0 | 30 | 90, offset: number, limit: number, kind: 'all' | 'direct' | 'group' = 'all'): Promise<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }> {
     await this.historyWrites;
     const since = rangeDays ? Date.now() - rangeDays * 86_400_000 : 0;
     const chats = await this.historyChats.list();
-    const candidates = chats
-      .flatMap((chat) => {
-        if (kind !== 'all' && (isGroupChatId(chat.chatId) ? 'group' : 'direct') !== kind) {
-          return [];
-        }
-        if (chat.chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')) {
-          return [];
-        }
+    const candidates = chats.flatMap((chat) => {
+      if (kind !== 'all' && (isGroupChatId(chat.chatId) ? 'group' : 'direct') !== kind) {
+        return [];
+      }
+      if (chat.chatId.split('@')[0] === this.status.phoneNumber?.replace(/\D/g, '')) {
+        return [];
+      }
 
-        const messages = chat.messages.filter((message) => Date.parse(message.sentAt) >= since);
-        const lastMessageAt = chat.lastMessageAt ?? chat.messages.at(-1)?.sentAt;
+      const messages = chat.messages.filter((message) => Date.parse(message.sentAt) >= since);
+      const lastMessageAt = chat.lastMessageAt ?? chat.messages.at(-1)?.sentAt;
 
-        if (lastMessageAt && Date.parse(lastMessageAt) < since) {
-          return [];
-        }
+      if (lastMessageAt && Date.parse(lastMessageAt) < since) {
+        return [];
+      }
 
-        return [
-          {
-            chatId: chat.chatId,
-            kind: isGroupChatId(chat.chatId) ? ('group' as const) : ('direct' as const),
-            name:
-              chat.name || (isGroupChatId(chat.chatId) ? chat.chatId.split('@')[0] : `+${chat.chatId.split('@')[0]}`),
-            messageCount: messages.length,
-            lastMessageAt,
-          },
-        ];
-      })
-      .sort(
-        (left, right) =>
-          (right.lastMessageAt ?? '').localeCompare(left.lastMessageAt ?? '') ||
-          left.name.localeCompare(right.name) ||
-          left.chatId.localeCompare(right.chatId),
-      );
+      return [{
+        chatId: chat.chatId,
+        kind: isGroupChatId(chat.chatId) ? 'group' as const : 'direct' as const,
+        name: chat.name || (isGroupChatId(chat.chatId) ? chat.chatId.split('@')[0] : `+${chat.chatId.split('@')[0]}`),
+        messageCount: messages.length,
+        lastMessageAt,
+      }];
+    }).sort((left, right) => (right.lastMessageAt ?? '').localeCompare(left.lastMessageAt ?? '') || left.name.localeCompare(right.name) || left.chatId.localeCompare(right.chatId));
 
-    const items = await Promise.all(
-      candidates.slice(offset, offset + limit).map(async (candidate) => ({
-        ...candidate,
-        name: await this.resolveHistoryName(candidate.chatId, candidate.name),
-      })),
-    );
+    const items = await Promise.all(candidates.slice(offset, offset + limit).map(async (candidate) => ({
+      ...candidate,
+      name: await this.resolveHistoryName(candidate.chatId, candidate.name),
+    })));
 
     return {
       items,
@@ -378,12 +311,7 @@ export class WhatsAppConnection {
     };
   }
 
-  async getHistoryMessages(
-    chatId: string,
-    rangeDays: 0 | 30 | 90,
-    offset: number,
-    limit: number,
-  ): Promise<{ name: string; messages: MessageEvent[]; total: number; nextOffset?: number }> {
+  async getHistoryMessages(chatId: string, rangeDays: 0 | 30 | 90, offset: number, limit: number): Promise<{ name: string; messages: MessageEvent[]; total: number; nextOffset?: number }> {
     if (!isSupportedChatId(chatId)) {
       throw new Error('Invalid chat ID');
     }
@@ -435,9 +363,7 @@ export class WhatsAppConnection {
     }
 
     const name = isGroupChatId(chatId)
-      ? this.status.state === 'connected'
-        ? (await this.socket?.groupMetadata(chatId).catch(() => undefined))?.subject
-        : undefined
+      ? this.status.state === 'connected' ? (await this.socket?.groupMetadata(chatId).catch(() => undefined))?.subject : undefined
       : (await this.contactNames.read(chatId))?.name;
     const resolved = name?.trim().slice(0, 120);
     if (!resolved || /^\+?\d+$/.test(resolved)) {
@@ -464,59 +390,34 @@ export class WhatsAppConnection {
       await this.recordHistory([{ id: chatId, name: metadata.subject }], []);
     }
     const history = await this.historyChats.read(chatId);
-    const namesFromMessages = new Map(
-      history?.messages
-        .filter((message) => message.senderId && message.senderName)
-        .map((message) => [message.senderId!, message.senderName!]) ?? [],
-    );
-    const members = await Promise.all(
-      metadata.participants.map(async (participant): Promise<GroupMember> => {
-        const mappedPhoneId = participant.id.endsWith('@lid')
-          ? (await this.phoneNumbers.read(participant.id))?.chatId
-          : undefined;
-        const phoneId = [participant.jid, mappedPhoneId, participant.id].find((id) => id && isDirectChatId(id));
-        const savedName =
-          (await this.contactNames.read(participant.id))?.name ??
-          (participant.jid ? (await this.contactNames.read(participant.jid))?.name : undefined);
-        const displayName = (
-          participant.name ||
-          savedName ||
-          participant.notify ||
-          participant.verifiedName ||
-          namesFromMessages.get(participant.id)
-        )
-          ?.trim()
-          .slice(0, 120);
-        const [firstName, ...lastNameParts] = displayName?.split(/\s+/) ?? [];
-        const isMe = Boolean(
-          (this.socket?.user?.lid && participant.id === this.socket.user.lid) ||
-          (this.status.phoneNumber && phoneId?.split('@')[0] === this.status.phoneNumber),
-        );
+    const namesFromMessages = new Map(history?.messages.filter((message) => message.senderId && message.senderName).map((message) => [message.senderId!, message.senderName!]) ?? []);
+    const members = await Promise.all(metadata.participants.map(async (participant): Promise<GroupMember> => {
+      const mappedPhoneId = participant.id.endsWith('@lid') ? (await this.phoneNumbers.read(participant.id))?.chatId : undefined;
+      const phoneId = [participant.jid, mappedPhoneId, participant.id].find((id) => id && isDirectChatId(id));
+      const savedName = (await this.contactNames.read(participant.id))?.name
+        ?? (participant.jid ? (await this.contactNames.read(participant.jid))?.name : undefined);
+      const displayName = (participant.name || savedName || participant.notify || participant.verifiedName || namesFromMessages.get(participant.id))?.trim().slice(0, 120);
+      const [firstName, ...lastNameParts] = displayName?.split(/\s+/) ?? [];
+      const isMe = Boolean(
+        (this.socket?.user?.lid && participant.id === this.socket.user.lid) ||
+        (this.status.phoneNumber && phoneId?.split('@')[0] === this.status.phoneNumber),
+      );
 
-        return {
-          id: participant.id,
-          ...(phoneId ? { phoneNumber: `+${phoneId.split('@')[0]}` } : {}),
-          ...(displayName ? { displayName, firstName, lastName: lastNameParts.join(' ') } : {}),
-          ...(isMe ? { isMe: true } : {}),
-        };
-      }),
-    );
+      return {
+        id: participant.id,
+        ...(phoneId ? { phoneNumber: `+${phoneId.split('@')[0]}` } : {}),
+        ...(displayName ? { displayName, firstName, lastName: lastNameParts.join(' ') } : {}),
+        ...(isMe ? { isMe: true } : {}),
+      };
+    }));
 
-    members.sort(
-      (left, right) =>
-        Number(Boolean(right.displayName)) - Number(Boolean(left.displayName)) ||
-        (left.displayName || left.phoneNumber || left.id).localeCompare(
-          right.displayName || right.phoneNumber || right.id,
-        ),
-    );
+    members.sort((left, right) => Number(Boolean(right.displayName)) - Number(Boolean(left.displayName)) || (left.displayName || left.phoneNumber || left.id).localeCompare(right.displayName || right.phoneNumber || right.id));
     this.groupMembersCache.set(chatId, { expiresAt: Date.now() + 60_000, members });
     return members;
   }
 
-  // Oldest first, so Twenty imports messages in the order they were received.
   async getEvents(): Promise<MessageEvent[]> {
-    const events = await this.events.list();
-    return events.sort((left, right) => left.sentAt.localeCompare(right.sentAt)).slice(0, 100);
+    return this.events.list(100);
   }
 
   async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[] }> {
@@ -526,7 +427,6 @@ export class WhatsAppConnection {
 
     const leaseId = randomUUID();
     this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000 };
-    this.ackedSinceClaim = 0;
     try {
       const events = await this.getEvents();
       if (events.length === 0) {
@@ -540,17 +440,39 @@ export class WhatsAppConnection {
     }
   }
 
-  async releaseEvents(leaseId: string, completed: boolean): Promise<{ released: boolean }> {
+  releaseEvents(leaseId: string, completed: boolean): { released: boolean } {
     if (this.syncLease?.id !== leaseId) {
       return { released: false };
     }
 
     this.syncLease = undefined;
-    // A sync handles a limited batch: ask for another one while it makes progress.
-    if (completed && this.ackedSinceClaim > 0 && (await this.events.list(1)).length > 0) {
-      this.onEventsQueued();
+    if (completed) {
+      this.notifyChange();
     }
     return { released: true };
+  }
+
+  notifyChange(): void {
+    this.changeCursor = randomUUID();
+    for (const listener of this.changeListeners) {
+      listener();
+    }
+  }
+
+  async waitForChange(cursor: string): Promise<{ cursor: string; changed: boolean }> {
+    if (cursor !== this.changeCursor) {
+      return { cursor: this.changeCursor, changed: true };
+    }
+
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timeout);
+        this.changeListeners.delete(finish);
+        resolve({ cursor: this.changeCursor, changed: cursor !== this.changeCursor });
+      };
+      const timeout = setTimeout(finish, 20_000);
+      this.changeListeners.add(finish);
+    });
   }
 
   async ackEvents(eventIds: string[]): Promise<{ acknowledged: number }> {
@@ -560,7 +482,6 @@ export class WhatsAppConnection {
       }
 
       await this.events.delete(eventId);
-      this.ackedSinceClaim += 1;
     }
 
     return { acknowledged: eventIds.length };
@@ -571,8 +492,7 @@ export class WhatsAppConnection {
       !/^[a-f\d-]{36}$/i.test(requestId) ||
       !isSupportedChatId(chatId) ||
       !/^\+\d{7,15}$/.test(accountPhoneNumber) ||
-      text.trim().length === 0 ||
-      text.length > 4096
+      text.trim().length === 0 || text.length > 4096
     ) {
       throw new Error('Invalid send request');
     }
@@ -625,30 +545,11 @@ export class WhatsAppConnection {
     }
   }
 
-  async sendMedia(
-    requestId: string,
-    chatId: string,
-    accountPhoneNumber: string,
-    kind: 'image' | 'video' | 'document',
-    mimeType: string,
-    fileName: string,
-    caption: string,
-    bytes: Buffer,
-  ): Promise<SendReceipt> {
-    if (
-      !/^[a-f\d-]{36}$/i.test(requestId) ||
-      !isSupportedChatId(chatId) ||
-      !/^\+\d{7,15}$/.test(accountPhoneNumber) ||
-      !/^[\w.+-]+\/[\w.+-]+$/.test(mimeType) ||
-      !fileName ||
-      fileName.length > 255 ||
-      UNSAFE_FILE_NAME.test(fileName) ||
-      caption.length > 4096 ||
-      bytes.length === 0 ||
-      bytes.length > 64 * 1024 * 1024 ||
-      (kind === 'image' && !mimeType.startsWith('image/')) ||
-      (kind === 'video' && !mimeType.startsWith('video/'))
-    ) {
+  async sendMedia(requestId: string, chatId: string, accountPhoneNumber: string, kind: 'image' | 'video' | 'document', mimeType: string, fileName: string, caption: string, bytes: Buffer): Promise<SendReceipt> {
+    if (!/^[a-f\d-]{36}$/i.test(requestId) || !isSupportedChatId(chatId) || !/^\+\d{7,15}$/.test(accountPhoneNumber) ||
+      !/^[\w.+-]+\/[\w.+-]+$/.test(mimeType) || !fileName || fileName.length > 255 || /[/\\\u0000-\u001f]/.test(fileName) ||
+      caption.length > 4096 || bytes.length === 0 || bytes.length > 64 * 1024 * 1024 ||
+      (kind === 'image' && !mimeType.startsWith('image/')) || (kind === 'video' && !mimeType.startsWith('video/'))) {
       throw new Error('Invalid media send request');
     }
     if (this.sendingRequests.has(requestId)) {
@@ -659,35 +560,26 @@ export class WhatsAppConnection {
       const existing = await this.sends.read(requestId);
       if (existing) return existing;
       if (!this.socket || this.status.state !== 'connected') throw new Error('WhatsApp is disconnected');
-      if (`+${this.status.phoneNumber?.replace(/\D/g, '')}` !== accountPhoneNumber)
-        throw new Error('WhatsApp account changed');
+      if (`+${this.status.phoneNumber?.replace(/\D/g, '')}` !== accountPhoneNumber) throw new Error('WhatsApp account changed');
 
       await this.sends.write(requestId, { requestId, state: 'unknown' });
       const messageId = generateMessageIDV2(this.socket.user?.id);
-      const content: AnyMediaMessageContent =
-        kind === 'image'
-          ? { image: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
-          : kind === 'video'
-            ? { video: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
-            : { document: bytes, mimetype: mimeType, fileName, ...(caption ? { caption } : {}) };
+      const content: AnyMediaMessageContent = kind === 'image'
+        ? { image: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
+        : kind === 'video'
+          ? { video: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
+          : { document: bytes, mimetype: mimeType, fileName, ...(caption ? { caption } : {}) };
       this.sendingMessageIds.add(messageId);
       let sent: WAMessage | undefined;
       try {
         sent = await this.socket.sendMessage(chatId, content, { messageId });
         if (!sent?.key.id || !sent.message) throw new Error('WhatsApp did not confirm the outgoing attachment');
-        await this.sentMessages.write(sent.key.id, {
-          encodedMessage: Buffer.from(proto.Message.encode(sent.message).finish()).toString('base64'),
-        });
+        await this.sentMessages.write(sent.key.id, { encodedMessage: Buffer.from(proto.Message.encode(sent.message).finish()).toString('base64') });
       } finally {
         this.sendingMessageIds.delete(messageId);
       }
       if (!sent?.key.id) throw new Error('WhatsApp did not confirm the outgoing attachment');
-      const receipt: SendReceipt = {
-        requestId,
-        state: 'sent',
-        providerMessageId: sent.key.id,
-        eventId: messageEventId(chatId, sent.key.id),
-      };
+      const receipt: SendReceipt = { requestId, state: 'sent', providerMessageId: sent.key.id, eventId: messageEventId(chatId, sent.key.id) };
       await this.sends.write(requestId, receipt);
       return receipt;
     } finally {
@@ -731,7 +623,10 @@ export class WhatsAppConnection {
     this.intentionallyDisconnected = false;
     this.status = { state: 'pairing' };
     const generation = ++this.generation;
-    const { state, saveCreds } = await createEncryptedAuthState(this.directory, this.encryptionKey);
+    const { state, saveCreds } = await createEncryptedAuthState(
+      this.directory,
+      this.encryptionKey,
+    );
     const socket = makeWASocket({
       auth: state,
       printQRInTerminal: false,
@@ -767,7 +662,7 @@ export class WhatsAppConnection {
             await this.phoneNumbers.write(remoteJid, { chatId: event.chatId });
           }
           await this.events.write(event.eventId, event);
-          this.onEventsQueued();
+          this.notifyChange();
         }
       }
     });
@@ -783,20 +678,12 @@ export class WhatsAppConnection {
     });
     socket.ev.on('chats.update', async (chats) => {
       if (generation === this.generation) {
-        await this.recordHistory(
-          [],
-          [],
-          false,
-          chats.filter((chat) => chat.id && chat.name).map((chat) => ({ id: chat.id!, name: chat.name ?? undefined })),
-        );
+        await this.recordHistory([], [], false, chats.filter((chat) => chat.id && chat.name).map((chat) => ({ id: chat.id!, name: chat.name ?? undefined })));
       }
     });
     socket.ev.on('groups.update', async (groups) => {
       if (generation === this.generation) {
-        await this.recordHistory(
-          groups.filter((group) => group.id && group.subject).map((group) => ({ id: group.id!, name: group.subject })),
-          [],
-        );
+        await this.recordHistory(groups.filter((group) => group.id && group.subject).map((group) => ({ id: group.id!, name: group.subject })), []);
       }
     });
     socket.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
@@ -810,12 +697,7 @@ export class WhatsAppConnection {
       }
 
       for (const contact of contacts) {
-        if (
-          contact.lid &&
-          contact.jid &&
-          /^\d{7,15}@lid$/.test(contact.lid) &&
-          /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)
-        ) {
+        if (contact.lid && contact.jid && /^\d{7,15}@lid$/.test(contact.lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)) {
           await this.phoneNumbers.write(contact.lid, { chatId: contact.jid });
         }
       }
@@ -823,10 +705,7 @@ export class WhatsAppConnection {
     });
     socket.ev.on('contacts.update', async (contacts) => {
       if (generation === this.generation) {
-        await this.recordHistory(
-          contacts.filter((contact) => contact.id).map((contact) => ({ ...contact, id: contact.id! })),
-          [],
-        );
+        await this.recordHistory(contacts.filter((contact) => contact.id).map((contact) => ({ ...contact, id: contact.id! })), []);
       }
     });
     socket.ev.on('connection.update', async ({ connection, qr, lastDisconnect }) => {
@@ -847,31 +726,28 @@ export class WhatsAppConnection {
           state: 'connected',
           phoneNumber: socket.user?.id?.split(':')[0],
         };
-        this.onEventsQueued();
-        void socket
-          .groupFetchAllParticipating()
-          .then((groups) => {
-            if (generation === this.generation) {
-              return this.recordHistory(
-                Object.values(groups).map((group) => ({ id: group.id, name: group.subject })),
-                [],
-              );
-            }
-          })
-          .catch(() => undefined);
+        this.notifyChange();
+        void socket.groupFetchAllParticipating().then((groups) => {
+          if (generation === this.generation) {
+            return this.recordHistory(Object.values(groups).map((group) => ({ id: group.id, name: group.subject })), []);
+          }
+        }).catch(() => undefined);
       }
 
       if (connection === 'close') {
         this.socket = undefined;
         this.groupMembersCache.clear();
-        const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
+        const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })
+          ?.output?.statusCode;
 
         if (this.intentionallyDisconnected || statusCode === DisconnectReason.loggedOut) {
           this.status = { state: 'disconnected' };
+          this.notifyChange();
           return;
         }
 
         this.status = { state: 'reconnecting' };
+        this.notifyChange();
         this.reconnectTimer = setTimeout(() => void this.connect(), 5_000);
       }
     });
@@ -887,6 +763,7 @@ export class WhatsAppConnection {
     this.socket = undefined;
     this.groupMembersCache.clear();
     this.status = { state: 'disconnected' };
+    this.notifyChange();
 
     try {
       await socket?.logout();

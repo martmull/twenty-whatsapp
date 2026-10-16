@@ -10,7 +10,8 @@ import {
   type SignalDataTypeMap,
 } from '@whiskeysockets/baileys';
 
-const encodeName = (name: string) => createHash('sha256').update(name).digest('hex');
+const encodeName = (name: string) =>
+  createHash('sha256').update(name).digest('hex');
 
 export const createEncryptedAuthState = async (
   directory: string,

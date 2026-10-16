@@ -15,7 +15,10 @@ test('downloads a file from the signed URL returned by Twenty', async () => {
   };
 
   try {
-    const bytes = await downloadAttachment(attachment, `http://localhost:2020/file/files-field/${FILE_ID}?token=test`);
+    const bytes = await downloadAttachment(
+      attachment,
+      `http://localhost:2020/file/files-field/${FILE_ID}?token=test`,
+    );
 
     assert.deepEqual([...bytes], [1, 2, 3]);
     assert.equal(fetchCount, 1);

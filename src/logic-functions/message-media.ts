@@ -6,9 +6,8 @@ import { type ReadableStream as NodeReadableStream } from 'node:stream/web';
 
 import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 
-import { MESSAGE_MEDIA_FIELD_ID } from 'src/constants/universal-identifiers';
-import { bridgeFetch } from 'src/logic-functions/bridge-request';
-import { isEventId } from 'src/logic-functions/utils/validators';
+import { WHATSAPP_MESSAGE_MEDIA_FIELD_ID } from 'src/constants/whatsapp-media-field';
+import { bridgeMediaRequest } from 'src/logic-functions/bridge-request';
 
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
 
@@ -17,12 +16,7 @@ type MediaEvent = {
   media?: { kind: 'image' | 'video' | 'audio'; mimeType: string; fileName: string; sizeBytes?: number };
 };
 
-const putMedia = async (
-  body: ReadableStream<Uint8Array>,
-  sizeBytes: number,
-  url: string,
-  contentType: string,
-): Promise<void> => {
+const putMedia = async (body: ReadableStream<Uint8Array>, sizeBytes: number, url: string, contentType: string): Promise<void> => {
   const target = new URL(url);
   const request = target.protocol === 'https:' ? httpsRequest : httpRequest;
   const upload = request(target, {
@@ -57,12 +51,11 @@ const putMedia = async (
 };
 
 export const importMessageMedia = async (event: MediaEvent): Promise<{ fileId: string; label: string } | undefined> => {
-  if (!event.media || !isEventId(event.eventId)) {
+  if (!event.media) {
     return undefined;
   }
 
-  // Media can expire on WhatsApp's side; the message is still imported without it.
-  const response = await bridgeFetch(`/media/${event.eventId}`, {}, 55_000).catch(() => undefined);
+  const response = await bridgeMediaRequest(event.eventId);
   if (!response) {
     return undefined;
   }
@@ -74,24 +67,22 @@ export const importMessageMedia = async (event: MediaEvent): Promise<{ fileId: s
   }
 
   const metadataClient = new MetadataApiClient();
-  const result = await metadataClient
-    .mutation({
-      createFileUpload: {
-        __args: {
-          filename: event.media.fileName,
-          size: sizeBytes,
-          fileFolder: 'FilesField',
-          fieldMetadataUniversalIdentifier: MESSAGE_MEDIA_FIELD_ID,
-        },
-        fileId: true,
-        uploadUrl: true,
-        contentType: true,
+  const result = await metadataClient.mutation({
+    createFileUpload: {
+      __args: {
+        filename: event.media.fileName,
+        size: sizeBytes,
+        fileFolder: 'FilesField',
+        fieldMetadataUniversalIdentifier: WHATSAPP_MESSAGE_MEDIA_FIELD_ID,
       },
-    })
-    .catch(async (error: unknown) => {
-      await response.body?.cancel().catch(() => undefined);
-      throw error;
-    });
+      fileId: true,
+      uploadUrl: true,
+      contentType: true,
+    },
+  }).catch(async (error: unknown) => {
+    await response.body?.cancel().catch(() => undefined);
+    throw error;
+  });
   const target = result.createFileUpload;
   if (!target?.fileId || !target.uploadUrl || !target.contentType) {
     await response.body.cancel();
