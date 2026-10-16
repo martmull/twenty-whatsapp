@@ -22,6 +22,7 @@ type HistoryRequest = {
   offset?: number;
   chatId?: string;
   createPerson?: boolean;
+  acknowledged?: boolean;
   firstName?: string;
   lastName?: string;
 };
@@ -170,7 +171,13 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
 
   const chatId = request.chatId;
 
-  if (request.action !== 'import' || !isChatId(chatId) || !Number.isInteger(request.offset) || request.offset! < 0) {
+  if (
+    request.action !== 'import' ||
+    !isChatId(chatId) ||
+    !Number.isInteger(request.offset) ||
+    request.offset! < 0 ||
+    request.acknowledged !== true
+  ) {
     throw new HttpError(400, 'Invalid history import request');
   }
 
