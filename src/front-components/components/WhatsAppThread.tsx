@@ -216,9 +216,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     setNotice('');
     setShowGroupMembers(false);
     setSelectedId(conversationId);
-    setData((previous) => (previous ? { ...previous, groupMembers: undefined } : previous));
+    // Clear the previous conversation's messages so they never show under the new header.
+    setData((previous) => (previous ? { ...previous, messages: [], groupMembers: undefined } : previous));
     selectedIdRef.current = conversationId;
-    void load(conversationId, true);
+    void load(conversationId);
   };
 
   const addFiles = (files: File[]) => {
@@ -550,7 +551,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                 {t('No WhatsApp conversation for this Person yet.')}
               </p>
             )}
-            {selected && data?.messages.length === 0 && <p style={styles.muted}>{t('No messages yet.')}</p>}
+            {selected && !loading && data?.messages.length === 0 && <p style={styles.muted}>{t('No messages yet.')}</p>}
             {data?.messages
               .slice()
               .reverse()
@@ -561,14 +562,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                     alignSelf: message.direction === 'OUTBOUND' ? 'flex-end' : 'flex-start',
                     background:
                       message.direction === 'OUTBOUND' ? (isDark ? '#005c4b' : '#d9fdd3') : isDark ? '#202c33' : '#fff',
-                    border:
-                      selected?.unread &&
-                      message.direction === 'INBOUND' &&
-                      (!selected.lastReadAt || message.sentAt > selected.lastReadAt)
-                        ? `2px solid ${themeCssVariables.color.blue}`
-                        : isDark
-                          ? '1px solid #26343d'
-                          : '1px solid #e9e7e3',
+                    border: isDark ? '1px solid #26343d' : '1px solid #e9e7e3',
                     borderRadius: themeCssVariables.border.radius.md,
                     color: isDark ? '#e9edef' : '#202c33',
                     maxWidth: '78%',
