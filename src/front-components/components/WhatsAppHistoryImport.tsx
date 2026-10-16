@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { enqueueSnackbar, t } from 'twenty-sdk/front-component';
 import { Callout } from 'twenty-ui/components';
 import { Tag } from 'twenty-ui/primitives/data-display';
+import { ProgressBar } from 'twenty-ui/primitives/feedback';
 import { Button, Input } from 'twenty-ui/primitives/input';
 import { Card } from 'twenty-ui/primitives/surfaces';
 import { Heading, Text } from 'twenty-ui/primitives/typography';
@@ -25,7 +26,7 @@ type HistoryCandidate = {
   renameable?: boolean;
 };
 
-type ImportResult = { imported: number; nextOffset?: number; createdPerson: boolean };
+type ImportResult = { imported: number; total: number; nextOffset?: number; createdPerson: boolean };
 
 const isPhoneLikeName = (name: string) => /^\+?\d+$/.test(name.trim());
 
@@ -52,7 +53,8 @@ export const WhatsAppHistoryImport = () => {
   const [names, setNames] = useState<Record<string, Name>>({});
   const [members, setMembers] = useState<Record<string, GroupMember[]>>({});
   const [working, setWorking] = useState(false);
-  const [progress, setProgress] = useState('');
+  // Import progress from 0 to 100, undefined when no import is running.
+  const [progress, setProgress] = useState<number>();
 
   const load = async (range: RangeDays, kind: ChatFilter, offset = 0) => {
     setWorking(true);
@@ -108,7 +110,7 @@ export const WhatsAppHistoryImport = () => {
 
     try {
       for (const [index, item] of chosen.entries()) {
-        setProgress(`${index + 1} / ${chosen.length}`);
+        setProgress((100 * index) / chosen.length);
         let offset: number | undefined = 0;
 
         // The server imports one page at a time and tells us where to continue.
@@ -123,6 +125,9 @@ export const WhatsAppHistoryImport = () => {
           });
           imported += result.imported;
           offset = result.nextOffset;
+          // Each chat is an equal share of the bar, filled as its pages are imported.
+          const chatDone = offset === undefined || result.total === 0 ? 1 : offset / result.total;
+          setProgress((100 * (index + chatDone)) / chosen.length);
         }
       }
 
@@ -133,7 +138,7 @@ export const WhatsAppHistoryImport = () => {
       showError(error, t('Import stopped. Retry to continue, duplicates are skipped.'));
     } finally {
       setWorking(false);
-      setProgress('');
+      setProgress(undefined);
     }
   };
 
@@ -298,13 +303,13 @@ export const WhatsAppHistoryImport = () => {
                   color="accent"
                   size="sm"
                   disabled={working || selected.length === 0}
-                  loading={working && progress !== ''}
+                  loading={progress !== undefined}
                   onClick={() => void importSelected()}
                 >
                   {t('Import selected')} ({selected.length})
                 </Button>
-                {progress && <Text>{progress}</Text>}
               </div>
+              {progress !== undefined && <ProgressBar value={progress} ariaLabel={t('Import progress')} />}
             </>
           )}
         </div>
