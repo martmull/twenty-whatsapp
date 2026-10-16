@@ -1,19 +1,23 @@
-import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
+import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { bridgePost, type BridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
+import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
 
-const handler = async (event: RoutePayload<{ ownsNumber?: boolean; acceptsRisk?: boolean }>) => {
-  if (!event.userWorkspaceId || event.body?.ownsNumber !== true || event.body?.acceptsRisk !== true) {
-    throw new Error('Acknowledgement and authentication required');
+const handler = route<{ ownsNumber?: boolean; acceptsRisk?: boolean }>('whatsapp-connection-start', async (event, logger) => {
+  requireUser(event);
+
+  if (event.body?.ownsNumber !== true || event.body?.acceptsRisk !== true) {
+    throw new HttpError(400, 'Both acknowledgements are required');
   }
 
   if (!(await canManageConnection())) {
-    throw new Error('Only workspace administrators can connect WhatsApp');
+    throw new HttpError(403, 'Only workspace administrators can connect WhatsApp');
   }
 
+  logger.info('Starting pairing');
   return bridgePost<BridgeStatus>('/connect');
-};
+});
 
 export default defineLogicFunction({
   universalIdentifier: 'e51e904f-d3cc-4206-b02d-379d5320774c',

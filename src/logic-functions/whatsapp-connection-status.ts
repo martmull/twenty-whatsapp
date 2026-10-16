@@ -1,14 +1,13 @@
-import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
+import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { getBridgeStatus } from 'src/logic-functions/bridge-request';
+import { requireUser, route } from 'src/logic-functions/utils/route';
 
-const handler = async (event: RoutePayload) => {
-  if (!event.userWorkspaceId) {
-    throw new Error('Authentication required');
-  }
+const handler = route('whatsapp-connection-status', async (event) => {
+  requireUser(event);
 
   return getBridgeStatus();
-};
+});
 
 export default defineLogicFunction({
   universalIdentifier: '700f736d-11f3-4ce2-a059-93865062e659',
