@@ -23,5 +23,17 @@
     "twenty-sdk": "2.45.0",
     "twenty-ui": "2.45.0",
     "typescript": "^5.9.3"
-  }
+  },
+  "frontComponentSharedDependencies": [
+    "react",
+    "react-dom/client",
+    "twenty-ui/components",
+    "twenty-ui/icon",
+    "twenty-ui/primitives/data-display",
+    "twenty-ui/primitives/input",
+    "twenty-ui/primitives/navigation",
+    "twenty-ui/primitives/surfaces",
+    "twenty-ui/primitives/typography",
+    "twenty-ui/theme"
+  ]
 }
