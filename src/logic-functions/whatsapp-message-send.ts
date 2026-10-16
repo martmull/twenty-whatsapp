@@ -16,11 +16,15 @@ const mediaKindForMimeType = (mimeType: string): 'image' | 'video' | 'document' 
     : ['video/mp4', 'video/quicktime', 'video/3gpp'].includes(mimeType) ? 'video'
       : 'document';
 
+// File names must not contain path separators or control characters.
+// eslint-disable-next-line no-control-regex
+const UNSAFE_FILE_NAME = /[/\\\u0000-\u001f]/;
+
 const PLACEHOLDER_TEXT = { image: '[Image]', video: '[Video]', document: '[File]' } as const;
 
 const isValidAttachment = (attachment: Attachment) =>
   isUuid(attachment.fileId) &&
-  Boolean(attachment.label) && attachment.label.length <= 255 && !/[/\\\u0000-\u001f]/.test(attachment.label) &&
+  Boolean(attachment.label) && attachment.label.length <= 255 && !UNSAFE_FILE_NAME.test(attachment.label) &&
   /^[\w.+-]+\/[\w.+-]+$/.test(attachment.mimeType) &&
   Number.isSafeInteger(attachment.size) && attachment.size >= 1 && attachment.size <= MAX_MEDIA_BYTES;
 

@@ -11,6 +11,10 @@ import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
 import { isDirectChatId, isGroupChatId, isSupportedChatId, messageChatId, messageEventId, toMessageEvent, type MessageEvent } from './message-event.js';
 
+// File names must not contain path separators or control characters.
+// eslint-disable-next-line no-control-regex
+const UNSAFE_FILE_NAME = /[/\\\u0000-\u001f]/;
+
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
   qrDataUrl?: string;
@@ -529,7 +533,7 @@ export class WhatsAppConnection {
 
   async sendMedia(requestId: string, chatId: string, accountPhoneNumber: string, kind: 'image' | 'video' | 'document', mimeType: string, fileName: string, caption: string, bytes: Buffer): Promise<SendReceipt> {
     if (!/^[a-f\d-]{36}$/i.test(requestId) || !isSupportedChatId(chatId) || !/^\+\d{7,15}$/.test(accountPhoneNumber) ||
-      !/^[\w.+-]+\/[\w.+-]+$/.test(mimeType) || !fileName || fileName.length > 255 || /[/\\\u0000-\u001f]/.test(fileName) ||
+      !/^[\w.+-]+\/[\w.+-]+$/.test(mimeType) || !fileName || fileName.length > 255 || UNSAFE_FILE_NAME.test(fileName) ||
       caption.length > 4096 || bytes.length === 0 || bytes.length > 64 * 1024 * 1024 ||
       (kind === 'image' && !mimeType.startsWith('image/')) || (kind === 'video' && !mimeType.startsWith('video/'))) {
       throw new Error('Invalid media send request');
