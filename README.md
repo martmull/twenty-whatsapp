@@ -44,7 +44,7 @@ For a transport check that does not link a phone, run node bridge/scripts/check-
 
 Upgrading from 0.2: conversations, messages and accounts now use real relations and select fields. Uninstall the app (`yarn twenty app:uninstall`), sync it again, then re-import chats from **History**; the bridge keeps its session and history cache.
 
-Checks: `yarn typecheck`, `yarn test` (app) and `npm test` in `bridge/`.
+Checks (also run by CI on every pull request): `yarn lint`, `yarn format:check`, `yarn typecheck`, `yarn test`, and `npm run typecheck` and `npm test` in `bridge/`.
 
 ## Repository layout
 
