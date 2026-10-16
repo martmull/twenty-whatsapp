@@ -1,8 +1,0 @@
-.twenty/
-.yarn/
-docs/
-patches/
-public/
-yarn.lock
-bridge/package-lock.json
-bridge/data/

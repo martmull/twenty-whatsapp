@@ -1,17 +1,14 @@
-import { defineLogicFunction } from 'twenty-sdk/define';
+import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 
-import { getBridgeStatus } from 'src/logic-functions/bridge-request';
-import { canManageConnection } from 'src/logic-functions/can-manage-connection';
-import { requireUser, route } from 'src/logic-functions/utils/route';
+import { bridgeRequest } from 'src/logic-functions/bridge-request';
 
-const handler = route('whatsapp-connection-status', async (event) => {
-  requireUser(event);
+const handler = async (event: RoutePayload) => {
+  if (!event.userWorkspaceId) {
+    throw new Error('Authentication required');
+  }
 
-  const [status, canManage] = await Promise.all([getBridgeStatus(), canManageConnection()]);
-
-  // Only admins may see the pairing QR code: whoever scans it links their WhatsApp account.
-  return canManage ? { ...status, canManage } : { state: status.state, phoneNumber: status.phoneNumber, canManage };
-});
+  return bridgeRequest('/status');
+};
 
 export default defineLogicFunction({
   universalIdentifier: '700f736d-11f3-4ce2-a059-93865062e659',

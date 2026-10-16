@@ -26,7 +26,8 @@ export default definePageLayout({
           heightBehavior: 'TAB_VIEWPORT',
           configuration: {
             configurationType: 'FRONT_COMPONENT',
-            frontComponentUniversalIdentifier: INBOX_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
+            frontComponentUniversalIdentifier:
+              INBOX_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
           },
         },
       ],

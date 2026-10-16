@@ -26,7 +26,9 @@ test('session credentials survive restart and are encrypted at rest', async () =
     const restored = await createEncryptedAuthState(directory, key);
     assert.equal(restored.state.creds.registrationId, registrationId);
 
-    await assert.rejects(createEncryptedAuthState(directory, randomBytes(32)));
+    await assert.rejects(
+      createEncryptedAuthState(directory, randomBytes(32)),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
