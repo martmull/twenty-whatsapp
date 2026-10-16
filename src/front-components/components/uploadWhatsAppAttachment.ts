@@ -1,7 +1,7 @@
 import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 import { uploadFile, type UploadedFrontComponentFile } from 'twenty-sdk/front-component';
 
-import { WHATSAPP_MESSAGE_MEDIA_FIELD_ID } from 'src/constants/whatsapp-media-field';
+import { MESSAGE_MEDIA_FIELD_ID } from 'src/constants/universal-identifiers';
 
 let mediaFieldMetadataId: string | undefined;
 
@@ -17,7 +17,7 @@ const getMediaFieldMetadataId = async (): Promise<string> => {
       },
     });
     const field = result.objects.edges.flatMap((edge) => edge.node.fieldsList ?? [])
-      .find((candidate) => candidate.universalIdentifier === WHATSAPP_MESSAGE_MEDIA_FIELD_ID);
+      .find((candidate) => candidate.universalIdentifier === MESSAGE_MEDIA_FIELD_ID);
     if (field) {
       mediaFieldMetadataId = field.id;
       return field.id;

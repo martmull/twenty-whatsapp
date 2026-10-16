@@ -6,7 +6,7 @@ import { type ReadableStream as NodeReadableStream } from 'node:stream/web';
 
 import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 
-import { WHATSAPP_MESSAGE_MEDIA_FIELD_ID } from 'src/constants/whatsapp-media-field';
+import { MESSAGE_MEDIA_FIELD_ID } from 'src/constants/universal-identifiers';
 import { bridgeFetch } from 'src/logic-functions/bridge-request';
 import { isEventId } from 'src/logic-functions/utils/validators';
 
@@ -75,7 +75,7 @@ export const importMessageMedia = async (event: MediaEvent): Promise<{ fileId: s
         filename: event.media.fileName,
         size: sizeBytes,
         fileFolder: 'FilesField',
-        fieldMetadataUniversalIdentifier: WHATSAPP_MESSAGE_MEDIA_FIELD_ID,
+        fieldMetadataUniversalIdentifier: MESSAGE_MEDIA_FIELD_ID,
       },
       fileId: true,
       uploadUrl: true,

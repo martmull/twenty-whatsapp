@@ -1,9 +1,11 @@
 import { defineApplicationRole, STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS, SystemPermissionFlag } from 'twenty-sdk/define';
 
-import { WHATSAPP_ACCOUNT_OBJECT_ID } from 'src/objects/whatsapp-account';
-import { WHATSAPP_CONVERSATION_OBJECT_ID } from 'src/objects/whatsapp-conversation';
-import { WHATSAPP_MESSAGE_OBJECT_ID } from 'src/objects/whatsapp-message';
-import { WHATSAPP_CONVERSATION_READ_STATE_OBJECT_ID } from 'src/objects/whatsapp-conversation-read-state';
+import {
+  WHATSAPP_ACCOUNT_OBJECT_ID,
+  WHATSAPP_CONVERSATION_OBJECT_ID,
+  WHATSAPP_CONVERSATION_READ_STATE_OBJECT_ID,
+  WHATSAPP_MESSAGE_OBJECT_ID,
+} from 'src/constants/universal-identifiers';
 
 export default defineApplicationRole({
   universalIdentifier: '50589f49-6cc1-414e-83d3-ec54751445ce',

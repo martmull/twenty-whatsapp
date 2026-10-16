@@ -1,6 +1,6 @@
 import { defineIndex } from 'twenty-sdk/define';
 
-import { MESSAGE_REQUEST_ID_FIELD_ID, WHATSAPP_MESSAGE_OBJECT_ID } from 'src/objects/whatsapp-message';
+import { MESSAGE_REQUEST_ID_FIELD_ID, WHATSAPP_MESSAGE_OBJECT_ID } from 'src/constants/universal-identifiers';
 
 export default defineIndex({
   universalIdentifier: 'd0ff85f4-dafb-4306-b23c-cfa355abdb2b',

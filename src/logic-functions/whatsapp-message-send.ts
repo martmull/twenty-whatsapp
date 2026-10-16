@@ -111,7 +111,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
   if (!message) {
     const created = await client.mutation({
       createWhatsappMessage: {
-        __args: { data: { name: messageText.slice(0, 80), conversationId, direction: 'outbound', text: messageText, sentAt: new Date().toISOString(), deliveryState: 'unknown', requestId, ...(attachment ? { mediaKind, media: [{ fileId: attachment.fileId, label: attachment.label }] } : {}) } },
+        __args: { data: { name: messageText.slice(0, 80), conversationId, direction: 'OUTBOUND', text: messageText, sentAt: new Date().toISOString(), deliveryState: 'UNKNOWN', requestId, ...(attachment ? { mediaKind: mediaKind!.toUpperCase(), media: [{ fileId: attachment.fileId, label: attachment.label }] } : {}) } },
         id: true,
       },
     });
@@ -125,7 +125,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
     if (!message) throw new Error('Could not load outgoing message');
   }
 
-  if (message.deliveryState === 'sent') {
+  if (message.deliveryState === 'SENT') {
     return { messageId: message.id, state: 'sent' as const };
   }
 
@@ -138,7 +138,7 @@ const handler = async (event: RoutePayload<SendRequest>) => {
   if (receipt.state === 'sent') {
     await client.mutation({
       updateWhatsappMessage: {
-        __args: { id: message.id, data: { deliveryState: 'sent', externalId: receipt.eventId } },
+        __args: { id: message.id, data: { deliveryState: 'SENT', externalId: receipt.eventId } },
         id: true,
       },
     });

@@ -138,12 +138,12 @@ export const ensureAccount = async (client: CoreApiClient, phoneNumber: string):
 
   if (!accountId) {
     const created = await client.mutation({
-      createWhatsappAccount: { __args: { data: { name: phoneNumber, phoneNumber, state: 'connected' } }, id: true },
+      createWhatsappAccount: { __args: { data: { name: phoneNumber, phoneNumber, state: 'CONNECTED' } }, id: true },
     });
     accountId = created.createWhatsappAccount?.id;
-  } else if (account?.state !== 'connected') {
+  } else if (account?.state !== 'CONNECTED') {
     await client.mutation({
-      updateWhatsappAccount: { __args: { id: accountId, data: { state: 'connected' } }, id: true },
+      updateWhatsappAccount: { __args: { id: accountId, data: { state: 'CONNECTED' } }, id: true },
     });
   }
 
@@ -159,10 +159,10 @@ const attachMedia = async (client: CoreApiClient, event: BridgeMessageEvent, mes
     return;
   }
 
-  if (message.mediaKind !== event.media.kind) {
+  if (message.mediaKind !== event.media.kind.toUpperCase()) {
     await client.mutation({
       updateWhatsappMessage: {
-        __args: { id: message.id, data: { mediaKind: event.media.kind } },
+        __args: { id: message.id, data: { mediaKind: event.media.kind.toUpperCase() } },
         id: true,
       },
     });
@@ -195,7 +195,7 @@ export const importMessageForPerson = async (client: CoreApiClient, accountId: s
     const name = [person.name.firstName, person.name.lastName].filter(Boolean).join(' ') || event.chatId.split('@')[0];
     const created = await client.mutation({
       createWhatsappConversation: {
-        __args: { data: { name, chatId: event.chatId, personId: person.id, linkedPersonId: person.id, accountId } },
+        __args: { data: { name, chatId: event.chatId, personId: person.id, accountId } },
         id: true,
       },
     });
@@ -218,11 +218,11 @@ export const importMessageForPerson = async (client: CoreApiClient, accountId: s
             name: event.text.slice(0, 80),
             conversationId: conversation.id,
             externalId: event.eventId,
-            direction: event.direction ?? 'inbound',
+            direction: event.direction === 'outbound' ? 'OUTBOUND' : 'INBOUND',
             text: event.text,
             sentAt: event.sentAt,
-            deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
-            ...(event.media ? { mediaKind: event.media.kind } : {}),
+            deliveryState: event.direction === 'outbound' ? 'SENT' : 'RECEIVED',
+            ...(event.media ? { mediaKind: event.media.kind.toUpperCase() } : {}),
           },
         },
         id: true,
@@ -277,7 +277,7 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
   if (!conversation) {
     const created = await client.mutation({
       createWhatsappConversation: {
-        __args: { data: { name, chatId, ...(person ? { personId: person.id, linkedPersonId: person.id } : {}), accountId } },
+        __args: { data: { name, chatId, ...(person ? { personId: person.id } : {}), accountId } },
         id: true,
       },
     });
@@ -323,11 +323,11 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
           name: event.text.slice(0, 80),
           conversationId: conversation.id,
           externalId: event.eventId,
-          direction: event.direction ?? 'inbound',
+          direction: event.direction === 'outbound' ? 'OUTBOUND' : 'INBOUND',
           text: event.text,
           sentAt: event.sentAt,
-          deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
-          ...(event.media ? { mediaKind: event.media.kind } : {}),
+          deliveryState: event.direction === 'outbound' ? 'SENT' : 'RECEIVED',
+          ...(event.media ? { mediaKind: event.media.kind.toUpperCase() } : {}),
           ...(event.senderId ? { senderId: event.senderId } : {}),
           ...(event.senderName ? { senderName: event.senderName } : {}),
         })) },

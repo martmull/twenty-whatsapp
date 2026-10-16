@@ -29,7 +29,7 @@ const handler = async (event: RoutePayload) => {
 
     if (accountId) {
       await client.mutation({
-        updateWhatsappAccount: { __args: { id: accountId, data: { state: 'disconnected' } }, id: true },
+        updateWhatsappAccount: { __args: { id: accountId, data: { state: 'DISCONNECTED' } }, id: true },
       });
     }
   }
