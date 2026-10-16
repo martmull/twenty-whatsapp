@@ -1,7 +1,4 @@
-import {
-  definePageLayoutWidget,
-  PageLayoutTabLayoutMode,
-} from 'twenty-sdk/define';
+import { definePageLayoutWidget, PageLayoutTabLayoutMode } from 'twenty-sdk/define';
 
 import {
   PERSON_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
@@ -18,7 +15,6 @@ export default definePageLayoutWidget({
   heightBehavior: 'TAB_VIEWPORT',
   configuration: {
     configurationType: 'FRONT_COMPONENT',
-    frontComponentUniversalIdentifier:
-      PERSON_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
+    frontComponentUniversalIdentifier: PERSON_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
   },
 });

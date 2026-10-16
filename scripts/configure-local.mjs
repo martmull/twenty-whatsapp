@@ -6,9 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const envPath = join(appRoot, 'bridge', '.env');
-const config = JSON.parse(
-  await readFile(join(homedir(), '.twenty', 'config.json'), 'utf8'),
-);
+const config = JSON.parse(await readFile(join(homedir(), '.twenty', 'config.json'), 'utf8'));
 const remote = config.remotes?.local;
 
 if (remote?.apiUrl !== 'http://localhost:2020' || !remote.apiKey) {
@@ -24,13 +22,20 @@ try {
     throw error;
   }
 
-  env = [
-    'WHATSAPP_BRIDGE_TOKEN=' + randomBytes(32).toString('hex'),
-    'WHATSAPP_SESSION_KEY=' + randomBytes(32).toString('hex'),
-    'WHATSAPP_BRIDGE_HOST=127.0.0.1',
-  ].join('\n') + '\n';
+  env =
+    [
+      'WHATSAPP_BRIDGE_TOKEN=' + randomBytes(32).toString('hex'),
+      'WHATSAPP_SESSION_KEY=' + randomBytes(32).toString('hex'),
+      'WHATSAPP_BRIDGE_HOST=127.0.0.1',
+    ].join('\n') + '\n';
 
   await writeFile(envPath, env, { mode: 0o600, flag: 'wx' });
+}
+
+// The bridge calls this route when messages arrive (signed with the bridge token).
+if (!/^TWENTY_WEBHOOK_URL=/m.test(env)) {
+  env += 'TWENTY_WEBHOOK_URL=' + remote.apiUrl + '/s/whatsapp/bridge/events\n';
+  await writeFile(envPath, env, { mode: 0o600 });
 }
 
 const token = env.match(/^WHATSAPP_BRIDGE_TOKEN=(.+)$/m)?.[1];
@@ -57,17 +62,17 @@ const graphql = async (query, variables) => {
   return result.data;
 };
 
-const app = await graphql(
-  'query ($id: UUID!) { findOneApplication(universalIdentifier: $id) { id } }',
-  { id: '7202b0dc-26c9-45cc-8b9a-97087693def1' },
-);
+const app = await graphql('query ($id: UUID!) { findOneApplication(universalIdentifier: $id) { id } }', {
+  id: '7202b0dc-26c9-45cc-8b9a-97087693def1',
+});
 const applicationId = app.findOneApplication?.id;
 
 if (!applicationId) {
   throw new Error('WhatsApp app is not installed on the local Twenty instance');
 }
 
-const mutation = 'mutation ($applicationId: UUID!, $key: String!, $value: String!) { updateOneApplicationVariable(applicationId: $applicationId, key: $key, value: $value) }';
+const mutation =
+  'mutation ($applicationId: UUID!, $key: String!, $value: String!) { updateOneApplicationVariable(applicationId: $applicationId, key: $key, value: $value) }';
 
 for (const [key, value] of [
   ['WHATSAPP_BRIDGE_URL', 'http://host.docker.internal:8765'],

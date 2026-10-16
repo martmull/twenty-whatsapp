@@ -27,7 +27,9 @@ export class EncryptedJsonStore<TValue> {
 
     const decipher = createDecipheriv('aes-256-gcm', this.encryptionKey, content.subarray(0, 12));
     decipher.setAuthTag(content.subarray(12, 28));
-    return JSON.parse(Buffer.concat([decipher.update(content.subarray(28)), decipher.final()]).toString('utf8')) as TValue;
+    return JSON.parse(
+      Buffer.concat([decipher.update(content.subarray(28)), decipher.final()]).toString('utf8'),
+    ) as TValue;
   }
 
   async write(key: string, value: TValue): Promise<void> {
@@ -60,7 +62,9 @@ export class EncryptedJsonStore<TValue> {
       const content = await readFile(join(this.directory, name));
       const decipher = createDecipheriv('aes-256-gcm', this.encryptionKey, content.subarray(0, 12));
       decipher.setAuthTag(content.subarray(12, 28));
-      values.push(JSON.parse(Buffer.concat([decipher.update(content.subarray(28)), decipher.final()]).toString('utf8')) as TValue);
+      values.push(
+        JSON.parse(Buffer.concat([decipher.update(content.subarray(28)), decipher.final()]).toString('utf8')) as TValue,
+      );
     }
 
     return values;
