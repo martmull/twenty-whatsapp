@@ -161,9 +161,12 @@ const jsonRoutes: Record<string, Route> = {
   },
 };
 
+// A 4,096-character caption can take 16 KB as UTF-8, about 22 KB once base64-encoded in the header.
+const MAX_MEDIA_METADATA_LENGTH = 24_000;
+
 const sendMedia = async (request: IncomingMessage) => {
   const encoded = request.headers['x-whatsapp-media'];
-  check(typeof encoded === 'string' && encoded.length <= 12_000, 'Invalid media metadata');
+  check(typeof encoded === 'string' && encoded.length <= MAX_MEDIA_METADATA_LENGTH, 'Invalid media metadata');
   const media: Record<string, unknown> = JSON.parse(Buffer.from(encoded as string, 'base64').toString('utf8'));
   check(
     typeof media.requestId === 'string' &&
@@ -190,7 +193,8 @@ const sendMedia = async (request: IncomingMessage) => {
   );
 };
 
-const server = createServer(async (request, response) => {
+// Node's default 16 KB header limit would reject the metadata of a long caption.
+const server = createServer({ maxHeaderSize: 32 * 1024 }, async (request, response) => {
   response.setHeader('cache-control', 'no-store');
   response.setHeader('content-type', 'application/json');
 
