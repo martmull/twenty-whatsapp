@@ -416,8 +416,10 @@ export class WhatsAppConnection {
     return members;
   }
 
+  // Oldest first, so Twenty imports messages in the order they were received.
   async getEvents(): Promise<MessageEvent[]> {
-    return this.events.list(100);
+    const events = await this.events.list();
+    return events.sort((left, right) => left.sentAt.localeCompare(right.sentAt)).slice(0, 100);
   }
 
   async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[] }> {
