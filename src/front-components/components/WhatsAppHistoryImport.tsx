@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
 import { t } from 'twenty-sdk/front-component';
 import { Callout } from 'twenty-ui/components';
@@ -31,27 +31,10 @@ type HistoryList = {
   historyReceivedAt?: string;
 };
 
-type JobStatus = { jobId: string; state: string; failedReason?: string | null };
-
-// The running import's job IDs, kept so the progress shows again after a reload.
-const JOB_IDS_KEY = 'whatsapp-history-import-jobs';
-
-const storedJobIds = (): string[] => {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(JOB_IDS_KEY) ?? '[]');
-    return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
-  } catch {
-    return [];
-  }
-};
-
-const storeJobIds = (jobIds: string[]) => {
-  try {
-    if (jobIds.length) localStorage.setItem(JOB_IDS_KEY, JSON.stringify(jobIds));
-    else localStorage.removeItem(JOB_IDS_KEY);
-  } catch {
-    // Without storage the progress just doesn't survive a reload.
-  }
+type ImportResult = {
+  imported: number;
+  nextOffset?: number;
+  createdPerson: boolean;
 };
 
 type GroupMember = {
@@ -88,10 +71,6 @@ export const WhatsAppHistoryImport = () => {
   const working = workingAction !== null;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  // One background job per imported chat; empty when no import is running.
-  const [jobIds, setJobIds] = useState<string[]>(storedJobIds);
-  const [finishedJobs, setFinishedJobs] = useState(0);
-  const importing = jobIds.length > 0;
 
   const load = async (
     range: RangeDays,
@@ -182,6 +161,8 @@ export const WhatsAppHistoryImport = () => {
     setWorkingAction('import');
     setError('');
     setNotice('');
+    let imported = 0;
+    let createdPeople = 0;
 
     try {
       const chosen = items.filter((item) => selected.includes(item.chatId));
@@ -197,69 +178,44 @@ export const WhatsAppHistoryImport = () => {
         return;
       }
 
-      const result = await new RestApiClient().post<{ jobIds: string[] }>('/s/whatsapp/history', {
-        action: 'import',
-        rangeDays,
-        acknowledged,
-        chats: chosen.map((item) => {
-          const name = item.match === 'new' || item.renameable ? names[item.chatId] : undefined;
-          return {
+      for (const [index, item] of chosen.entries()) {
+        setNotice(`${t('Importing')} ${index + 1} / ${chosen.length}…`);
+        let offset = 0;
+
+        while (true) {
+          const result = (await new RestApiClient().post('/s/whatsapp/history', {
+            action: 'import',
+            rangeDays,
             chatId: item.chatId,
+            offset,
             createPerson: item.match === 'new',
-            firstName: name?.firstName.trim() || undefined,
-            lastName: name?.lastName.trim() || undefined,
-          };
-        }),
-      });
-      storeJobIds(result.jobIds);
-      setFinishedJobs(0);
-      setJobIds(result.jobIds);
+            ...(item.match === 'new' || item.renameable ? names[item.chatId] : {}),
+            acknowledged,
+          })) as ImportResult;
+          imported += result.imported;
+          createdPeople += Number(result.createdPerson);
+
+          if (result.nextOffset === undefined) {
+            break;
+          }
+
+          offset = result.nextOffset;
+        }
+      }
+
       setSelected([]);
       setAcknowledged(false);
+      await load(rangeDays, 0, 'import');
+      setNotice(`${t('Import complete')}: ${imported} ${t('messages')}, ${createdPeople} ${t('new People')}.`);
     } catch {
-      setError(t('Could not start the import. Check the bridge and retry.'));
+      setNotice('');
+      setError(
+        t('Import stopped. Completed records were saved. Review and retry; duplicate messages will be skipped.'),
+      );
     } finally {
       setWorkingAction(null);
     }
   };
-
-  // Follow the import jobs by ID until they have all finished.
-  useEffect(() => {
-    if (jobIds.length === 0) return;
-    let active = true;
-
-    const poll = async () => {
-      const result = await new RestApiClient()
-        .post<{ jobs: JobStatus[] }>('/s/whatsapp/history', { action: 'progress', jobIds })
-        .catch(() => undefined);
-      if (!active || !result) return;
-
-      // A job the queue no longer returns finished long ago.
-      const running = result.jobs.filter((job) => job.state !== 'COMPLETED' && job.state !== 'FAILED');
-      const failed = result.jobs.filter((job) => job.state === 'FAILED');
-      setFinishedJobs(jobIds.length - running.length);
-
-      if (running.length === 0) {
-        storeJobIds([]);
-        setJobIds([]);
-        if (failed.length) {
-          setError(
-            `${failed.length} ${t('chats could not be imported. Retry them; duplicate messages will be skipped.')}`,
-          );
-        } else {
-          setNotice(t('Import complete.'));
-        }
-        if (reviewing) void load(rangeDays, 0, 'import');
-      }
-    };
-
-    void poll();
-    const timer = setInterval(poll, 2_000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [jobIds]);
 
   return (
     <section
@@ -617,8 +573,8 @@ export const WhatsAppHistoryImport = () => {
               variant="solid"
               color="accent"
               size="sm"
-              disabled={working || importing || selected.length === 0 || !acknowledged}
-              loading={workingAction === 'import' || importing}
+              disabled={working || selected.length === 0 || !acknowledged}
+              loading={workingAction === 'import'}
               onClick={() => void importSelected()}
             >
               {t('Import selected')}
@@ -628,28 +584,6 @@ export const WhatsAppHistoryImport = () => {
             </span>
           </div>
         </>
-      )}
-      {importing && (
-        <div
-          role="progressbar"
-          aria-label={t('Import progress')}
-          aria-valuenow={Math.round((100 * finishedJobs) / jobIds.length)}
-          style={{
-            background: themeCssVariables.background.tertiary,
-            borderRadius: themeCssVariables.border.radius.sm,
-            height: 6,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            style={{
-              background: themeCssVariables.color.blue,
-              height: '100%',
-              transition: 'width 0.3s',
-              width: `${(100 * finishedJobs) / jobIds.length}%`,
-            }}
-          />
-        </div>
       )}
       {notice && (
         <p role="status" style={{ ...styles.muted, margin: 0 }}>
