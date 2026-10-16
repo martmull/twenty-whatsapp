@@ -5,6 +5,21 @@ import { formatTime, type Message } from 'src/front-components/components/inbox-
 
 const PLACEHOLDER_TEXTS = ['[Image]', '[Video]', '[Audio]', '[File]'];
 
+// http(s) URLs only, so a message can never produce a javascript: link.
+const URL_PATTERN = /(https?:\/\/[^\s]+)/g;
+
+// Renders message text with its URLs as links opening in a new tab.
+const TextWithLinks = ({ text }: { text: string }) =>
+  text.split(URL_PATTERN).map((part, index) =>
+    index % 2 === 1 ? (
+      <a key={index} href={part} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>
+        {part}
+      </a>
+    ) : (
+      part
+    ),
+  );
+
 type MessageBubbleProps = {
   message: Message;
   senderName?: string;
@@ -67,7 +82,9 @@ export const MessageBubble = ({ message, senderName, highlighted }: MessageBubbl
       )}
       <MessageMedia message={message} />
       {!(message.mediaKind && PLACEHOLDER_TEXTS.includes(message.text)) && (
-        <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{message.text}</div>
+        <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
+          <TextWithLinks text={message.text} />
+        </div>
       )}
       <small style={{ color: themeCssVariables.font.color.tertiary, fontSize: themeCssVariables.font.size.xs }}>
         {formatTime(message.sentAt)}
