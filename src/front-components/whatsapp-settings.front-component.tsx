@@ -27,12 +27,7 @@ const parseStatus = (value: unknown): ConnectionStatus => {
 
   const state = value.state;
 
-  if (
-    state !== 'disconnected' &&
-    state !== 'pairing' &&
-    state !== 'connected' &&
-    state !== 'reconnecting'
-  ) {
+  if (state !== 'disconnected' && state !== 'pairing' && state !== 'connected' && state !== 'reconnecting') {
     throw new Error('Unexpected bridge state');
   }
 
@@ -41,21 +36,16 @@ const parseStatus = (value: unknown): ConnectionStatus => {
   return {
     state,
     qrDataUrl:
-      typeof record.qrDataUrl === 'string' &&
-      record.qrDataUrl.startsWith('data:image/png;base64,')
+      typeof record.qrDataUrl === 'string' && record.qrDataUrl.startsWith('data:image/png;base64,')
         ? record.qrDataUrl
         : undefined,
-    qrExpiresAt:
-      typeof record.qrExpiresAt === 'number' ? record.qrExpiresAt : undefined,
-    phoneNumber:
-      typeof record.phoneNumber === 'string' ? record.phoneNumber : undefined,
+    qrExpiresAt: typeof record.qrExpiresAt === 'number' ? record.qrExpiresAt : undefined,
+    phoneNumber: typeof record.phoneNumber === 'string' ? record.phoneNumber : undefined,
   };
 };
 
 const requestStatus = async (): Promise<ConnectionStatus> =>
-  parseStatus(
-    await new RestApiClient().post('/s/whatsapp/connection/status', {}),
-  );
+  parseStatus(await new RestApiClient().post('/s/whatsapp/connection/status', {}));
 
 const WhatsAppSettings = () => {
   const styles = getPreviewStyles();
@@ -130,37 +120,42 @@ const WhatsAppSettings = () => {
     }
   };
 
-  const badge = status?.state === 'connected'
-    ? { label: t('Connected'), color: 'green' as const }
-    : status?.state === 'pairing'
-      ? { label: t('Waiting for scan'), color: 'orange' as const }
-      : status?.state === 'reconnecting'
-        ? { label: t('Reconnecting'), color: 'orange' as const }
-        : { label: t('Not connected'), color: 'gray' as const };
+  const badge =
+    status?.state === 'connected'
+      ? { label: t('Connected'), color: 'green' as const }
+      : status?.state === 'pairing'
+        ? { label: t('Waiting for scan'), color: 'orange' as const }
+        : status?.state === 'reconnecting'
+          ? { label: t('Reconnecting'), color: 'orange' as const }
+          : { label: t('Not connected'), color: 'gray' as const };
 
   return (
-    <main style={{
-      ...styles.root,
-      display: 'grid',
-      gap: themeCssVariables.spacing[4],
-      maxWidth: 840,
-      padding: themeCssVariables.spacing[4],
-    }}>
-      <div>
-        <h2 style={{ margin: 0 }}>{t('WhatsApp connection')}</h2>
-        <p style={styles.muted}>
-          {t('Link a phone by scanning a QR code in WhatsApp → Linked devices.')}
-        </p>
-      </div>
-      <div style={{
-        ...styles.card,
+    <main
+      style={{
+        ...styles.root,
         display: 'grid',
         gap: themeCssVariables.spacing[4],
+        maxWidth: 840,
         padding: themeCssVariables.spacing[4],
-      }}>
+      }}
+    >
+      <div>
+        <h2 style={{ margin: 0 }}>{t('WhatsApp connection')}</h2>
+        <p style={styles.muted}>{t('Link a phone by scanning a QR code in WhatsApp → Linked devices.')}</p>
+      </div>
+      <div
+        style={{
+          ...styles.card,
+          display: 'grid',
+          gap: themeCssVariables.spacing[4],
+          padding: themeCssVariables.spacing[4],
+        }}
+      >
         <div style={{ alignItems: 'center', display: 'flex', justifyContent: 'space-between' }}>
           <strong>{t('Linked device')}</strong>
-          <Tag color={badge.color} variant="soft" preventShrink>{badge.label}</Tag>
+          <Tag color={badge.color} variant="soft" preventShrink>
+            {badge.label}
+          </Tag>
         </div>
         <div>
           <Button type="button" variant="outline" size="sm" loading={working} onClick={() => void refreshStatus()}>
@@ -170,24 +165,37 @@ const WhatsAppSettings = () => {
         {error && <Callout variant="error" title={t('Connection unavailable')} description={error} />}
         {status?.state === 'connected' && (
           <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
-            <span>{t('Phone number')}: <strong>{status.phoneNumber ?? t('Connected')}</strong></span>
+            <span>
+              {t('Phone number')}: <strong>{status.phoneNumber ?? t('Connected')}</strong>
+            </span>
             <span style={styles.muted}>
-              {t('New direct messages from matched People, including available images, videos, and audio, appear in the inbox and on Person records. Selected groups appear in the shared inbox after import.')}
+              {t(
+                'New direct messages from matched People, including available images, videos, and audio, appear in the inbox and on Person records. Selected groups appear in the shared inbox after import.',
+              )}
             </span>
             <div>
-              <Button type="button" variant="outline" color="danger" size="sm" disabled={working} onClick={() => void perform('disconnect')}>
+              <Button
+                type="button"
+                variant="outline"
+                color="danger"
+                size="sm"
+                disabled={working}
+                onClick={() => void perform('disconnect')}
+              >
                 {t('Disconnect and remove session')}
               </Button>
             </div>
           </div>
         )}
         {status?.state === 'pairing' && (
-          <div style={{
-            alignItems: 'center',
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: themeCssVariables.spacing[5],
-          }}>
+          <div
+            style={{
+              alignItems: 'center',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: themeCssVariables.spacing[5],
+            }}
+          >
             {status.qrDataUrl ? (
               <img src={status.qrDataUrl} alt={t('WhatsApp pairing QR code')} width={248} height={248} />
             ) : (
@@ -206,7 +214,13 @@ const WhatsAppSettings = () => {
                 </span>
               )}
               <div>
-                <Button type="button" variant="outline" size="sm" disabled={working} onClick={() => void perform('disconnect')}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={working}
+                  onClick={() => void perform('disconnect')}
+                >
                   {t('Cancel pairing')}
                 </Button>
               </div>
@@ -214,31 +228,41 @@ const WhatsAppSettings = () => {
           </div>
         )}
         {status?.state === 'reconnecting' && (
-          <p style={styles.muted}>
-            {t('The linked device is reconnecting. Keep WhatsApp available on your phone.')}
-          </p>
+          <p style={styles.muted}>{t('The linked device is reconnecting. Keep WhatsApp available on your phone.')}</p>
         )}
         {(!status || status.state === 'disconnected') && (
           <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
-            <div style={{
-              background: themeCssVariables.background.secondary,
-              borderRadius: themeCssVariables.border.radius.sm,
-              padding: themeCssVariables.spacing[3],
-            }}>
+            <div
+              style={{
+                background: themeCssVariables.background.secondary,
+                borderRadius: themeCssVariables.border.radius.sm,
+                padding: themeCssVariables.spacing[3],
+              }}
+            >
               <strong>{t('Before you connect')}</strong>
               <p style={styles.muted}>
-                {t('This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages and available images, videos, and audio from matched People are shared with permitted workspace members. Available earlier history is stored encrypted on the bridge for optional review and is shared only if you import it.')}
+                {t(
+                  'This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages and available images, videos, and audio from matched People are shared with permitted workspace members. Available earlier history is stored encrypted on the bridge for optional review and is shared only if you import it.',
+                )}
               </p>
               <a href="https://www.whatsapp.com/legal/terms-of-service" target="_blank" rel="noreferrer">
                 {t('Read WhatsApp terms')}
               </a>
             </div>
             <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
-              <FrontComponentCheckbox checked={ownsNumber} onChange={(event) => setOwnsNumber(event.target.checked)} aria-label={t('I control this WhatsApp number')} />
+              <FrontComponentCheckbox
+                checked={ownsNumber}
+                onChange={(event) => setOwnsNumber(event.target.checked)}
+                aria-label={t('I control this WhatsApp number')}
+              />
               {t('I control this WhatsApp number and can authorize its connection.')}
             </label>
             <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
-              <FrontComponentCheckbox checked={acceptsRisk} onChange={(event) => setAcceptsRisk(event.target.checked)} aria-label={t('I understand the unofficial connection risk')} />
+              <FrontComponentCheckbox
+                checked={acceptsRisk}
+                onChange={(event) => setAcceptsRisk(event.target.checked)}
+                aria-label={t('I understand the unofficial connection risk')}
+              />
               {t('I understand an unofficial linked-device connection may be restricted or disconnected.')}
             </label>
             <div>

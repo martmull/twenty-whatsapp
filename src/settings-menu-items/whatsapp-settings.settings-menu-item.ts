@@ -7,8 +7,7 @@ import {
 
 export default defineSettingsMenuItem({
   universalIdentifier: SETTINGS_MENU_ITEM_UNIVERSAL_IDENTIFIER,
-  frontComponentUniversalIdentifier:
-    SETTINGS_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
+  frontComponentUniversalIdentifier: SETTINGS_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
   title: 'WhatsApp',
   icon: 'IconBrandWhatsapp',
 });

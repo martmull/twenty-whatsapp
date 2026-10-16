@@ -1,7 +1,17 @@
 import { CoreApiClient } from 'twenty-client-sdk/core';
 
-import { bridgeJsonRequest, bridgeRequest } from 'src/logic-functions/bridge-request';
+import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { importMessageMedia } from 'src/logic-functions/message-media';
+import type { Logger } from 'src/logic-functions/utils/logger';
+import {
+  chatNumber,
+  digits,
+  isChatId,
+  isDirectChatId,
+  isEventId,
+  isGroupChatId,
+  isPhoneLikeName,
+} from 'src/logic-functions/utils/validators';
 
 export type Conversation = {
   id: string;
@@ -18,14 +28,14 @@ export type Message = {
   id: string;
   conversationId: string;
   externalId?: string | null;
-  direction: string;
+  direction: 'INBOUND' | 'OUTBOUND';
   text: string;
   sentAt: string;
-  deliveryState: string;
+  deliveryState: 'UNKNOWN' | 'SENT' | 'RECEIVED';
   requestId?: string | null;
   senderId?: string | null;
   senderName?: string | null;
-  mediaKind?: string | null;
+  mediaKind?: 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT' | null;
   media?: { fileId: string; label?: string | null; url?: string | null }[] | null;
 };
 
@@ -35,6 +45,7 @@ export type Person = {
   phones?: { primaryPhoneNumber?: string | null; primaryPhoneCallingCode?: string | null } | null;
 };
 
+// Message as queued by the bridge (lowercase values, converted when stored in Twenty).
 export type BridgeMessageEvent = {
   eventId: string;
   chatId: string;
@@ -47,10 +58,51 @@ export type BridgeMessageEvent = {
   media?: { kind: 'image' | 'video' | 'audio'; mimeType: string; fileName: string; sizeBytes?: number };
 };
 
+// The records of a GraphQL connection (`edges[].node`), typed by the caller. The generated client
+// marks every field optional, so callers state the fields they selected.
+export const nodesOf = <T>(connection: { edges?: { node: unknown }[] } | null | undefined): T[] =>
+  (connection?.edges ?? []).map((edge) => edge.node as T);
+
+// Bridge media kinds as the values of the message mediaKind select field.
+export const MEDIA_KIND_VALUES = { image: 'IMAGE', video: 'VIDEO', audio: 'AUDIO', document: 'DOCUMENT' } as const;
+
 export const applicationClient = () => new CoreApiClient({ runAs: 'application' });
 export const userClient = () => new CoreApiClient({ runAs: 'user' });
 
-const digits = (value: string) => value.replace(/\D/g, '');
+export const CONVERSATION_FIELDS = {
+  id: true,
+  name: true,
+  chatId: true,
+  personId: true,
+  accountId: true,
+  lastMessageAt: true,
+  lastInboundAt: true,
+  lastPreview: true,
+} as const;
+export const MESSAGE_FIELDS = {
+  id: true,
+  conversationId: true,
+  externalId: true,
+  direction: true,
+  text: true,
+  sentAt: true,
+  deliveryState: true,
+  requestId: true,
+  senderId: true,
+  senderName: true,
+  mediaKind: true,
+  media: { fileId: true, label: true, url: true },
+} as const;
+
+export const isValidBridgeEvent = (event: BridgeMessageEvent) =>
+  isEventId(event.eventId) &&
+  isChatId(event.chatId) &&
+  Boolean(event.text) &&
+  event.text.length <= 4096 &&
+  (!event.direction || event.direction === 'inbound' || event.direction === 'outbound') &&
+  Number.isFinite(Date.parse(event.sentAt));
+
+export const personName = (person: Person) => [person.name.firstName, person.name.lastName].filter(Boolean).join(' ');
 
 const personPhone = (person: Person): string => {
   const phone = person.phones?.primaryPhoneNumber ?? '';
@@ -63,213 +115,148 @@ const personPhone = (person: Person): string => {
   return digits(callingCode) + digits(phone).replace(/^0/, '');
 };
 
-export const findPeopleByPhone = async (client: CoreApiClient): Promise<Map<string, Person[]>> => {
+// The ways an international number like 33612345678 may be stored in a Person's primary phone.
+const storedPhoneVariants = (number: string): string[] => {
+  const variants = new Set([number, `+${number}`]);
+
+  for (let callingCodeLength = 1; callingCodeLength <= 3; callingCodeLength += 1) {
+    const national = number.slice(callingCodeLength);
+    variants.add(national);
+    variants.add(`0${national}`);
+  }
+
+  return [...variants];
+};
+
+// Returns the People whose primary phone matches each number (digits only, with country code).
+export const findPeopleByPhones = async (client: CoreApiClient, numbers: string[]): Promise<Map<string, Person[]>> => {
+  const wanted = new Set(numbers);
   const peopleByPhone = new Map<string, Person[]>();
-  let after: string | undefined;
 
-  for (let page = 0; page < 100; page += 1) {
-    const result = await client.query({
-      people: {
-        __args: { first: 100, after },
-        edges: { node: { id: true, name: { firstName: true, lastName: true }, phones: { primaryPhoneNumber: true, primaryPhoneCallingCode: true } } },
-        pageInfo: { hasNextPage: true, endCursor: true },
+  if (wanted.size === 0) {
+    return peopleByPhone;
+  }
+
+  const result = await client.query({
+    people: {
+      __args: {
+        filter: { phones: { primaryPhoneNumber: { in: [...wanted].flatMap(storedPhoneVariants) } } },
+        first: 200,
       },
-    });
-    const connection = result.people as { edges?: { node: Person }[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } } | undefined;
+      edges: {
+        node: {
+          id: true,
+          name: { firstName: true, lastName: true },
+          phones: { primaryPhoneNumber: true, primaryPhoneCallingCode: true },
+        },
+      },
+    },
+  });
 
-    for (const { node } of connection?.edges ?? []) {
-      const number = personPhone(node);
+  for (const { node } of (result.people?.edges ?? []) as { node: Person }[]) {
+    const number = personPhone(node);
 
-      if (number) {
-        peopleByPhone.set(number, [...(peopleByPhone.get(number) ?? []), node]);
-      }
-    }
-
-    if (!connection?.pageInfo?.hasNextPage) {
-      return peopleByPhone;
-    }
-
-    after = connection.pageInfo.endCursor ?? undefined;
-
-    if (!after) {
-      throw new Error('Person pagination stopped unexpectedly');
+    if (wanted.has(number)) {
+      peopleByPhone.set(number, [...(peopleByPhone.get(number) ?? []), node]);
     }
   }
 
-  throw new Error('Person match limit reached');
+  return peopleByPhone;
 };
 
-const findAccount = async (client: CoreApiClient, phoneNumber: string): Promise<{ id: string; state: string } | undefined> => {
+export const ensureAccount = async (client: CoreApiClient, phoneNumber: string): Promise<string> => {
   const result = await client.query({
     whatsappAccounts: {
       __args: { filter: { phoneNumber: { eq: phoneNumber } }, first: 1 },
       edges: { node: { id: true, state: true } },
     },
   });
+  const account = result.whatsappAccounts?.edges?.[0]?.node;
 
-  return result.whatsappAccounts?.edges?.[0]?.node as { id: string; state: string } | undefined;
+  if (!account) {
+    const created = await client.mutation({
+      createWhatsappAccount: { __args: { data: { name: phoneNumber, phoneNumber, state: 'CONNECTED' } }, id: true },
+    });
+    const id = created.createWhatsappAccount?.id;
+
+    if (!id) {
+      throw new Error('Could not create WhatsApp account');
+    }
+
+    return id;
+  }
+
+  if (account.state !== 'CONNECTED') {
+    await client.mutation({
+      updateWhatsappAccount: { __args: { id: account.id, data: { state: 'CONNECTED' } }, id: true },
+    });
+  }
+
+  return account.id;
 };
 
-export const findConversation = async (client: CoreApiClient, accountId: string, chatId: string): Promise<Conversation | undefined> => {
+export const findConversation = async (
+  client: CoreApiClient,
+  accountId: string,
+  chatId: string,
+): Promise<Conversation | undefined> => {
   const result = await client.query({
     whatsappConversations: {
       __args: { filter: { accountId: { eq: accountId }, chatId: { eq: chatId } }, first: 1 },
-      edges: { node: { id: true, name: true, chatId: true, personId: true, accountId: true, lastMessageAt: true, lastInboundAt: true, lastPreview: true } },
+      edges: { node: CONVERSATION_FIELDS },
     },
   });
 
   return result.whatsappConversations?.edges?.[0]?.node as Conversation | undefined;
 };
 
-const findMessageByExternalId = async (client: CoreApiClient, externalId: string): Promise<Message | undefined> => {
+export const findMessageByRequestId = async (
+  client: CoreApiClient,
+  requestId: string,
+): Promise<Message | undefined> => {
   const result = await client.query({
     whatsappMessages: {
-      __args: { filter: { externalId: { eq: externalId } }, first: 1 },
-      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true, url: true } } },
+      __args: { filter: { requestId: { eq: requestId } }, first: 1 },
+      edges: { node: MESSAGE_FIELDS },
     },
   });
 
   return result.whatsappMessages?.edges?.[0]?.node as Message | undefined;
 };
 
-export const ensureAccount = async (client: CoreApiClient, phoneNumber: string): Promise<string> => {
-  const account = await findAccount(client, phoneNumber);
-  let accountId = account?.id;
+const attachMedia = async (client: CoreApiClient, event: BridgeMessageEvent): Promise<void> => {
+  const result = await client.query({
+    whatsappMessages: {
+      __args: { filter: { externalId: { eq: event.eventId } }, first: 1 },
+      edges: { node: { id: true, media: { fileId: true } } },
+    },
+  });
+  const message = result.whatsappMessages?.edges?.[0]?.node;
 
-  if (!accountId) {
-    const created = await client.mutation({
-      createWhatsappAccount: { __args: { data: { name: phoneNumber, phoneNumber, state: 'connected' } }, id: true },
-    });
-    accountId = created.createWhatsappAccount?.id;
-  } else if (account?.state !== 'connected') {
-    await client.mutation({
-      updateWhatsappAccount: { __args: { id: accountId, data: { state: 'connected' } }, id: true },
-    });
-  }
-
-  if (!accountId) {
-    throw new Error('Could not create WhatsApp account');
-  }
-
-  return accountId;
-};
-
-const attachMedia = async (client: CoreApiClient, event: BridgeMessageEvent, message: Message): Promise<void> => {
-  if (!event.media) {
-    return;
-  }
-
-  if (message.mediaKind !== event.media.kind) {
-    await client.mutation({
-      updateWhatsappMessage: {
-        __args: { id: message.id, data: { mediaKind: event.media.kind } },
-        id: true,
-      },
-    });
-  }
-  if (message.media?.length) {
+  if (!message || message.media?.length) {
     return;
   }
 
   const file = await importMessageMedia(event);
-  if (!file) {
-    return;
-  }
 
-  await client.mutation({
-    updateWhatsappMessage: {
-      __args: { id: message.id, data: { media: [file] } },
-      id: true,
-    },
-  });
-};
-
-export const importMessageForPerson = async (client: CoreApiClient, accountId: string, event: BridgeMessageEvent, person: Person): Promise<boolean> => {
-  if (!/^[a-f\d]{64}$/.test(event.eventId) || !/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound') || !Number.isFinite(Date.parse(event.sentAt))) {
-    throw new Error('Invalid bridge event');
-  }
-
-  let conversation = await findConversation(client, accountId, event.chatId);
-
-  if (!conversation) {
-    const name = [person.name.firstName, person.name.lastName].filter(Boolean).join(' ') || event.chatId.split('@')[0];
-    const created = await client.mutation({
-      createWhatsappConversation: {
-        __args: { data: { name, chatId: event.chatId, personId: person.id, linkedPersonId: person.id, accountId } },
-        id: true,
-      },
-    });
-    const id = created.createWhatsappConversation?.id;
-
-    if (!id) {
-      throw new Error('Could not create WhatsApp conversation');
-    }
-
-    conversation = { id, name, chatId: event.chatId, personId: person.id, accountId };
-  }
-
-  const existing = await findMessageByExternalId(client, event.eventId);
-
-  if (!existing) {
-    const created = await client.mutation({
-      createWhatsappMessage: {
-        __args: {
-          data: {
-            name: event.text.slice(0, 80),
-            conversationId: conversation.id,
-            externalId: event.eventId,
-            direction: event.direction ?? 'inbound',
-            text: event.text,
-            sentAt: event.sentAt,
-            deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
-            ...(event.media ? { mediaKind: event.media.kind } : {}),
-          },
-        },
-        id: true,
-      },
-    });
-    if (!created.createWhatsappMessage?.id) {
-      throw new Error('Could not create WhatsApp message');
-    }
-  }
-
-  if (event.media) {
-    const message = existing ?? await findMessageByExternalId(client, event.eventId);
-    if (!message) {
-      throw new Error('Could not find imported WhatsApp message');
-    }
-    await attachMedia(client, event, message);
-  }
-
-  const updateLastMessage = !conversation.lastMessageAt || event.sentAt >= conversation.lastMessageAt;
-  const updateLastInbound = event.direction !== 'outbound' && (!conversation.lastInboundAt || event.sentAt >= conversation.lastInboundAt);
-
-  if (updateLastMessage || updateLastInbound) {
+  if (file) {
     await client.mutation({
-      updateWhatsappConversation: {
-        __args: { id: conversation.id, data: {
-          ...(updateLastMessage ? { lastMessageAt: event.sentAt, lastPreview: event.text.slice(0, 160) } : {}),
-          ...(updateLastInbound ? { lastInboundAt: event.sentAt } : {}),
-        } },
-        id: true,
-      },
+      updateWhatsappMessage: { __args: { id: message.id, data: { media: [file] } }, id: true },
     });
-    if (updateLastMessage) conversation.lastMessageAt = event.sentAt;
-    if (updateLastInbound) conversation.lastInboundAt = event.sentAt;
   }
-
-  return !existing;
 };
 
-export const importHistoryMessages = async (client: CoreApiClient, accountId: string, chatId: string, name: string, events: BridgeMessageEvent[], person?: Person): Promise<number> => {
-  if (!/^\d{7,15}@s\.whatsapp\.net$/.test(chatId) && !/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(chatId)) {
-    throw new Error('Invalid chat ID');
-  }
-
-  for (const event of events) {
-    if (event.chatId !== chatId || !/^[a-f\d]{64}$/.test(event.eventId) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound') || !Number.isFinite(Date.parse(event.sentAt))) {
-      throw new Error('Invalid bridge event');
-    }
+// Stores a batch of messages from one chat, creating the conversation when needed. Safe to retry.
+export const importChatMessages = async (
+  client: CoreApiClient,
+  accountId: string,
+  chatId: string,
+  name: string,
+  events: BridgeMessageEvent[],
+  person?: Person,
+): Promise<number> => {
+  if (!isChatId(chatId) || events.some((event) => event.chatId !== chatId || !isValidBridgeEvent(event))) {
+    throw new Error('Invalid bridge event');
   }
 
   let conversation = await findConversation(client, accountId, chatId);
@@ -277,7 +264,7 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
   if (!conversation) {
     const created = await client.mutation({
       createWhatsappConversation: {
-        __args: { data: { name, chatId, ...(person ? { personId: person.id, linkedPersonId: person.id } : {}), accountId } },
+        __args: { data: { name, chatId, accountId, ...(person ? { personId: person.id } : {}) } },
         id: true,
       },
     });
@@ -287,15 +274,14 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
       throw new Error('Could not create WhatsApp conversation');
     }
 
-    conversation = { id, name, chatId, personId: person?.id, accountId };
-  } else if (/^\+?\d+$/.test(conversation.name) && name.trim() && !/^\+?\d+$/.test(name.trim())) {
+    conversation = { id, name, chatId, accountId, personId: person?.id };
+  } else if (isPhoneLikeName(conversation.name) && name.trim() && !isPhoneLikeName(name)) {
     await client.mutation({
       updateWhatsappConversation: {
         __args: { id: conversation.id, data: { name: name.trim().slice(0, 120) } },
         id: true,
       },
     });
-    conversation.name = name.trim().slice(0, 120);
   }
 
   if (events.length === 0) {
@@ -308,29 +294,28 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
       edges: { node: { externalId: true } },
     },
   });
-
-  if (!existing.whatsappMessages) {
-    throw new Error('Could not check existing WhatsApp messages');
-  }
-
-  const existingIds = new Set(existing.whatsappMessages.edges.map(({ node }) => node.externalId));
+  const existingIds = new Set(
+    nodesOf<{ externalId: string }>(existing.whatsappMessages).map((message) => message.externalId),
+  );
   const missing = events.filter((event) => !existingIds.has(event.eventId));
 
   if (missing.length > 0) {
     const created = await client.mutation({
       createWhatsappMessages: {
-        __args: { data: missing.map((event) => ({
-          name: event.text.slice(0, 80),
-          conversationId: conversation.id,
-          externalId: event.eventId,
-          direction: event.direction ?? 'inbound',
-          text: event.text,
-          sentAt: event.sentAt,
-          deliveryState: event.direction === 'outbound' ? 'sent' : 'received',
-          ...(event.media ? { mediaKind: event.media.kind } : {}),
-          ...(event.senderId ? { senderId: event.senderId } : {}),
-          ...(event.senderName ? { senderName: event.senderName } : {}),
-        })) },
+        __args: {
+          data: missing.map((event) => ({
+            name: event.text.slice(0, 80),
+            conversationId: conversation.id,
+            externalId: event.eventId,
+            direction: event.direction === 'outbound' ? 'OUTBOUND' : 'INBOUND',
+            text: event.text,
+            sentAt: event.sentAt,
+            deliveryState: event.direction === 'outbound' ? 'SENT' : 'RECEIVED',
+            ...(event.media ? { mediaKind: MEDIA_KIND_VALUES[event.media.kind] } : {}),
+            ...(event.senderId ? { senderId: event.senderId } : {}),
+            ...(event.senderName ? { senderName: event.senderName } : {}),
+          })),
+        },
         id: true,
       },
     });
@@ -340,29 +325,28 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
     }
   }
 
-  for (const event of events) {
-    if (!event.media) {
-      continue;
-    }
-    const message = await findMessageByExternalId(client, event.eventId);
-    if (!message) {
-      throw new Error('Could not find imported WhatsApp message');
-    }
-    await attachMedia(client, event, message);
+  for (const event of events.filter((item) => item.media)) {
+    await attachMedia(client, event);
   }
 
-  const latest = events.reduce((current, event) => event.sentAt > current.sentAt ? event : current);
-  const latestInbound = events.filter((event) => event.direction !== 'outbound').reduce<BridgeMessageEvent | undefined>((current, event) => !current || event.sentAt > current.sentAt ? event : current, undefined);
+  const latest = events.reduce((current, event) => (event.sentAt > current.sentAt ? event : current));
+  const latestInbound = events
+    .filter((event) => event.direction !== 'outbound')
+    .sort((left, right) => right.sentAt.localeCompare(left.sentAt))[0];
   const updateLastMessage = !conversation.lastMessageAt || latest.sentAt >= conversation.lastMessageAt;
-  const updateLastInbound = latestInbound && (!conversation.lastInboundAt || latestInbound.sentAt >= conversation.lastInboundAt);
+  const updateLastInbound =
+    latestInbound && (!conversation.lastInboundAt || latestInbound.sentAt >= conversation.lastInboundAt);
 
   if (updateLastMessage || updateLastInbound) {
     await client.mutation({
       updateWhatsappConversation: {
-        __args: { id: conversation.id, data: {
-          ...(updateLastMessage ? { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } : {}),
-          ...(updateLastInbound ? { lastInboundAt: latestInbound.sentAt } : {}),
-        } },
+        __args: {
+          id: conversation.id,
+          data: {
+            ...(updateLastMessage ? { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } : {}),
+            ...(updateLastInbound ? { lastInboundAt: latestInbound.sentAt } : {}),
+          },
+        },
         id: true,
       },
     });
@@ -371,136 +355,130 @@ export const importHistoryMessages = async (client: CoreApiClient, accountId: st
   return missing.length;
 };
 
-export const importHistoryMessagesForPerson = async (client: CoreApiClient, accountId: string, events: BridgeMessageEvent[], person: Person): Promise<number> => {
-  if (events.length === 0) {
-    return 0;
-  }
+// Imports the messages queued by the bridge. Direct chats need exactly one matching Person;
+// group chats are imported only once an admin has selected them (the conversation exists).
+export const syncMessages = async (logger: Logger): Promise<{ imported: number; ignored: number }> => {
+  const status = await getBridgeStatus();
 
-  const name = [person.name.firstName, person.name.lastName].filter(Boolean).join(' ') || events[0].chatId.split('@')[0];
-  return importHistoryMessages(client, accountId, events[0].chatId, name, events, person);
-};
-
-export const findMessageByRequestId = async (client: CoreApiClient, requestId: string): Promise<Message | undefined> => {
-  const result = await client.query({
-    whatsappMessages: {
-      __args: { filter: { requestId: { eq: requestId } }, first: 1 },
-      edges: { node: { id: true, conversationId: true, externalId: true, direction: true, text: true, sentAt: true, deliveryState: true, requestId: true, mediaKind: true, media: { fileId: true } } },
-    },
-  });
-
-  return result.whatsappMessages?.edges?.[0]?.node as Message | undefined;
-};
-
-const syncConversationNames = async (client: CoreApiClient, accountId: string): Promise<void> => {
-  let after: string | undefined;
-
-  for (let page = 0; page < 100; page += 1) {
-    const result = await client.query({
-      whatsappConversations: {
-        __args: { filter: { accountId: { eq: accountId } }, first: 100, after },
-        edges: { node: { id: true, chatId: true, name: true } },
-        pageInfo: { hasNextPage: true, endCursor: true },
-      },
-    });
-    const connection = result.whatsappConversations;
-    const conversations = (connection?.edges ?? []).map(({ node }) => node);
-    if (conversations.length > 0) {
-      const names = await bridgeJsonRequest<{ chatId: string; name: string }[]>('/history/names', {
-        chatIds: conversations.map((conversation) => conversation.chatId).filter((chatId): chatId is string => typeof chatId === 'string'),
-      });
-      const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name]));
-
-      for (const conversation of conversations) {
-        if (!conversation.chatId) {
-          continue;
-        }
-        const name = nameByChatId.get(conversation.chatId)?.trim().slice(0, 120);
-        if (name && !/^\+?\d+$/.test(name) && name !== conversation.name) {
-          await client.mutation({
-            updateWhatsappConversation: {
-              __args: { id: conversation.id, data: { name } },
-              id: true,
-            },
-          });
-        }
-      }
-    }
-
-    if (!connection?.pageInfo?.hasNextPage) {
-      return;
-    }
-    after = connection.pageInfo.endCursor ?? undefined;
-    if (!after) {
-      throw new Error('Conversation pagination stopped unexpectedly');
-    }
-  }
-
-  throw new Error('Conversation name sync limit reached');
-};
-
-export const syncMessages = async (): Promise<{ imported: number; ignored: number }> => {
-  const status = await bridgeRequest('/status');
-  const phoneNumber = status.phoneNumber ? `+${digits(status.phoneNumber)}` : undefined;
-
-  if (!phoneNumber || status.state !== 'connected') {
+  if (status.state !== 'connected' || !status.phoneNumber) {
+    logger.info('Bridge not connected, nothing to sync', { state: status.state });
     return { imported: 0, ignored: 0 };
   }
 
   const client = applicationClient();
-  const accountId = await ensureAccount(client, phoneNumber);
+  const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
+  const { leaseId, events } = await bridgePost<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
 
-  const { leaseId, events } = await bridgeJsonRequest<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
-
-  if (!leaseId || events.length === 0) {
-    await syncConversationNames(client, accountId).catch(() => undefined);
+  if (!leaseId) {
     return { imported: 0, ignored: 0 };
   }
 
-  let completed = false;
   let imported = 0;
   let ignored = 0;
+  let completed = false;
+
   try {
-    const peopleByPhone = await findPeopleByPhone(client);
-
+    // Media uploads are slow: stop the batch after the first one, the bridge asks again for the rest.
     const firstMediaIndex = events.findIndex((event) => event.media);
-    for (const event of firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1)) {
-      const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(event.chatId);
-      if (!/^[a-f\d]{64}$/.test(event.eventId) || (!/^\d{7,15}@s\.whatsapp\.net$/.test(event.chatId) && !isGroup) || !event.text || event.text.length > 4096 || (event.direction && event.direction !== 'inbound' && event.direction !== 'outbound')) {
-        throw new Error('Invalid bridge event');
-      }
+    const batch = firstMediaIndex < 0 ? events : events.slice(0, firstMediaIndex + 1);
+    const invalid = batch.filter((event) => !isValidBridgeEvent(event));
+    const eventsByChat = new Map<string, BridgeMessageEvent[]>();
+    for (const event of batch.filter(isValidBridgeEvent)) {
+      eventsByChat.set(event.chatId, [...(eventsByChat.get(event.chatId) ?? []), event]);
+    }
+    const people = await findPeopleByPhones(client, [...eventsByChat.keys()].filter(isDirectChatId).map(chatNumber));
 
-      if (isGroup) {
-        const conversation = await findConversation(client, accountId, event.chatId);
+    if (invalid.length > 0) {
+      logger.warn('Dropping invalid bridge events', { count: invalid.length });
+      await bridgePost('/events/ack', { eventIds: invalid.map((event) => event.eventId) });
+    }
 
-        if (conversation) {
-          imported += await importHistoryMessages(client, accountId, event.chatId, conversation.name, [event]);
+    for (const [chatId, chatEvents] of eventsByChat) {
+      try {
+        if (isGroupChatId(chatId)) {
+          const conversation = await findConversation(client, accountId, chatId);
+
+          if (conversation) {
+            imported += await importChatMessages(client, accountId, chatId, conversation.name, chatEvents);
+          } else {
+            ignored += chatEvents.length;
+          }
         } else {
-          ignored += 1;
+          const matches = people.get(chatNumber(chatId)) ?? [];
+
+          if (matches.length === 1) {
+            imported += await importChatMessages(
+              client,
+              accountId,
+              chatId,
+              personName(matches[0]) || chatNumber(chatId),
+              chatEvents,
+              matches[0],
+            );
+          } else {
+            ignored += chatEvents.length;
+          }
         }
 
-        await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
-        continue;
+        await bridgePost('/events/ack', { eventIds: chatEvents.map((event) => event.eventId) });
+      } catch (error) {
+        // Keep the chat's events queued for the next sync and carry on with the other chats.
+        logger.error('Could not import chat', {
+          chatId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-
-      const candidates = peopleByPhone.get(event.chatId.split('@')[0]) ?? [];
-
-      if (candidates.length !== 1) {
-        ignored += 1;
-        await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
-        continue;
-      }
-
-      if (await importMessageForPerson(client, accountId, event, candidates[0])) {
-        imported += 1;
-      }
-
-      await bridgeJsonRequest('/events/ack', { eventIds: [event.eventId] });
     }
 
     completed = true;
   } finally {
-    await bridgeJsonRequest('/events/release', { leaseId, completed }).catch(() => undefined);
+    await bridgePost('/events/release', { leaseId, completed }).catch(() => undefined);
   }
-  await syncConversationNames(client, accountId).catch(() => undefined);
+
+  logger.info('Synced messages', { imported, ignored });
   return { imported, ignored };
+};
+
+// Updates conversation names from WhatsApp contact names. Runs from the cron only.
+export const syncConversationNames = async (logger: Logger): Promise<void> => {
+  const client = applicationClient();
+  let after: string | undefined;
+  let renamed = 0;
+
+  for (let page = 0; page < 100; page += 1) {
+    const result = await client.query({
+      whatsappConversations: {
+        __args: { first: 100, after },
+        edges: { node: { id: true, chatId: true, name: true } },
+        pageInfo: { hasNextPage: true, endCursor: true },
+      },
+    });
+    const conversations = nodesOf<{ id: string; chatId: string; name: string }>(result.whatsappConversations);
+
+    if (conversations.length > 0) {
+      const names = await bridgePost<{ chatId: string; name: string }[]>('/history/names', {
+        chatIds: conversations.map((conversation) => conversation.chatId),
+      });
+      const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name.trim().slice(0, 120)]));
+
+      for (const conversation of conversations) {
+        const name = nameByChatId.get(conversation.chatId);
+
+        if (name && !isPhoneLikeName(name) && name !== conversation.name) {
+          await client.mutation({
+            updateWhatsappConversation: { __args: { id: conversation.id, data: { name } }, id: true },
+          });
+          renamed += 1;
+        }
+      }
+    }
+
+    after = result.whatsappConversations?.pageInfo?.endCursor ?? undefined;
+
+    if (!result.whatsappConversations?.pageInfo?.hasNextPage || !after) {
+      break;
+    }
+  }
+
+  logger.info('Synced conversation names', { renamed });
 };

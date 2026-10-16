@@ -1,6 +1,6 @@
 {
   "name": "twenty-whatsapp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
   "engines": {
@@ -14,14 +14,38 @@
   ],
   "packageManager": "yarn@4.13.0",
   "scripts": {
-    "twenty": "twenty"
+    "twenty": "twenty",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.*"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/react": "^19.2.0",
+    "eslint": "^10.0.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.10",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "tsx": "^4.20.0",
     "twenty-sdk": "2.45.0",
     "twenty-ui": "2.45.0",
-    "typescript": "^5.9.3"
-  }
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2"
+  },
+  "frontComponentSharedDependencies": [
+    "react",
+    "react-dom/client",
+    "twenty-ui/components",
+    "twenty-ui/icon",
+    "twenty-ui/primitives/data-display",
+    "twenty-ui/primitives/input",
+    "twenty-ui/primitives/navigation",
+    "twenty-ui/primitives/surfaces",
+    "twenty-ui/primitives/typography",
+    "twenty-ui/theme"
+  ]
 }
