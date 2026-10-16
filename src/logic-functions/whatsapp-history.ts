@@ -20,6 +20,7 @@ type HistoryRequest = {
   chatId?: string;
   chats?: ImportChat[];
   jobIds?: string[];
+  acknowledged?: boolean;
 };
 
 type HistoryCandidate = {
@@ -127,6 +128,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
   const ownNumber = digits(status.phoneNumber);
 
   if (
+    request.acknowledged !== true ||
     !Array.isArray(chats) ||
     chats.length === 0 ||
     chats.length > MAX_JOBS ||

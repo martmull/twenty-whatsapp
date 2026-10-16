@@ -1,32 +1,58 @@
 import { useEffect, useRef, useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
-import {
-  AppPath,
-  enqueueSnackbar,
-  navigate,
-  t,
-  useColorScheme,
-  type UploadedFrontComponentFile,
-} from 'twenty-sdk/front-component';
+import { t, useColorScheme, type UploadedFrontComponentFile } from 'twenty-sdk/front-component';
 import { getPublicAssetUrl } from 'twenty-sdk/utils';
-import { Callout } from 'twenty-ui/components';
-import { Button } from 'twenty-ui/primitives/input';
 import { themeCssVariables } from 'twenty-ui/theme';
-import 'twenty-ui/style.css';
 
-import { callApp, showError } from 'src/front-components/components/app-api';
-import { ConversationList } from 'src/front-components/components/ConversationList';
+import { PreviewButton, getPreviewStyles } from 'src/front-components/components/PreviewUi';
 import { createRequestId } from 'src/front-components/components/createRequestId';
-import type { InboxData, Message } from 'src/front-components/components/inbox-types';
-import { MessageBubble } from 'src/front-components/components/MessageBubble';
-import { MessageComposer, type PendingFile } from 'src/front-components/components/MessageComposer';
 import { uploadWhatsAppAttachment } from 'src/front-components/components/uploadWhatsAppAttachment';
+
+type PendingAttachment = { id: string; file: File; uploaded?: UploadedFrontComponentFile };
+const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
+
+type Conversation = {
+  id: string;
+  name: string;
+  personId: string;
+  chatId: string;
+  lastMessageAt?: string | null;
+  lastInboundAt?: string | null;
+  lastReadAt?: string | null;
+  lastPreview?: string | null;
+  unread?: boolean;
+};
+
+type Message = {
+  id: string;
+  direction: string;
+  text: string;
+  sentAt: string;
+  deliveryState: string;
+  senderId?: string | null;
+  senderName?: string | null;
+  mediaKind?: string | null;
+  media?: { fileId: string; label?: string | null; url?: string | null }[] | null;
+};
+
+type GroupMember = {
+  id: string;
+  phoneNumber?: string;
+  displayName?: string;
+  isMe?: boolean;
+};
+
+type InboxData = {
+  conversations: Conversation[];
+  selectedConversationId?: string;
+  messages: Message[];
+  groupMembers?: GroupMember[];
+  connectionState: 'disconnected' | 'pairing' | 'connected' | 'reconnecting' | 'unavailable';
+};
 
 const POLL_INTERVAL_MS = 5_000;
 // Every Nth poll reloads anyway, to pick up connection changes.
 const FULL_RELOAD_EVERY = 12;
-
-type SendResult = { state: 'sent' | 'unknown' };
 
 // Cheap check through the REST API: the newest conversation activity visible to this member.
 const fetchLatestActivity = async (personId?: string): Promise<string | undefined> => {
@@ -43,68 +69,98 @@ const fetchLatestActivity = async (personId?: string): Promise<string | undefine
   return response.data?.whatsappConversations?.[0]?.lastMessageAt;
 };
 
-export const WhatsAppThread = ({ personId }: { personId?: string }) => {
+type WhatsAppThreadProps = { personId?: string };
+
+// http(s) URLs only, so a message can never produce a javascript: link.
+// Trailing punctuation (as in "see https://example.com.") stays outside the link.
+const URL_PATTERN = /(https?:\/\/[^\s]*[^\s.,;:!?)\]'"])/gi;
+
+// Renders message text with its URLs as links opening in a new tab.
+const TextWithLinks = ({ text }: { text: string }) =>
+  text.split(URL_PATTERN).map((part, index) =>
+    index % 2 === 1 ? (
+      <a key={index} href={part} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>
+        {part}
+      </a>
+    ) : (
+      part
+    ),
+  );
+
+const formatTime = (value?: string | null) =>
+  value ? new Date(value).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '';
+
+export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
+  const styles = getPreviewStyles();
   const isDark = useColorScheme() === 'dark';
   const [data, setData] = useState<InboxData>();
-  const [olderMessages, setOlderMessages] = useState<Message[]>([]);
-  const [hasOlderMessages, setHasOlderMessages] = useState(false);
-  const [search, setSearch] = useState('');
-  const [sending, setSending] = useState(false);
+  const [selectedId, setSelectedId] = useState<string>();
   const selectedIdRef = useRef<string | undefined>(undefined);
-  const threadIdRef = useRef<string | undefined>(undefined);
-  const searchRef = useRef('');
-  // Kept across retries so a failed send is never delivered twice.
-  const textRequestRef = useRef<{ text: string; requestId: string } | undefined>(undefined);
-  const uploadedRef = useRef(new Map<string, UploadedFrontComponentFile>());
+  const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [requestId, setRequestId] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const [sendingLabel, setSendingLabel] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [showGroupMembers, setShowGroupMembers] = useState(false);
 
-  const markRead = async (next: InboxData) => {
+  const markSelectedRead = async (next: InboxData) => {
     const conversation = next.conversations.find((item) => item.id === next.selectedConversationId);
 
-    if (!conversation?.unread || !conversation.lastInboundAt) return;
+    if (
+      !conversation?.unread ||
+      !conversation.lastInboundAt ||
+      !next.messages.some((message) => message.direction === 'INBOUND' && message.sentAt === conversation.lastInboundAt)
+    ) {
+      return;
+    }
 
-    const { lastReadAt } = await callApp<{ lastReadAt: string }>('messages/read', {
-      conversationId: conversation.id,
-      readThroughAt: conversation.lastInboundAt,
-    }).catch(() => ({ lastReadAt: undefined }));
+    try {
+      const result = await new RestApiClient().post<{ lastReadAt: string }>('/s/whatsapp/messages/read', {
+        conversationId: conversation.id,
+        readThroughAt: conversation.lastInboundAt,
+      });
 
-    if (lastReadAt) {
-      setData(
-        (previous) =>
-          previous && {
-            ...previous,
-            conversations: previous.conversations.map((item) =>
-              item.id === conversation.id ? { ...item, lastReadAt, unread: false } : item,
-            ),
-          },
+      setData((previous) =>
+        previous
+          ? {
+              ...previous,
+              conversations: previous.conversations.map((item) =>
+                item.id === conversation.id && item.lastInboundAt && item.lastInboundAt <= result.lastReadAt
+                  ? { ...item, lastReadAt: result.lastReadAt, unread: false }
+                  : item,
+              ),
+            }
+          : previous,
       );
+    } catch {
+      // Keep the unread state so the next refresh can retry.
     }
   };
 
-  const load = async () => {
-    const requestedId = selectedIdRef.current;
+  const load = async (conversationId?: string, silent = false) => {
+    if (!silent) {
+      setLoading(true);
+    }
 
     try {
-      const next = await callApp<InboxData>('messages/list', {
+      const next = await new RestApiClient().post<InboxData>('/s/whatsapp/messages/list', {
         ...(personId ? { personId } : {}),
-        ...(requestedId ? { conversationId: requestedId } : {}),
-        ...(searchRef.current ? { search: searchRef.current } : {}),
+        ...(conversationId ? { conversationId } : {}),
       });
-
-      // The member picked another conversation while this was loading.
-      if (requestedId !== selectedIdRef.current) return;
-
-      // A different thread: forget the older pages loaded for the previous one.
-      if (next.selectedConversationId !== threadIdRef.current) {
-        threadIdRef.current = next.selectedConversationId;
-        setOlderMessages([]);
-        setHasOlderMessages(next.hasMoreMessages);
-      }
-
-      selectedIdRef.current = next.selectedConversationId;
+      if (conversationId !== selectedIdRef.current) return;
       setData(next);
-      void markRead(next);
-    } catch (error) {
-      showError(error, t('Could not load WhatsApp messages'));
+      setSelectedId(next.selectedConversationId);
+      selectedIdRef.current = next.selectedConversationId;
+      setError('');
+      void markSelectedRead(next);
+    } catch {
+      setError(t('Could not load WhatsApp messages. Check your access and connection.'));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -112,15 +168,38 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
     let active = true;
     let lastActivity: string | undefined;
     let polls = 0;
+    const refresh = async () => {
+      try {
+        const requestedId = selectedIdRef.current;
+        const next = await new RestApiClient().post<InboxData>('/s/whatsapp/messages/list', {
+          ...(personId ? { personId } : {}),
+          ...(requestedId ? { conversationId: requestedId } : {}),
+        });
 
-    void load();
+        if (active && requestedId === selectedIdRef.current) {
+          selectedIdRef.current = next.selectedConversationId;
+          setData(next);
+          setSelectedId(next.selectedConversationId);
+          setLoading(false);
+          setError('');
+          void markSelectedRead(next);
+        }
+      } catch {
+        if (active) {
+          setLoading(false);
+          setError(t('Could not load WhatsApp messages. Check your access and connection.'));
+        }
+      }
+    };
+
+    void refresh();
     const timer = setInterval(async () => {
       polls += 1;
       const activity = await fetchLatestActivity(personId).catch(() => lastActivity);
 
       if (active && (activity !== lastActivity || polls % FULL_RELOAD_EVERY === 0)) {
         lastActivity = activity;
-        await load();
+        await refresh();
       }
     }, POLL_INTERVAL_MS);
 
@@ -130,173 +209,331 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
     };
   }, [personId]);
 
-  // Search as the member types, after a short pause.
-  useEffect(() => {
-    if (searchRef.current === search) return;
-    const timer = setTimeout(() => {
-      searchRef.current = search;
-      void load();
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [search]);
-
   const selectConversation = (conversationId: string) => {
+    setDraft('');
+    setAttachments([]);
+    setRequestId(undefined);
+    setNotice('');
+    setShowGroupMembers(false);
+    setSelectedId(conversationId);
+    setData((previous) => (previous ? { ...previous, groupMembers: undefined } : previous));
     selectedIdRef.current = conversationId;
-    textRequestRef.current = undefined;
-    setData(
-      (previous) =>
-        previous && { ...previous, selectedConversationId: conversationId, messages: [], groupMembers: undefined },
-    );
-    void load();
+    void load(conversationId, true);
   };
 
-  const loadOlderMessages = async () => {
-    const conversationId = selectedIdRef.current;
-    const oldest = olderMessages[0] ?? data?.messages[0];
-    if (!conversationId || !oldest) return;
-
-    try {
-      const page = await callApp<{ messages: Message[]; hasMoreMessages: boolean }>('messages/list', {
-        conversationId,
-        before: oldest.sentAt,
+  const addFiles = (files: File[]) => {
+    if (!selectedId || !connected || sending) return;
+    const accepted = files
+      .filter((file) => file.size > 0 && file.size <= MAX_ATTACHMENT_BYTES)
+      .map((file) => {
+        if (file.name.trim()) return file;
+        const extension =
+          file.type === 'image/png'
+            ? '.png'
+            : file.type === 'image/jpeg'
+              ? '.jpg'
+              : file.type === 'video/mp4'
+                ? '.mp4'
+                : '';
+        return new File([file], `pasted-file-${Date.now()}${extension}`, { type: file.type });
       });
-      if (conversationId !== selectedIdRef.current) return;
-      setOlderMessages((previous) => [...page.messages, ...previous]);
-      setHasOlderMessages(page.hasMoreMessages);
-    } catch (error) {
-      showError(error, t('Could not load older messages'));
+    if (accepted.length !== files.length) setError(t('Files must be nonempty and at most 64 MB each.'));
+    if (accepted.length) {
+      setAttachments((previous) => [...previous, ...accepted.map((file) => ({ id: createRequestId(), file }))]);
+      setNotice('');
     }
   };
 
-  // Sends each file as its own message (the text goes with the first one), then the text alone.
-  const send = async (text: string, files: PendingFile[]): Promise<{ text: string; files: PendingFile[] }> => {
-    const conversationId = selectedIdRef.current;
-    if (!conversationId) return { text, files };
+  const send = async () => {
+    if (
+      !selectedId ||
+      (!draft.trim() && attachments.length === 0) ||
+      sendingRef.current ||
+      data?.connectionState !== 'connected'
+    ) {
+      return;
+    }
 
+    sendingRef.current = true;
     setSending(true);
-    let caption = text;
-    let remainingFiles = files;
+    setError('');
+    setNotice('');
 
     try {
-      for (const pending of files) {
-        const uploaded = uploadedRef.current.get(pending.id) ?? (await uploadWhatsAppAttachment(pending.file));
-        uploadedRef.current.set(pending.id, uploaded);
-
-        const result = await callApp<SendResult>('messages/send', {
-          conversationId,
-          requestId: pending.id,
-          text: caption,
-          attachment: {
-            fileId: uploaded.fileId,
-            label: pending.file.name,
-            mimeType: uploaded.mimeType || pending.file.type || 'application/octet-stream',
-            size: uploaded.size,
-          },
-        });
-
-        remainingFiles = remainingFiles.filter((item) => item.id !== pending.id);
-        caption = '';
-        if (result.state !== 'sent') throw new Error('unconfirmed');
-      }
-
-      if (caption.trim()) {
-        if (textRequestRef.current?.text !== caption) {
-          textRequestRef.current = { text: caption, requestId: createRequestId() };
+      if (attachments.length) {
+        let caption = draft;
+        for (const attachment of attachments) {
+          setSendingLabel(t('Uploading…'));
+          const uploaded = attachment.uploaded ?? (await uploadWhatsAppAttachment(attachment.file));
+          if (!attachment.uploaded) {
+            setAttachments((previous) =>
+              previous.map((item) => (item.id === attachment.id ? { ...item, uploaded } : item)),
+            );
+          }
+          setSendingLabel(t('Sending…'));
+          const result = await new RestApiClient().post<{ state: 'sent' | 'unknown' }>('/s/whatsapp/messages/send', {
+            conversationId: selectedId,
+            requestId: attachment.id,
+            text: caption,
+            attachment: {
+              fileId: uploaded.fileId,
+              label: attachment.file.name,
+              mimeType: uploaded.mimeType || attachment.file.type || 'application/octet-stream',
+              size: uploaded.size,
+            },
+          });
+          if (result.state !== 'sent') {
+            setNotice(t('Delivery is uncertain. Check WhatsApp before trying again.'));
+            await load(selectedId, true);
+            return;
+          }
+          setAttachments((previous) => previous.filter((item) => item.id !== attachment.id));
+          if (caption) {
+            setDraft('');
+            caption = '';
+          }
         }
-        const result = await callApp<SendResult>('messages/send', {
-          conversationId,
-          requestId: textRequestRef.current.requestId,
-          text: caption,
-        });
-        if (result.state !== 'sent') throw new Error('unconfirmed');
-        textRequestRef.current = undefined;
-        caption = '';
+        await load(selectedId, true);
+        return;
       }
-    } catch (error) {
-      if (error instanceof Error && error.message === 'unconfirmed') {
-        void enqueueSnackbar({
-          message: t('Delivery not confirmed. Check WhatsApp before retrying.'),
-          variant: 'warning',
-        });
-      } else {
-        showError(error, t('Could not send the message'));
-      }
-    } finally {
-      setSending(false);
-      void load();
-    }
+      const stableRequestId = requestId ?? createRequestId();
+      setRequestId(stableRequestId);
+      const result = await new RestApiClient().post<{ state: 'sent' | 'unknown' }>('/s/whatsapp/messages/send', {
+        conversationId: selectedId,
+        requestId: stableRequestId,
+        text: draft,
+      });
 
-    return { text: caption, files: remainingFiles };
+      if (result.state === 'sent') {
+        setDraft('');
+        setRequestId(undefined);
+      } else {
+        setNotice(t('Delivery is uncertain. Check WhatsApp before trying again.'));
+      }
+
+      await load(selectedId, true);
+    } catch {
+      setError(t('Could not confirm delivery. Your draft is saved here; retry uses the same request ID.'));
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+      setSendingLabel('');
+    }
   };
 
-  const selected = data?.conversations.find((conversation) => conversation.id === data.selectedConversationId);
+  const selected = data?.conversations.find((conversation) => conversation.id === selectedId);
   const connected = data?.connectionState === 'connected';
-  const messages = [
-    ...olderMessages,
-    ...(data?.messages ?? []).filter((message) => !olderMessages.some((older) => older.id === message.id)),
-  ];
-  const memberNames = new Map<string, string>();
-  for (const member of data?.groupMembers ?? []) {
-    if (!member.displayName) continue;
-    memberNames.set(member.id, member.displayName);
-    if (member.phoneNumber) memberNames.set(`${member.phoneNumber.slice(1)}@s.whatsapp.net`, member.displayName);
-  }
+  const connectionWarning =
+    data?.connectionState === 'reconnecting'
+      ? t('WhatsApp is reconnecting.')
+      : data?.connectionState === 'unavailable'
+        ? t('WhatsApp connection is unavailable.')
+        : data?.connectionState === 'pairing'
+          ? t('WhatsApp is waiting for a QR scan.')
+          : data?.connectionState === 'disconnected'
+            ? t('WhatsApp is disconnected.')
+            : undefined;
   const isGroup = selected?.chatId.endsWith('@g.us');
-  // On a Person page the list only shows when they have several conversations.
-  const showList = !personId || (data?.conversations.length ?? 0) > 1;
+  const memberNameById = new Map<string, string>();
+  for (const member of data?.groupMembers ?? []) {
+    if (member.displayName) {
+      memberNameById.set(member.id, member.displayName);
+      if (member.phoneNumber) {
+        memberNameById.set(`${member.phoneNumber.slice(1)}@s.whatsapp.net`, member.displayName);
+      }
+    }
+  }
+  // The sandbox does not forward imperative scrolling, so remount at the newest message.
+  const latestMessageId = data?.messages[data.messages.length - 1]?.id;
 
   return (
     <section
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        event.preventDefault();
+        addFiles(Array.from(event.dataTransfer?.files ?? []));
+      }}
       style={{
-        boxSizing: 'border-box',
-        color: themeCssVariables.font.color.primary,
+        ...styles.root,
         display: 'grid',
-        fontFamily: themeCssVariables.font.family,
-        gap: themeCssVariables.spacing[2],
         gridTemplateRows: 'auto minmax(0, 1fr)',
+        gap: themeCssVariables.spacing[3],
         height: personId ? 'calc(100dvh - 140px)' : '100%',
         minHeight: personId ? 420 : 560,
         padding: personId ? 0 : themeCssVariables.spacing[3],
       }}
     >
-      <div>
-        {data && !connected && (
-          <Callout
-            variant="warning"
-            title={t('WhatsApp is not connected')}
-            action={{
-              label: t('Open settings'),
-              onClick: () => void navigate(AppPath.SettingsCatchAll, { '*': 'applications' }),
-            }}
-          />
+      <header
+        style={{
+          alignItems: 'center',
+          display: 'flex',
+          justifyContent: 'space-between',
+          gap: themeCssVariables.spacing[2],
+        }}
+      >
+        <div>
+          <h2 style={{ margin: 0, fontSize: personId ? 16 : 20 }}>{personId ? t('WhatsApp') : t('WhatsApp inbox')}</h2>
+          {!personId && <p style={styles.muted}>{t('Shared direct and group conversations in this workspace.')}</p>}
+        </div>
+        {connectionWarning && (
+          <span
+            role="alert"
+            style={{ color: themeCssVariables.color.red, fontSize: themeCssVariables.font.size.sm, textAlign: 'right' }}
+          >
+            {connectionWarning}{' '}
+            <a href="/settings/applications" style={{ color: 'inherit', textDecoration: 'underline' }}>
+              {t('App settings')}
+            </a>
+          </span>
         )}
-      </div>
+      </header>
       <div
         style={{
-          border: `1px solid ${themeCssVariables.border.color.medium}`,
-          borderRadius: themeCssVariables.border.radius.md,
+          ...styles.card,
           display: 'grid',
-          gridTemplateColumns: showList ? 'minmax(220px, 30%) minmax(0, 1fr)' : 'minmax(0, 1fr)',
+          gridTemplateColumns: personId ? 'minmax(0, 1fr)' : 'minmax(200px, 30%) minmax(0, 1fr)',
           minHeight: 0,
           overflow: 'hidden',
         }}
       >
-        {showList && (
-          <ConversationList
-            conversations={data?.conversations ?? []}
-            selectedId={data?.selectedConversationId}
-            search={search}
-            onSearchChange={personId ? undefined : setSearch}
-            onSelect={selectConversation}
-          />
+        {!personId && (
+          <aside
+            aria-label={t('Conversations')}
+            style={{ borderRight: `1px solid ${themeCssVariables.border.color.medium}`, overflowY: 'auto' }}
+          >
+            {loading && !data && (
+              <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('Loading conversations…')}</p>
+            )}
+            {!loading && data?.conversations.length === 0 && (
+              <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('No conversations yet.')}</p>
+            )}
+            {data?.conversations.map((conversation) => (
+              <button
+                key={conversation.id}
+                type="button"
+                onClick={() => selectConversation(conversation.id)}
+                style={{
+                  background: conversation.unread
+                    ? isDark
+                      ? '#182635'
+                      : '#eef4ff'
+                    : conversation.id === selectedId
+                      ? themeCssVariables.background.secondary
+                      : themeCssVariables.background.primary,
+                  border: 0,
+                  borderBottom: `1px solid ${themeCssVariables.border.color.medium}`,
+                  borderLeft: `3px solid ${conversation.unread ? themeCssVariables.color.blue : 'transparent'}`,
+                  color: themeCssVariables.font.color.primary,
+                  cursor: 'pointer',
+                  display: 'grid',
+                  fontFamily: themeCssVariables.font.family,
+                  gap: 4,
+                  padding: themeCssVariables.spacing[3],
+                  textAlign: 'left',
+                  width: '100%',
+                }}
+              >
+                <span
+                  style={{
+                    alignItems: 'center',
+                    display: 'flex',
+                    gap: themeCssVariables.spacing[2],
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <strong style={{ fontWeight: conversation.unread ? 700 : 600 }}>{conversation.name}</strong>
+                </span>
+                <span
+                  style={{
+                    ...styles.muted,
+                    color: conversation.unread ? themeCssVariables.font.color.primary : styles.muted.color,
+                    fontWeight: conversation.unread ? 600 : undefined,
+                  }}
+                >
+                  {conversation.lastPreview ?? t('No messages yet')}
+                </span>
+                <small
+                  style={{
+                    ...styles.label,
+                    color: conversation.unread ? themeCssVariables.color.blue : styles.label.color,
+                    fontWeight: conversation.unread ? 600 : undefined,
+                  }}
+                >
+                  {formatTime(conversation.lastMessageAt)}
+                </small>
+              </button>
+            ))}
+          </aside>
         )}
-        <div style={{ display: 'grid', gridTemplateRows: 'minmax(0, 1fr) auto', minHeight: 0, minWidth: 0 }}>
-          {/* column-reverse keeps the view pinned to the newest message (the sandbox cannot scroll programmatically). */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateRows: personId ? 'minmax(0, 1fr) auto' : 'auto minmax(0, 1fr) auto',
+            minWidth: 0,
+            minHeight: 0,
+          }}
+        >
+          {!personId && (
+            <div
+              style={{
+                borderBottom: `1px solid ${themeCssVariables.border.color.medium}`,
+                display: 'grid',
+                gap: themeCssVariables.spacing[2],
+                padding: themeCssVariables.spacing[3],
+              }}
+            >
+              <div
+                style={{
+                  alignItems: 'center',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: themeCssVariables.spacing[2],
+                }}
+              >
+                <strong>{selected?.name ?? t('Select a conversation')}</strong>
+                {isGroup && data?.groupMembers && (
+                  <PreviewButton onClick={() => setShowGroupMembers((previous) => !previous)}>
+                    {showGroupMembers ? t('Hide members') : `${t('Members')} (${data.groupMembers.length})`}
+                  </PreviewButton>
+                )}
+              </div>
+              {isGroup && showGroupMembers && data?.groupMembers && (
+                <div
+                  aria-label={t('Group members')}
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: themeCssVariables.spacing[2],
+                    maxHeight: 120,
+                    overflowY: 'auto',
+                  }}
+                >
+                  {data.groupMembers.map((member) => (
+                    <span
+                      key={member.id}
+                      style={{
+                        ...styles.label,
+                        background: themeCssVariables.background.secondary,
+                        borderRadius: themeCssVariables.border.radius.sm,
+                        padding: themeCssVariables.spacing[1],
+                      }}
+                    >
+                      {member.isMe
+                        ? `${t('You')}${member.displayName ? ` · ${member.displayName}` : ''}`
+                        : member.displayName || member.phoneNumber || member.id}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div
-            key={data?.selectedConversationId}
+            key={`${selectedId}:${latestMessageId}`}
+            aria-label={t('Message thread')}
             style={{
-              backgroundColor: themeCssVariables.background.secondary,
+              backgroundColor: isDark ? '#0b141a' : '#faf7f2',
               backgroundImage: `url("${getPublicAssetUrl(isDark ? 'whatsapp-wallpaper-dark.png' : 'whatsapp-wallpaper.png')}")`,
+              backgroundRepeat: 'repeat',
               backgroundSize: '485px auto',
               display: 'flex',
               flexDirection: 'column-reverse',
@@ -305,39 +542,285 @@ export const WhatsAppThread = ({ personId }: { personId?: string }) => {
               padding: themeCssVariables.spacing[3],
             }}
           >
-            {messages
+            {personId && loading && !data && (
+              <p style={{ color: isDark ? '#8696a0' : '#667781' }}>{t('Loading conversation…')}</p>
+            )}
+            {personId && !loading && !selected && (
+              <p style={{ color: isDark ? '#8696a0' : '#667781' }}>
+                {t('No WhatsApp conversation for this Person yet.')}
+              </p>
+            )}
+            {selected && data?.messages.length === 0 && <p style={styles.muted}>{t('No messages yet.')}</p>}
+            {data?.messages
               .slice()
               .reverse()
               .map((message) => (
-                <MessageBubble
+                <div
                   key={message.id}
-                  message={message}
-                  senderName={
-                    isGroup && message.direction === 'INBOUND'
-                      ? memberNames.get(message.senderId ?? '') || message.senderName || message.senderId?.split('@')[0]
-                      : undefined
-                  }
-                  highlighted={Boolean(
-                    selected?.unread &&
-                    message.direction === 'INBOUND' &&
-                    (!selected.lastReadAt || message.sentAt > selected.lastReadAt),
+                  style={{
+                    alignSelf: message.direction === 'OUTBOUND' ? 'flex-end' : 'flex-start',
+                    background:
+                      message.direction === 'OUTBOUND' ? (isDark ? '#005c4b' : '#d9fdd3') : isDark ? '#202c33' : '#fff',
+                    border:
+                      selected?.unread &&
+                      message.direction === 'INBOUND' &&
+                      (!selected.lastReadAt || message.sentAt > selected.lastReadAt)
+                        ? `2px solid ${themeCssVariables.color.blue}`
+                        : isDark
+                          ? '1px solid #26343d'
+                          : '1px solid #e9e7e3',
+                    borderRadius: themeCssVariables.border.radius.md,
+                    color: isDark ? '#e9edef' : '#202c33',
+                    maxWidth: '78%',
+                    padding: `${themeCssVariables.spacing[2]} ${themeCssVariables.spacing[3]}`,
+                  }}
+                >
+                  {isGroup && message.direction === 'INBOUND' && (
+                    <strong
+                      style={{
+                        color: isDark ? '#53bdeb' : '#075e54',
+                        display: 'block',
+                        fontSize: themeCssVariables.font.size.sm,
+                        marginBottom: 4,
+                      }}
+                    >
+                      {memberNameById.get(message.senderId ?? '') ||
+                        message.senderName ||
+                        message.senderId?.split('@')[0] ||
+                        t('Group participant')}
+                    </strong>
                   )}
-                />
+                  {message.media?.[0]?.url && message.mediaKind === 'IMAGE' && (
+                    <a
+                      href={message.media[0].url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={t('Open image')}
+                    >
+                      <img
+                        src={message.media[0].url}
+                        alt={message.text === '[Image]' ? t('WhatsApp image') : message.text}
+                        loading="lazy"
+                        style={{
+                          display: 'block',
+                          maxHeight: 360,
+                          maxWidth: '100%',
+                          borderRadius: themeCssVariables.border.radius.sm,
+                          objectFit: 'contain',
+                        }}
+                      />
+                    </a>
+                  )}
+                  {message.media?.[0]?.url && message.mediaKind === 'VIDEO' && (
+                    <video
+                      controls
+                      preload="metadata"
+                      aria-label={t('WhatsApp video')}
+                      style={{
+                        display: 'block',
+                        maxHeight: 360,
+                        maxWidth: '100%',
+                        borderRadius: themeCssVariables.border.radius.sm,
+                      }}
+                      src={message.media[0].url}
+                    />
+                  )}
+                  {message.media?.[0]?.url && message.mediaKind === 'AUDIO' && (
+                    <audio
+                      controls
+                      preload="metadata"
+                      aria-label={t('WhatsApp audio message')}
+                      src={message.media[0].url}
+                      style={{ display: 'block', maxWidth: '100%', width: 320 }}
+                    />
+                  )}
+                  {message.media?.[0]?.url && message.mediaKind === 'DOCUMENT' && (
+                    <a
+                      href={message.media[0].url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: 'inherit', textDecoration: 'underline' }}
+                    >
+                      {message.media[0].label || t('Download file')}
+                    </a>
+                  )}
+                  {message.mediaKind && !message.media?.[0]?.url && (
+                    <div style={{ color: isDark ? '#8696a0' : '#667781' }}>
+                      {message.mediaKind === 'IMAGE'
+                        ? t('Image unavailable')
+                        : message.mediaKind === 'VIDEO'
+                          ? t('Video unavailable')
+                          : message.mediaKind === 'AUDIO'
+                            ? t('Audio unavailable')
+                            : t('File unavailable')}
+                    </div>
+                  )}
+                  {(!message.mediaKind || !['[Image]', '[Video]', '[Audio]', '[File]'].includes(message.text)) && (
+                    <div style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
+                      <TextWithLinks text={message.text} />
+                    </div>
+                  )}
+                  <small
+                    style={{ ...styles.label, color: isDark ? '#aebac1' : '#667781', display: 'block', marginTop: 6 }}
+                  >
+                    {formatTime(message.sentAt)}
+                    {message.direction === 'OUTBOUND' ? ` · ${message.deliveryState.toLowerCase()}` : ''}
+                  </small>
+                </div>
               ))}
-            {hasOlderMessages && (
-              <div style={{ alignSelf: 'center' }}>
-                <Button variant="soft" size="sm" onClick={() => void loadOlderMessages()}>
-                  {t('Load older messages')}
-                </Button>
+          </div>
+          <div
+            style={{
+              borderTop: `1px solid ${themeCssVariables.border.color.medium}`,
+              display: 'grid',
+              gap: themeCssVariables.spacing[2],
+              padding: themeCssVariables.spacing[3],
+            }}
+          >
+            {error && (
+              <p role="alert" style={{ color: themeCssVariables.color.red, margin: 0 }}>
+                {error}
+              </p>
+            )}
+            {notice && (
+              <p
+                role="status"
+                style={{
+                  background: themeCssVariables.background.secondary,
+                  border: `1px solid ${themeCssVariables.border.color.medium}`,
+                  borderLeft: `3px solid ${themeCssVariables.color.blue}`,
+                  borderRadius: themeCssVariables.border.radius.sm,
+                  color: themeCssVariables.font.color.primary,
+                  fontWeight: 600,
+                  margin: 0,
+                  padding: themeCssVariables.spacing[2],
+                }}
+              >
+                {notice}
+              </p>
+            )}
+            {attachments.length > 0 && (
+              <div
+                aria-label={t('Files to send')}
+                style={{ display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[2] }}
+              >
+                {attachments.map((attachment) => (
+                  <span
+                    key={attachment.id}
+                    style={{
+                      ...styles.label,
+                      alignItems: 'center',
+                      background: themeCssVariables.background.secondary,
+                      borderRadius: themeCssVariables.border.radius.sm,
+                      display: 'inline-flex',
+                      gap: themeCssVariables.spacing[2],
+                      padding: themeCssVariables.spacing[2],
+                    }}
+                  >
+                    {attachment.file.name} · {(attachment.file.size / 1024 / 1024).toFixed(1)} MB
+                    <button
+                      type="button"
+                      aria-label={`${t('Remove')} ${attachment.file.name}`}
+                      disabled={sending}
+                      onClick={() => setAttachments((previous) => previous.filter((item) => item.id !== attachment.id))}
+                      style={{ background: 'none', border: 0, color: 'inherit', cursor: 'pointer' }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
               </div>
             )}
+            <textarea
+              aria-label={t('Write a WhatsApp message')}
+              placeholder={
+                selected
+                  ? t('Write a message…')
+                  : personId
+                    ? t('No conversation yet')
+                    : t('Select a conversation first')
+              }
+              value={draft}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                setRequestId(undefined);
+                setNotice('');
+              }}
+              onPaste={(event) => {
+                const files = Array.from(event.clipboardData?.files ?? []);
+                if (files.length) {
+                  event.preventDefault();
+                  addFiles(files);
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey && !('isComposing' in event && event.isComposing)) {
+                  event.preventDefault();
+                  if (!event.repeat) void send();
+                }
+              }}
+              disabled={!selected || !connected || sending}
+              rows={personId ? 2 : 3}
+              maxLength={4096}
+              style={{
+                background: themeCssVariables.background.primary,
+                border: `1px solid ${themeCssVariables.border.color.medium}`,
+                borderRadius: themeCssVariables.border.radius.sm,
+                color: themeCssVariables.font.color.primary,
+                fontFamily: themeCssVariables.font.family,
+                fontSize: themeCssVariables.font.size.md,
+                padding: themeCssVariables.spacing[2],
+                resize: 'vertical',
+                width: '100%',
+                boxSizing: 'border-box',
+              }}
+            />
+            <div
+              style={{
+                alignItems: 'center',
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: themeCssVariables.spacing[2],
+              }}
+            >
+              <span
+                style={{
+                  ...styles.button,
+                  cursor: !selected || !connected || sending ? 'not-allowed' : 'pointer',
+                  opacity: !selected || !connected || sending ? 0.5 : 1,
+                  overflow: 'hidden',
+                  position: 'relative',
+                }}
+              >
+                <span aria-hidden="true">{t('Attach files')}</span>
+                <input
+                  type="file"
+                  multiple
+                  aria-label={t('Attach files')}
+                  disabled={!selected || !connected || sending}
+                  onChange={(event) => {
+                    addFiles(Array.from(event.target.files ?? []));
+                    event.target.value = '';
+                  }}
+                  style={{
+                    cursor: 'pointer',
+                    height: '100%',
+                    inset: 0,
+                    opacity: 0,
+                    position: 'absolute',
+                    width: '100%',
+                  }}
+                />
+              </span>
+              <PreviewButton
+                primary
+                disabled={!selected || !connected || (!draft.trim() && attachments.length === 0) || sending}
+                onClick={() => void send()}
+              >
+                {sending ? sendingLabel : t('Send')}
+              </PreviewButton>
+            </div>
           </div>
-          <MessageComposer
-            key={data?.selectedConversationId}
-            disabled={!selected || !connected}
-            sending={sending}
-            onSend={send}
-          />
         </div>
       </div>
     </section>
