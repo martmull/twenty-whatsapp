@@ -63,6 +63,9 @@ export type BridgeMessageEvent = {
 export const nodesOf = <T>(connection: { edges?: { node: unknown }[] } | null | undefined): T[] =>
   (connection?.edges ?? []).map((edge) => edge.node as T);
 
+// Bridge media kinds as the values of the message mediaKind select field.
+export const MEDIA_KIND_VALUES = { image: 'IMAGE', video: 'VIDEO', audio: 'AUDIO', document: 'DOCUMENT' } as const;
+
 export const applicationClient = () => new CoreApiClient({ runAs: 'application' });
 export const userClient = () => new CoreApiClient({ runAs: 'user' });
 
@@ -308,7 +311,7 @@ export const importChatMessages = async (
             text: event.text,
             sentAt: event.sentAt,
             deliveryState: event.direction === 'outbound' ? 'SENT' : 'RECEIVED',
-            ...(event.media ? { mediaKind: event.media.kind.toUpperCase() } : {}),
+            ...(event.media ? { mediaKind: MEDIA_KIND_VALUES[event.media.kind] } : {}),
             ...(event.senderId ? { senderId: event.senderId } : {}),
             ...(event.senderName ? { senderName: event.senderName } : {}),
           })),
