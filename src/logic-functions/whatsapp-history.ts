@@ -1,17 +1,19 @@
-import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
+import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
 import {
   applicationClient,
   ensureAccount,
-  findPeopleByPhone,
-  importHistoryMessagesForPerson,
-  importHistoryMessages,
+  findPeopleByPhones,
+  importChatMessages,
+  personName,
   userClient,
   type BridgeMessageEvent,
   type Person,
 } from 'src/logic-functions/message-data';
+import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
+import { chatNumber, digits, isChatId, isGroupChatId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
 
 type HistoryRequest = {
   action?: 'list' | 'import' | 'members';
@@ -25,188 +27,146 @@ type HistoryRequest = {
   lastName?: string;
 };
 
-type HistoryCandidate = {
-  chatId: string;
-  kind: 'direct' | 'group';
-  name: string;
-  messageCount: number;
-  lastMessageAt?: string;
+type HistoryCandidate = { chatId: string; kind: 'direct' | 'group'; name: string; messageCount: number; lastMessageAt?: string };
+type HistoryMessages = { name: string; messages: BridgeMessageEvent[]; total: number; nextOffset?: number };
+
+const listCandidates = async (request: HistoryRequest) => {
+  const offset = request.offset ?? 0;
+  const kind = request.kind ?? 'all';
+
+  if (!Number.isInteger(offset) || offset < 0 || offset > 10_000 || !['all', 'direct', 'group'].includes(kind)) {
+    throw new HttpError(400, 'Invalid history request');
+  }
+
+  const history = await bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
+    '/history/list', { rangeDays: request.rangeDays, kind, offset, limit: 20 }, 30_000);
+  const directNumbers = history.items.filter((item) => item.kind === 'direct').map((item) => chatNumber(item.chatId));
+  const peopleByPhone = await findPeopleByPhones(applicationClient(), directNumbers);
+
+  return {
+    ...history,
+    items: history.items.map((item) => {
+      if (item.kind === 'group') {
+        return { ...item, match: 'group' as const };
+      }
+
+      const matches = peopleByPhone.get(chatNumber(item.chatId)) ?? [];
+      const matchedName = matches.length === 1 ? personName(matches[0]) : undefined;
+      // A Person named after their phone number can be renamed during import.
+      const renameable = matches.length === 1 && isPhoneLikeName(matchedName || '') && digits(matchedName || '') === chatNumber(item.chatId);
+
+      return {
+        ...item,
+        name: renameable ? item.name : matchedName || item.name,
+        match: matches.length === 1 ? 'matched' as const : matches.length > 1 ? 'ambiguous' as const : 'new' as const,
+        personName: matchedName,
+        renameable,
+      };
+    }),
+  };
 };
 
-const isPhoneName = (name: string) => /^\+?\d+$/.test(name.trim());
-
-type HistoryList = {
-  items: HistoryCandidate[];
-  total: number;
-  historyReceivedAt?: string;
-};
-
-type HistoryMessages = {
-  name: string;
-  messages: BridgeMessageEvent[];
-  total: number;
-  nextOffset?: number;
-};
-
-type GroupMember = {
-  id: string;
-  phoneNumber?: string;
-  displayName?: string;
-  firstName?: string;
-  lastName?: string;
-};
-
-const handler = async (event: RoutePayload<HistoryRequest>) => {
-  if (!event.userWorkspaceId || !(await canManageConnection())) {
-    throw new Error('Only workspace administrators can import WhatsApp history');
-  }
-
-  const request = event.body;
-
-  if (!request || (request.rangeDays !== 0 && request.rangeDays !== 30 && request.rangeDays !== 90)) {
-    throw new Error('Invalid history range');
-  }
-
-  const status = await getBridgeStatus();
-
-  if (status.state !== 'connected' || !status.phoneNumber) {
-    throw new Error('WhatsApp is disconnected');
-  }
-
-  if (request.action === 'members') {
-    if (!/^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(request.chatId ?? '')) {
-      throw new Error('Invalid group ID');
-    }
-    return bridgePost<GroupMember[]>('/history/members', { chatId: request.chatId });
-  }
-
-  const client = applicationClient();
-
-  if (request.action === 'list') {
-    const offset = request.offset ?? 0;
-
-    if (!Number.isInteger(offset) || offset < 0 || offset > 10_000) {
-      throw new Error('Invalid history offset');
-    }
-
-    const kind = request.kind ?? 'all';
-    if (kind !== 'all' && kind !== 'direct' && kind !== 'group') {
-      throw new Error('Invalid history kind');
-    }
-    const history = await bridgePost<HistoryList>('/history/list', { rangeDays: request.rangeDays, kind, offset, limit: 20 }, 30_000);
-    const peopleByPhone = await findPeopleByPhone(client);
-
-    return {
-      ...history,
-      items: history.items.map((item) => {
-        if (item.kind === 'group') {
-          return { ...item, match: 'group' as const };
-        }
-        const matches = peopleByPhone.get(item.chatId.split('@')[0]) ?? [];
-        const personName = matches.length === 1 ? [matches[0].name.firstName, matches[0].name.lastName].filter(Boolean).join(' ') : undefined;
-        const renameable = matches.length === 1 && isPhoneName(personName || '') && personName?.replace(/\D/g, '') === item.chatId.split('@')[0];
-        return {
-          ...item,
-          name: renameable ? item.name : personName || item.name,
-          match: matches.length === 1 ? 'matched' as const : matches.length > 1 ? 'ambiguous' as const : 'new' as const,
-          personName,
-          renameable,
-        };
-      }),
-    };
-  }
-
-  const isGroup = /^\d{7,20}(?:-\d{1,20})?@g\.us$/.test(request.chatId ?? '');
-  if (request.action !== 'import' || !request.chatId || (!/^\d{7,15}@s\.whatsapp\.net$/.test(request.chatId) && !isGroup) || !Number.isInteger(request.offset) || (request.offset ?? -1) < 0 || request.acknowledged !== true) {
-    throw new Error('Invalid history import request');
-  }
-
-  if (!isGroup && request.chatId.split('@')[0] === status.phoneNumber.replace(/\D/g, '')) {
-    throw new Error('Cannot import the linked account as a contact');
-  }
-
-  const history = await bridgePost<HistoryMessages>('/history/messages', {
-    chatId: request.chatId,
-    rangeDays: request.rangeDays,
-    offset: request.offset,
-    limit: 25,
-  }, 30_000);
-  const accountId = await ensureAccount(client, `+${status.phoneNumber.replace(/\D/g, '')}`);
-  for (const message of history.messages) {
-    if (message.chatId !== request.chatId) {
-      throw new Error('History message belongs to another chat');
-    }
-  }
-
-  if (isGroup) {
-    const imported = await importHistoryMessages(client, accountId, request.chatId, history.name.slice(0, 120), history.messages);
-    return { imported, total: history.total, nextOffset: history.nextOffset, createdPerson: false };
-  }
-
-  const peopleByPhone = await findPeopleByPhone(client);
-  const matches = peopleByPhone.get(request.chatId.split('@')[0]) ?? [];
+// Finds the Person for a direct chat, creating or renaming them as the admin asked.
+const resolvePerson = async (request: HistoryRequest, chatId: string, historyName: string): Promise<{ person: Person; createdPerson: boolean }> => {
+  const matches = (await findPeopleByPhones(applicationClient(), [chatNumber(chatId)])).get(chatNumber(chatId)) ?? [];
 
   if (matches.length > 1) {
-    throw new Error('More than one Person has this phone number');
+    throw new HttpError(409, 'More than one Person has this phone number');
   }
 
-  let person: Person | undefined = matches[0];
-  let createdPerson = false;
-
-  if ((request.firstName && (request.firstName.length > 80 || !request.firstName.trim())) || (request.lastName && (request.lastName.length > 80 || !request.lastName.trim()))) {
-    throw new Error('Invalid Person name');
+  for (const value of [request.firstName, request.lastName]) {
+    if (value !== undefined && (typeof value !== 'string' || value.length > 80 || !value.trim())) {
+      throw new HttpError(400, 'Invalid Person name');
+    }
   }
 
-  const [suggestedFirstName, ...suggestedLastName] = isPhoneName(history.name) ? ['', ''] : history.name.trim().split(/\s+/);
+  const [suggestedFirstName = '', ...suggestedLastName] = isPhoneLikeName(historyName) ? [] : historyName.trim().split(/\s+/);
   const firstName = request.firstName?.trim() || suggestedFirstName;
   const lastName = request.lastName?.trim() || suggestedLastName.join(' ');
+  const existing = matches[0];
 
-  if (!person) {
-    if (request.createPerson !== true) {
-      throw new Error('This contact is not matched to a Person');
-    }
+  if (!existing) {
+    if (request.createPerson !== true) throw new HttpError(409, 'This contact is not matched to a Person');
+    if (!firstName) throw new HttpError(400, 'Enter a first name for this contact');
 
-    if (!firstName) {
-      throw new Error('Enter a first name for this contact before importing');
-    }
+    // Created as the admin, so their own permissions apply.
     const created = await userClient().mutation({
       createPerson: {
         __args: {
           data: {
             name: { firstName, lastName },
-            phones: {
-              primaryPhoneNumber: `+${request.chatId.split('@')[0]}`,
-              primaryPhoneCountryCode: '',
-              primaryPhoneCallingCode: '',
-              additionalPhones: null,
-            },
+            phones: { primaryPhoneNumber: `+${chatNumber(chatId)}`, primaryPhoneCountryCode: '', primaryPhoneCallingCode: '', additionalPhones: null },
           },
         },
         id: true,
       },
     });
     const id = created.createPerson?.id;
+    if (!id) throw new Error('Could not create Person');
 
-    if (!id) {
-      throw new Error('Could not create Person');
-    }
-
-    person = { id, name: { firstName, lastName } };
-    createdPerson = true;
-  } else if (isPhoneName([person.name.firstName, person.name.lastName].filter(Boolean).join(' ')) && firstName) {
-    await userClient().mutation({
-      updatePerson: {
-        __args: { id: person.id, data: { name: { firstName, lastName } } },
-        id: true,
-      },
-    });
-    person = { ...person, name: { firstName, lastName } };
+    return { person: { id, name: { firstName, lastName } }, createdPerson: true };
   }
 
-  const imported = await importHistoryMessagesForPerson(client, accountId, history.messages, person);
+  if (isPhoneLikeName(personName(existing)) && firstName) {
+    await userClient().mutation({
+      updatePerson: { __args: { id: existing.id, data: { name: { firstName, lastName } } }, id: true },
+    });
+    return { person: { ...existing, name: { firstName, lastName } }, createdPerson: false };
+  }
 
-  return { imported, total: history.total, nextOffset: history.nextOffset, createdPerson };
+  return { person: existing, createdPerson: false };
 };
+
+const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) => {
+  requireUser(event);
+
+  if (!(await canManageConnection())) {
+    throw new HttpError(403, 'Only workspace administrators can import WhatsApp history');
+  }
+
+  const request = event.body ?? {};
+
+  if (request.rangeDays !== 0 && request.rangeDays !== 30 && request.rangeDays !== 90) {
+    throw new HttpError(400, 'Invalid history range');
+  }
+
+  const status = await getBridgeStatus();
+
+  if (status.state !== 'connected' || !status.phoneNumber) {
+    throw new HttpError(409, 'WhatsApp is disconnected');
+  }
+
+  if (request.action === 'members') {
+    if (!isGroupChatId(request.chatId)) throw new HttpError(400, 'Invalid group ID');
+    return bridgePost('/history/members', { chatId: request.chatId });
+  }
+
+  if (request.action === 'list') {
+    return listCandidates(request);
+  }
+
+  const chatId = request.chatId;
+
+  if (request.action !== 'import' || !isChatId(chatId) || !Number.isInteger(request.offset) || request.offset! < 0 || request.acknowledged !== true) {
+    throw new HttpError(400, 'Invalid history import request');
+  }
+
+  if (chatNumber(chatId) === digits(status.phoneNumber)) {
+    throw new HttpError(400, 'Cannot import the linked account as a contact');
+  }
+
+  const history = await bridgePost<HistoryMessages>('/history/messages', { chatId, rangeDays: request.rangeDays, offset: request.offset, limit: 25 }, 30_000);
+  const client = applicationClient();
+  const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
+  const { person, createdPerson } = isGroupChatId(chatId)
+    ? { person: undefined, createdPerson: false }
+    : await resolvePerson(request, chatId, history.name);
+  const name = person ? personName(person) || chatNumber(chatId) : history.name.slice(0, 120);
+  const imported = await importChatMessages(client, accountId, chatId, name, history.messages, person);
+
+  logger.info('Imported history page', { imported, offset: request.offset, createdPerson });
+  return { imported, total: history.total, nextOffset: history.nextOffset, createdPerson };
+});
 
 export default defineLogicFunction({
   universalIdentifier: '6e6ef756-2022-4d4d-93af-3f1a95fe5a86',
