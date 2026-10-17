@@ -64,6 +64,16 @@ const countRequests = (client: CoreApiClient, counter: { requests: number }): Co
     },
   });
 
+const conversationExists = async (client: CoreApiClient, conversationId: string): Promise<boolean> => {
+  const result = await client.query({
+    whatsappConversations: {
+      __args: { filter: { id: { eq: conversationId } }, first: 1 },
+      edges: { node: { id: true } },
+    },
+  });
+  return (result.whatsappConversations?.edges?.length ?? 0) > 0;
+};
+
 export const enqueueHistoryImport = async (runToken: string, delayMs: number): Promise<void> => {
   await enqueueJobs({
     logicFunctionUniversalIdentifier: HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER,
@@ -139,7 +149,10 @@ export const runHistoryImportStep = async (
   } catch (error) {
     const rateLimited = isRateLimitError(error);
     const nextRunInMs = rateLimited ? RATE_LIMITED_RETRY_DELAY_MS : RETRY_DELAY_MS;
-    logger.warn('Could not import history page', {
+    // The chat was queued with a conversation deleted since: retrying cannot succeed.
+    const conversationDeleted =
+      !rateLimited && !(await conversationExists(client, page.conversationId).catch(() => true));
+    logger.warn(conversationDeleted ? 'Conversation was deleted, skipping chat' : 'Could not import history page', {
       chatId: page.chatId,
       rateLimited,
       error: error instanceof Error ? error.message : String(error),
@@ -148,6 +161,7 @@ export const runHistoryImportStep = async (
     const { remaining } = await bridgePost<{ remaining: number }>('/history/imports/release', {
       leaseId: page.leaseId,
       failed: !rateLimited,
+      abandon: conversationDeleted,
       nextRunInMs,
     });
     result = { status: 'failed', remaining, nextRunInMs };

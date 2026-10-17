@@ -217,11 +217,17 @@ const jsonRoutes: Record<string, Route> = {
     );
   },
   'POST /history/imports/release': (body) => {
-    check(isUuid(body.leaseId) && typeof body.failed === 'boolean' && isDelay(body.nextRunInMs));
+    check(
+      isUuid(body.leaseId) &&
+        typeof body.failed === 'boolean' &&
+        isDelay(body.nextRunInMs) &&
+        (body.abandon === undefined || typeof body.abandon === 'boolean'),
+    );
     return connection.historyImports.release(
       body.leaseId as string,
       body.failed as boolean,
       body.nextRunInMs as number,
+      body.abandon === true,
     );
   },
   'POST /history/imports/progress': () => connection.historyImports.progress(),

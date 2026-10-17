@@ -179,3 +179,30 @@ test('recognizes rate limit errors and paces requests over the per-minute budget
   assert.equal(paceDelay(HISTORY_IMPORT_REQUESTS_PER_MINUTE, 0), 60_000);
   assert.equal(paceDelay(1, 60_000), 0);
 });
+
+test('skips a chat at once when its conversation was deleted after it was queued', async () => {
+  bridgeResponses = {
+    '/history/imports/claim': {
+      leaseId: LEASE_ID,
+      chatId: CHAT_ID,
+      conversationId: CONVERSATION_ID,
+      messages: events.slice(0, 3),
+      isLastPage: false,
+    },
+    '/history/imports/release': { remaining: 0, failures: 5 },
+  };
+  const client = {
+    query: async (selection: Record<string, unknown>) =>
+      selection.whatsappConversations ? { whatsappConversations: { edges: [] } } : { whatsappMessages: { edges: [] } },
+    mutation: async () => {
+      throw new Error('insert or update on table "_whatsappMessage" violates foreign key constraint');
+    },
+  };
+
+  const result = await runHistoryImportStep(RUN_TOKEN, silentLogger, { client: client as never });
+
+  assert.equal(result.status, 'failed');
+  const release = bridgeCalls.find((call) => call.path === '/history/imports/release');
+  assert.equal(release?.body.failed, true);
+  assert.equal(release?.body.abandon, true);
+});
