@@ -9,7 +9,8 @@ import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 
 import { MESSAGE_MEDIA_FIELD_ID } from 'src/constants/universal-identifiers';
 import { bridgeFetch } from 'src/logic-functions/bridge-request';
-import { upsertMessages } from 'src/logic-functions/record-writes';
+import type { BridgeMessageEvent } from 'src/logic-functions/message-data';
+import { upsertMessages, type UpsertedMessage } from 'src/logic-functions/record-writes';
 import { isEventId } from 'src/logic-functions/utils/validators';
 
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
@@ -145,4 +146,16 @@ export const attachMedia = async (
   }
 
   return { attached: writes.length, processed };
+};
+
+// Files of the written messages that do not have one yet.
+export const pendingMedia = (written: UpsertedMessage[], events: BridgeMessageEvent[]): MediaItem[] => {
+  const eventById = new Map(events.map((event) => [event.eventId, event]));
+
+  return written.flatMap((message) => {
+    const fileName = eventById.get(message.externalId)?.media?.fileName;
+    return message.mediaKind && !message.media?.length && fileName
+      ? [{ messageId: message.id, eventId: message.externalId, fileName }]
+      : [];
+  });
 };

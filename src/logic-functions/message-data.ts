@@ -1,7 +1,6 @@
 import { CoreApiClient } from 'twenty-client-sdk/core';
 
 import { bridgePost } from 'src/logic-functions/bridge-request';
-import { importMessageMedia } from 'src/logic-functions/message-media';
 import { chunkRecords, MAX_UPSERT_RECORDS, upsertConversations } from 'src/logic-functions/record-writes';
 import type { Logger } from 'src/logic-functions/utils/logger';
 import { digits, isChatId, isEventId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
@@ -215,70 +214,6 @@ export const findMessageByRequestId = async (
   });
 
   return result.whatsappMessages?.edges?.[0]?.node as Message | undefined;
-};
-
-type StoreResult = { imported: number; lastProcessedEventId?: string; mediaUploads: number };
-
-// Stores the events not yet in Twenty, in order, with one existence query and one bulk create.
-// Media is uploaded first so it rides along in the create. Stops before a media message once the
-// deadline has passed; the caller resumes after lastProcessedEventId.
-export const storeMessages = async (
-  client: CoreApiClient,
-  conversationId: string,
-  events: BridgeMessageEvent[],
-  deadline = Number.POSITIVE_INFINITY,
-): Promise<StoreResult> => {
-  if (events.length === 0) {
-    return { imported: 0, mediaUploads: 0 };
-  }
-
-  const existing = await client.query({
-    whatsappMessages: {
-      __args: { filter: { externalId: { in: events.map((event) => event.eventId) } }, first: events.length },
-      edges: { node: { id: true, externalId: true, media: { fileId: true } } },
-    },
-  });
-  const storedByEventId = new Map(
-    nodesOf<{ id: string; externalId: string; media?: { fileId: string }[] | null }>(existing.whatsappMessages).map(
-      (message) => [message.externalId, message],
-    ),
-  );
-  const toCreate: Record<string, unknown>[] = [];
-  let lastProcessedEventId: string | undefined;
-  let mediaUploads = 0;
-
-  for (const event of events) {
-    const stored = storedByEventId.get(event.eventId);
-    const needsMedia = Boolean(event.media) && !stored?.media?.length;
-
-    if (needsMedia) {
-      if (mediaUploads > 0 && Date.now() > deadline) break;
-      mediaUploads += 1;
-    }
-
-    const file = needsMedia ? await importMessageMedia(event.eventId, event.media!.fileName) : undefined;
-
-    if (stored && file) {
-      await client.mutation({
-        updateWhatsappMessage: { __args: { id: stored.id, data: { media: [file] } }, id: true },
-      });
-    } else if (!stored) {
-      toCreate.push({ ...messageRecord(event, conversationId), ...(file ? { media: [file] } : {}) });
-    }
-    lastProcessedEventId = event.eventId;
-  }
-
-  if (toCreate.length > 0) {
-    const created = await client.mutation({
-      createWhatsappMessages: { __args: { data: toCreate }, id: true },
-    });
-
-    if (created.createWhatsappMessages?.length !== toCreate.length) {
-      throw new Error('Could not create WhatsApp messages');
-    }
-  }
-
-  return { imported: toCreate.length, lastProcessedEventId, mediaUploads };
 };
 
 // The fields a message import owns. The media file is left out: the media import attaches it.

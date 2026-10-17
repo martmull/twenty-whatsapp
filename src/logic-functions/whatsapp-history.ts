@@ -3,7 +3,7 @@ import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
-import { enqueueHistoryImport } from 'src/logic-functions/history-import';
+import { enqueueHistoryImport, FIRST_PAGE, type ChainPosition } from 'src/logic-functions/history-import';
 import {
   applicationClient,
   ensureAccount,
@@ -147,7 +147,7 @@ type QueueImportDependencies = {
   client?: CoreApiClient;
   // Writes People as the admin, so their own permissions apply.
   adminClient?: CoreApiClient;
-  enqueue?: (runToken: string, delayMs: number) => Promise<void>;
+  enqueue?: (runToken: string, delayMs: number, position?: ChainPosition) => Promise<void>;
 };
 
 // Creates the People and conversations of the selected chats, then hands the messages to the
@@ -257,7 +257,7 @@ export const queueImport = async (
 
     if (runToken) {
       // The chats stay queued on the bridge, which restarts the import if this enqueue fails.
-      await enqueue(runToken, 0).catch((error: unknown) =>
+      await enqueue(runToken, 0, FIRST_PAGE).catch((error: unknown) =>
         logger.error('Could not start the history import', {
           error: error instanceof Error ? error.message : String(error),
         }),

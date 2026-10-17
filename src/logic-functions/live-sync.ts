@@ -16,7 +16,7 @@ import {
   type Person,
 } from 'src/logic-functions/message-data';
 import { enqueueMediaImports } from 'src/logic-functions/media-import';
-import { attachMedia, type MediaItem } from 'src/logic-functions/message-media';
+import { attachMedia, pendingMedia, type MediaItem } from 'src/logic-functions/message-media';
 import {
   deterministicId,
   rateLimitRetryAfterMs,
@@ -144,18 +144,6 @@ const writeChats = async (
   });
 
   return upsertMessages(client, records);
-};
-
-// Files of the written messages that do not have one yet.
-export const pendingMedia = (written: UpsertedMessage[], events: BridgeMessageEvent[]): MediaItem[] => {
-  const eventById = new Map(events.map((event) => [event.eventId, event]));
-
-  return written.flatMap((message) => {
-    const fileName = eventById.get(message.externalId)?.media?.fileName;
-    return message.mediaKind && !message.media?.length && fileName
-      ? [{ messageId: message.id, eventId: message.externalId, fileName }]
-      : [];
-  });
 };
 
 type SyncDependencies = { client?: CoreApiClient; enqueueMedia?: (items: MediaItem[]) => Promise<unknown> };

@@ -123,8 +123,15 @@ const isPage = (offset: unknown, limit: unknown, maxLimit: number) =>
   (limit as number) >= 1 &&
   (limit as number) <= maxLimit;
 const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d-]{36}$/i.test(value);
-const isEventId = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{64}$/.test(value);
 const isCount = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 10_000;
+const isImportedByChat = (value: unknown) =>
+  Boolean(value) &&
+  typeof value === 'object' &&
+  !Array.isArray(value) &&
+  Object.keys(value as object).length <= 200 &&
+  Object.entries(value as Record<string, unknown>).every(
+    ([chatId, count]) => isSupportedChatId(chatId) && isCount(count),
+  );
 const isDelay = (value: unknown) =>
   Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24 * 60 * 60_000;
 const requireConnected = () => check(connection.getStatus().state === 'connected', 'WhatsApp is disconnected');
@@ -222,20 +229,14 @@ const jsonRoutes: Record<string, Route> = {
   },
   'POST /history/imports/claim': (body) => {
     requireConnected();
-    check(isUuid(body.runToken));
-    return connection.historyImports.claim(body.runToken as string);
+    check(isUuid(body.runToken) && (body.pageSeq === undefined || isCount(body.pageSeq)));
+    return connection.historyImports.claim(body.runToken as string, body.pageSeq as number | undefined);
   },
   'POST /history/imports/complete': (body) => {
-    check(
-      isUuid(body.leaseId) &&
-        (body.lastEventId === undefined || isEventId(body.lastEventId)) &&
-        isCount(body.imported) &&
-        isDelay(body.nextRunInMs),
-    );
+    check(isUuid(body.leaseId) && isImportedByChat(body.imported) && isDelay(body.nextRunInMs));
     return connection.historyImports.complete(
       body.leaseId as string,
-      body.lastEventId as string | undefined,
-      body.imported as number,
+      body.imported as Record<string, number>,
       body.nextRunInMs as number,
     );
   },

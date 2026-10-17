@@ -5,12 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { HistoryImportQueue, MAX_PAGE_MEDIA, type HistoryImportPage } from '../src/history-import-queue.js';
+import { HistoryImportQueue, MAX_PAGE_MESSAGES, type HistoryImportPage } from '../src/history-import-queue.js';
 import type { MessageEvent } from '../src/message-event.js';
 
 const CHAT_ID = '15551234567@s.whatsapp.net';
 const OTHER_CHAT_ID = '15557654321@s.whatsapp.net';
 const CONVERSATION_ID = '11111111-1111-4111-8111-111111111111';
+const OTHER_CONVERSATION_ID = '22222222-2222-4222-8222-222222222222';
 
 const message = (index: number, overrides: Partial<MessageEvent> = {}): MessageEvent => ({
   eventId: index.toString(16).padStart(64, '0'),
@@ -21,6 +22,8 @@ const message = (index: number, overrides: Partial<MessageEvent> = {}): MessageE
   sentAt: new Date(Date.UTC(2026, 9, 1, 0, index)).toISOString(),
   ...overrides,
 });
+const messages = (count: number, chatId = CHAT_ID, offset = 0) =>
+  Array.from({ length: count }, (_, index) => message(offset + index, { chatId }));
 
 const withQueue = async (
   messagesByChat: Record<string, MessageEvent[]>,
@@ -53,121 +56,174 @@ const asPage = (result: unknown): HistoryImportPage => {
   return result as HistoryImportPage;
 };
 
-test('imports a chat page by page, cutting pages after a few media messages', async () => {
-  const messages = Array.from({ length: 30 }, (_, index) =>
-    message(
-      index,
-      index < MAX_PAGE_MEDIA + 2 ? { media: { kind: 'image', mimeType: 'image/jpeg', fileName: 'a.jpg' } } : {},
-    ),
-  );
+const sortedProgress = async (queue: HistoryImportQueue) =>
+  (await queue.progress()).sort((left, right) => left.chatId.localeCompare(right.chatId));
 
-  await withQueue({ [CHAT_ID]: messages }, async (queue) => {
-    const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
+const queueBoth = (queue: HistoryImportQueue) =>
+  queue.queue([
+    { chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 },
+    { chatId: OTHER_CHAT_ID, conversationId: OTHER_CONVERSATION_ID, rangeDays: 0 },
+  ]);
+
+test('packs several chats into 200-message pages, then writes their summaries together', async () => {
+  const first = messages(150);
+  const second = messages(100, OTHER_CHAT_ID, 500);
+
+  await withQueue({ [CHAT_ID]: first, [OTHER_CHAT_ID]: second }, async (queue) => {
+    const { runToken } = await queueBoth(queue);
     assert.ok(runToken);
 
-    const first = asPage(await queue.claim(runToken));
-    assert.equal(first.messages.length, MAX_PAGE_MEDIA);
-    assert.equal(first.isLastPage, false);
-    assert.equal(first.summary, undefined);
-    assert.deepEqual(await queue.complete(first.leaseId, first.messages.at(-1)!.eventId, 5, 1_000), { remaining: 1 });
-    assert.deepEqual(await queue.progress(), [
-      { chatId: CHAT_ID, imported: 5, processed: 5, total: 30, state: 'queued' },
-    ]);
-
-    const second = asPage(await queue.claim(runToken));
-    assert.equal(second.messages[0].eventId, messages[MAX_PAGE_MEDIA].eventId);
-    assert.equal(second.isLastPage, true);
-    assert.equal(second.summary?.lastMessage?.eventId, messages.at(-1)!.eventId);
-    assert.equal(second.summary?.lastInboundAt, messages[28].sentAt);
-    assert.deepEqual(await queue.complete(second.leaseId, second.messages.at(-1)!.eventId, 25, 1_000), {
-      remaining: 0,
+    const page = asPage(await queue.claim(runToken, 0));
+    assert.deepEqual(
+      page.chats.map((chat) => [chat.chatId, chat.messages.length, chat.isLastPage]),
+      [
+        [CHAT_ID, 150, true],
+        [OTHER_CHAT_ID, 50, false],
+      ],
+    );
+    assert.equal(
+      page.chats.reduce((sum, chat) => sum + chat.messages.length, 0),
+      MAX_PAGE_MESSAGES,
+    );
+    assert.deepEqual(page.summaries, [], 'one finished chat is not worth a write yet');
+    assert.deepEqual(await queue.complete(page.leaseId, { [CHAT_ID]: 150, [OTHER_CHAT_ID]: 50 }, 1_000), {
+      remaining: 2,
+      pageSeq: 1,
+      nextJobKey: '1',
     });
-    assert.deepEqual(await queue.progress(), [
-      { chatId: CHAT_ID, imported: 30, processed: 30, total: 30, state: 'done' },
+
+    const rest = asPage(await queue.claim(runToken, 1));
+    assert.deepEqual(
+      rest.chats.map((chat) => [chat.chatId, chat.messages[0].eventId, chat.isLastPage]),
+      [[OTHER_CHAT_ID, second[50].eventId, true]],
+    );
+    await queue.complete(rest.leaseId, { [OTHER_CHAT_ID]: 50 }, 0);
+
+    const summaries = asPage(await queue.claim(runToken, 2));
+    assert.deepEqual(summaries.chats, []);
+    assert.deepEqual(summaries.summaries, [
+      {
+        chatId: CHAT_ID,
+        conversationId: CONVERSATION_ID,
+        lastMessage: { sentAt: first[149].sentAt, text: first[149].text },
+        lastInboundAt: first[148].sentAt,
+      },
+      {
+        chatId: OTHER_CHAT_ID,
+        conversationId: OTHER_CONVERSATION_ID,
+        lastMessage: { sentAt: second[99].sentAt, text: second[99].text },
+        lastInboundAt: second[98].sentAt,
+      },
     ]);
-    assert.deepEqual(await queue.claim(runToken), { stale: true });
+    assert.equal((await queue.complete(summaries.leaseId, {}, 0)).remaining, 0);
+    assert.deepEqual(await sortedProgress(queue), [
+      { chatId: CHAT_ID, imported: 150, processed: 150, total: 150, state: 'done' },
+      { chatId: OTHER_CHAT_ID, imported: 100, processed: 100, total: 100, state: 'done' },
+    ]);
+    assert.deepEqual(await queue.claim(runToken, 3), { stale: true });
   });
 });
 
-test('progress counts messages already in Twenty and starts over with the next run', async () => {
-  const messages = Array.from({ length: 4 }, (_, index) => message(index));
-
-  await withQueue({ [CHAT_ID]: messages, [OTHER_CHAT_ID]: [message(9, { chatId: OTHER_CHAT_ID })] }, async (queue) => {
+test('a retried job gets its page back, and a job for an earlier page stops', async () => {
+  await withQueue({ [CHAT_ID]: messages(250) }, async (queue) => {
     const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
-    const page = asPage(await queue.claim(runToken!));
-    await queue.complete(page.leaseId, messages[1].eventId, 0, 0);
-    assert.deepEqual(await queue.progress(), [
-      { chatId: CHAT_ID, imported: 0, processed: 2, total: 4, state: 'queued' },
-    ]);
+    const page = asPage(await queue.claim(runToken!, 0));
 
-    const last = asPage(await queue.claim(runToken!));
-    await queue.complete(last.leaseId, messages[3].eventId, 0, 0);
+    assert.deepEqual(await queue.claim(runToken!, 0), page, 'the same page, for an idempotent retry');
+    assert.deepEqual(await queue.claim(runToken!, 1), { stale: true }, 'a page is leased to one job at a time');
+
+    await queue.complete(page.leaseId, { [CHAT_ID]: 200 }, 0);
+    assert.deepEqual(await queue.complete(page.leaseId, { [CHAT_ID]: 200 }, 0), {
+      remaining: 1,
+      pageSeq: 1,
+      nextJobKey: '1',
+    });
+    assert.deepEqual(await queue.claim(runToken!, 0), { stale: true }, 'a retry of a finished page stops');
+    assert.equal(asPage(await queue.claim(runToken!, 1)).chats[0].messages.length, 50);
+  });
+});
+
+test('a retry of a released page gets its own job key', async () => {
+  await withQueue({ [CHAT_ID]: messages(3) }, async (queue) => {
+    const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
+    const page = asPage(await queue.claim(runToken!, 0));
+
+    assert.deepEqual(await queue.release(page.leaseId, false, 60_000), {
+      remaining: 1,
+      pageSeq: 0,
+      nextJobKey: '0-1',
+      failures: 0,
+    });
+    assert.equal(asPage(await queue.claim(runToken!, 0)).chats[0].messages.length, 3);
+  });
+});
+
+test('serves a failing chat alone, sets it aside after repeated failures, and replaces a lost chain', async () => {
+  await withQueue(
+    { [CHAT_ID]: messages(2), [OTHER_CHAT_ID]: messages(2, OTHER_CHAT_ID, 10) },
+    async (queue, clock, world) => {
+      const { runToken } = await queueBoth(queue);
+
+      const shared = asPage(await queue.claim(runToken!, 0));
+      assert.equal(shared.chats.length, 2);
+      await queue.release(shared.leaseId, true, 0);
+
+      const alone = asPage(await queue.claim(runToken!, 0));
+      assert.deepEqual(
+        alone.chats.map((chat) => chat.chatId),
+        [CHAT_ID],
+        'a chat that failed no longer shares its page',
+      );
+      for (let attempt = 2; attempt <= 4; attempt += 1) {
+        const page = asPage(await queue.claim(runToken!, 0));
+        assert.equal((await queue.release(page.leaseId, true, 60_000)).failures, attempt);
+      }
+
+      clock.now += 10 * 60_000;
+      world.connected = false;
+      assert.deepEqual(await queue.recoverStalled(), {}, 'no chain starts while WhatsApp is disconnected');
+      world.connected = true;
+      const { runToken: resumedToken } = await queue.recoverStalled();
+      assert.ok(resumedToken);
+      assert.deepEqual(world.restartedChains, [resumedToken], 'Twenty is asked to start the new chain');
+      assert.deepEqual(await queue.claim(runToken!, 0), { stale: true }, 'the lost chain cannot come back');
+
+      const last = asPage(await queue.claim(resumedToken, 0));
+      await queue.release(last.leaseId, true, 0);
+      assert.deepEqual(
+        (await sortedProgress(queue)).map((task) => [task.chatId, task.state]),
+        [
+          [CHAT_ID, 'failed'],
+          [OTHER_CHAT_ID, 'queued'],
+        ],
+      );
+      assert.deepEqual(
+        asPage(await queue.claim(resumedToken, 0)).chats.map((chat) => chat.chatId),
+        [OTHER_CHAT_ID],
+        'the other chat carries on',
+      );
+    },
+  );
+});
+
+test('a second import joins the running chain, and the next run starts from an empty progress bar', async () => {
+  await withQueue({ [CHAT_ID]: messages(4), [OTHER_CHAT_ID]: messages(1, OTHER_CHAT_ID, 9) }, async (queue) => {
+    const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
+    const joined = await queue.queue([{ chatId: OTHER_CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
+    assert.equal(joined.runToken, undefined);
+    assert.deepEqual(await queue.recoverStalled(), {}, 'a live chain is not duplicated');
+
+    for (let pageSeq = 0; ; pageSeq += 1) {
+      const page = await queue.claim(runToken!, pageSeq);
+      if (!('leaseId' in page)) break;
+      await queue.complete(page.leaseId, {}, 0);
+    }
     await queue.queue([{ chatId: OTHER_CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
     assert.deepEqual(
       (await queue.progress()).map((task) => task.chatId),
       [OTHER_CHAT_ID],
       'the finished run is cleared',
     );
-  });
-});
-
-test('resumes after a job stopped early instead of skipping the rest of the page', async () => {
-  const messages = Array.from({ length: 10 }, (_, index) => message(index));
-
-  await withQueue({ [CHAT_ID]: messages }, async (queue) => {
-    const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
-    const first = asPage(await queue.claim(runToken!));
-    await queue.complete(first.leaseId, messages[3].eventId, 4, 0);
-
-    const second = asPage(await queue.claim(runToken!));
-    assert.deepEqual(
-      second.messages.map((item) => item.eventId),
-      messages.slice(4).map((item) => item.eventId),
-    );
-  });
-});
-
-test('keeps a single job chain: a second import joins the running chain', async () => {
-  await withQueue(
-    { [CHAT_ID]: [message(1)], [OTHER_CHAT_ID]: [message(2, { chatId: OTHER_CHAT_ID })] },
-    async (queue) => {
-      const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
-      const joined = await queue.queue([{ chatId: OTHER_CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
-      assert.equal(joined.runToken, undefined);
-
-      const page = asPage(await queue.claim(runToken!));
-      assert.equal(page.chatId, CHAT_ID);
-      assert.deepEqual(await queue.claim(runToken!), { stale: true }, 'a page is leased to one job at a time');
-      assert.deepEqual(await queue.complete(page.leaseId, page.messages[0].eventId, 1, 0), { remaining: 1 });
-      assert.equal(asPage(await queue.claim(runToken!)).chatId, OTHER_CHAT_ID);
-      assert.deepEqual(await queue.recoverStalled(), {}, 'a live chain is not duplicated');
-    },
-  );
-});
-
-test('sets a chat aside after repeated failures and replaces a lost chain once connected', async () => {
-  await withQueue({ [CHAT_ID]: [message(1)] }, async (queue, clock, world) => {
-    const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
-
-    for (let attempt = 1; attempt <= 4; attempt += 1) {
-      const page = asPage(await queue.claim(runToken!));
-      assert.deepEqual(await queue.release(page.leaseId, true, 60_000), { remaining: 1, failures: attempt });
-    }
-
-    clock.now += 10 * 60_000;
-    world.connected = false;
-    assert.deepEqual(await queue.recoverStalled(), {}, 'no chain starts while WhatsApp is disconnected');
-    world.connected = true;
-    const { runToken: resumedToken } = await queue.recoverStalled();
-    assert.ok(resumedToken);
-    assert.deepEqual(world.restartedChains, [resumedToken], 'Twenty is asked to start the new chain');
-    assert.deepEqual(await queue.claim(runToken!), { stale: true }, 'the lost chain cannot come back');
-
-    const page = asPage(await queue.claim(resumedToken));
-    assert.deepEqual(await queue.release(page.leaseId, true, 0), { remaining: 0, failures: 5 });
-    assert.deepEqual(await queue.progress(), [
-      { chatId: CHAT_ID, imported: 0, processed: 0, total: 1, state: 'failed' },
-    ]);
   });
 });
 
@@ -181,7 +237,7 @@ test('counts only the messages inside the selected range', async () => {
       { chatId: CHAT_ID, imported: 0, processed: 0, total: 1, state: 'queued' },
     ]);
     assert.deepEqual(
-      asPage(await queue.claim(runToken!)).messages.map((item) => item.eventId),
+      asPage(await queue.claim(runToken!, 0)).chats[0].messages.map((item) => item.eventId),
       [recent.eventId],
     );
   });

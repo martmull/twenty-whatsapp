@@ -4,7 +4,7 @@ import { defineLogicFunction } from 'twenty-sdk/define';
 import { enqueueJobs } from 'twenty-sdk/logic-function';
 
 import { MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
-import { enqueueHistoryImport } from 'src/logic-functions/history-import';
+import { enqueueHistoryImport, FIRST_PAGE } from 'src/logic-functions/history-import';
 import { HttpError, route } from 'src/logic-functions/utils/route';
 import { isUuid } from 'src/logic-functions/utils/validators';
 
@@ -57,7 +57,7 @@ const handler = route<BridgeSignal>('whatsapp-bridge-webhook', async (event, log
   }
 
   if (isUuid(historyRunToken)) {
-    await enqueueHistoryImport(historyRunToken, 0);
+    await enqueueHistoryImport(historyRunToken, 0, FIRST_PAGE);
   }
 
   logger.info('Handled bridge signal', { events, names: Boolean(names), history: isUuid(historyRunToken) });
