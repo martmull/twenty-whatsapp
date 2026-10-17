@@ -88,7 +88,10 @@ test('the address book is read with first and last names, including contacts sav
   ]);
   const socket = { query: async () => reply } as unknown as WASocket;
 
-  const entries = await fetchAddressBook(socket, keys);
+  const { entries, report } = await fetchAddressBook(socket, keys);
+
+  assert.equal(report.contacts, 2);
+  assert.deepEqual(report.collections.critical_unblock_low, { records: 3, contactRecords: 3 });
 
   assert.deepEqual(
     entries.sort((left, right) => left.fullName.localeCompare(right.fullName)),

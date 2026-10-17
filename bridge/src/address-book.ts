@@ -1,16 +1,16 @@
 import {
+  ALL_WA_PATCH_NAMES,
   S_WHATSAPP_NET,
   decodePatches,
   decodeSyncdSnapshot,
   extractSyncdPatches,
   newLTHashState,
+  proto,
   type ChatMutation,
   type SignalKeyStore,
+  type WAPatchName,
   type WASocket,
 } from '@whiskeysockets/baileys';
-
-// Saved phone contacts live in this app-state collection.
-const CONTACTS_COLLECTION = 'critical_unblock_low';
 
 export type AddressBookEntry = {
   ids: string[];
@@ -58,9 +58,16 @@ export const toAddressBookEntry = ({ syncAction, index }: ChatMutation): Address
     : undefined;
 };
 
-// Reads the saved contacts without touching Baileys' stored app-state version, so its own sync is unaffected.
-export const fetchAddressBook = async (socket: WASocket, keys: SignalKeyStore): Promise<AddressBookEntry[]> => {
-  const getAppStateSyncKey = async (keyId: string) => (await keys.get('app-state-sync-key', [keyId]))[keyId];
+export type AddressBookReport = {
+  contacts: number;
+  collections: Record<string, { records: number; contactRecords: number; error?: string }>;
+};
+
+const readCollection = async (
+  socket: WASocket,
+  name: WAPatchName,
+  getAppStateSyncKey: (keyId: string) => Promise<proto.Message.IAppStateSyncKeyData | null | undefined>,
+): Promise<ChatMutation[]> => {
   const mutations: Record<string, ChatMutation> = {};
   let state = newLTHashState();
 
@@ -75,40 +82,24 @@ export const fetchAddressBook = async (socket: WASocket, keys: SignalKeyStore): 
           content: [
             {
               tag: 'collection',
-              attrs: {
-                name: CONTACTS_COLLECTION,
-                version: state.version.toString(),
-                return_snapshot: (!state.version).toString(),
-              },
+              attrs: { name, version: state.version.toString(), return_snapshot: (!state.version).toString() },
             },
           ],
         },
       ],
     });
-    const collection = (await extractSyncdPatches(result, {}))[CONTACTS_COLLECTION];
+    const collection = (await extractSyncdPatches(result, {}))[name];
     if (!collection) {
       break;
     }
 
     if (collection.snapshot) {
-      const decoded = await decodeSyncdSnapshot(
-        CONTACTS_COLLECTION,
-        collection.snapshot,
-        getAppStateSyncKey,
-        undefined,
-      );
+      const decoded = await decodeSyncdSnapshot(name, collection.snapshot, getAppStateSyncKey, undefined);
       state = decoded.state;
       Object.assign(mutations, decoded.mutationMap);
     }
     if (collection.patches.length > 0) {
-      const decoded = await decodePatches(
-        CONTACTS_COLLECTION,
-        collection.patches,
-        state,
-        getAppStateSyncKey,
-        {},
-        undefined,
-      );
+      const decoded = await decodePatches(name, collection.patches, state, getAppStateSyncKey, {}, undefined);
       state = decoded.state;
       Object.assign(mutations, decoded.mutationMap);
     }
@@ -117,5 +108,39 @@ export const fetchAddressBook = async (socket: WASocket, keys: SignalKeyStore): 
     }
   }
 
-  return Object.values(mutations).flatMap((mutation) => toAddressBookEntry(mutation) ?? []);
+  return Object.values(mutations);
+};
+
+// Reads saved contacts without touching Baileys' stored app-state versions, so its own sync is unaffected.
+// Every collection is read because WhatsApp does not document which one carries contacts.
+export const fetchAddressBook = async (
+  socket: WASocket,
+  keys: SignalKeyStore,
+): Promise<{ entries: AddressBookEntry[]; report: AddressBookReport }> => {
+  const getAppStateSyncKey = async (keyId: string) => (await keys.get('app-state-sync-key', [keyId]))[keyId];
+  const entries: AddressBookEntry[] = [];
+  const report: AddressBookReport = { contacts: 0, collections: {} };
+
+  for (const name of ALL_WA_PATCH_NAMES) {
+    try {
+      const mutations = await readCollection(socket, name, getAppStateSyncKey);
+      const contacts = mutations.flatMap((mutation) => toAddressBookEntry(mutation) ?? []);
+      entries.push(...contacts);
+      report.collections[name] = {
+        records: mutations.length,
+        contactRecords: mutations.filter(
+          ({ syncAction }) => syncAction.value?.contactAction || syncAction.value?.lidContactAction,
+        ).length,
+      };
+    } catch (error) {
+      report.collections[name] = {
+        records: 0,
+        contactRecords: 0,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  report.contacts = entries.length;
+  return { entries, report };
 };

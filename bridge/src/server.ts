@@ -45,6 +45,7 @@ const connection = new WhatsAppConnection(
   resolve(process.env.WHATSAPP_DATA_DIR ?? './data/session'),
   Buffer.from(keyHex, 'hex'),
   notifyTwenty,
+  log,
 );
 
 const isAuthorized = (header: string | undefined) => {
@@ -154,6 +155,10 @@ const jsonRoutes: Record<string, Route> = {
       Array.isArray(body.chatIds) && body.chatIds.length <= 100 && body.chatIds.every((id) => typeof id === 'string'),
     );
     return connection.getHistoryNames(body.chatIds as string[]);
+  },
+  'POST /address-book/sync': () => {
+    requireConnected();
+    return connection.syncAddressBook();
   },
   'POST /history/members': (body) => {
     check(isGroupChatId(body.chatId as string), 'Invalid group ID');

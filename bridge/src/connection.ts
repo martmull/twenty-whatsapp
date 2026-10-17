@@ -17,7 +17,7 @@ import makeWASocket, {
 import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
-import { fetchAddressBook, type AddressBookEntry } from './address-book.js';
+import { fetchAddressBook, type AddressBookEntry, type AddressBookReport } from './address-book.js';
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
@@ -90,6 +90,7 @@ export class WhatsAppConnection {
   private readonly contactNames: EncryptedJsonStore<{ name: string }>;
   private readonly addressBook: EncryptedJsonStore<SavedContact>;
   private addressBookTimer: NodeJS.Timeout | undefined;
+  private appState: { keys: SignalKeyStore; hasKey: () => boolean } | undefined;
   private readonly historyChats: EncryptedJsonStore<HistoryChat>;
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
@@ -108,6 +109,7 @@ export class WhatsAppConnection {
     private readonly encryptionKey: Buffer,
     // Called when Twenty should import queued events (see the bridge webhook in server.ts).
     private readonly onEventsQueued: () => void = () => undefined,
+    private readonly log: (message: string, data?: Record<string, unknown>) => void = () => undefined,
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
@@ -311,17 +313,33 @@ export class WhatsAppConnection {
     }
   }
 
+  async syncAddressBook(): Promise<AddressBookReport & { appStateKey: boolean }> {
+    const socket = this.socket;
+    const appState = this.appState;
+    if (!socket || !appState || this.status.state !== 'connected') {
+      throw new Error('WhatsApp is disconnected');
+    }
+
+    const generation = this.generation;
+    const { entries, report } = await fetchAddressBook(socket, appState.keys);
+    if (generation === this.generation) {
+      await this.recordAddressBook(entries);
+    }
+    const result = { ...report, appStateKey: appState.hasKey() };
+    this.log('Address book synced', result);
+    return result;
+  }
+
   // Baileys reports saved contacts without their first name, so the address book is read again after changes.
-  private scheduleAddressBookSync(socket: WASocket, keys: SignalKeyStore, delayMs: number): void {
+  private scheduleAddressBookSync(delayMs: number): void {
     clearTimeout(this.addressBookTimer);
     const generation = this.generation;
     this.addressBookTimer = setTimeout(() => {
-      if (generation !== this.generation || this.socket !== socket) {
-        return;
+      if (generation === this.generation) {
+        void this.syncAddressBook().catch((error: unknown) =>
+          this.log('Address book sync failed', { error: error instanceof Error ? error.message : String(error) }),
+        );
       }
-      void fetchAddressBook(socket, keys)
-        .then((entries) => (generation === this.generation ? this.recordAddressBook(entries) : undefined))
-        .catch(() => undefined);
     }, delayMs);
   }
 
@@ -819,6 +837,7 @@ export class WhatsAppConnection {
     this.status = { state: 'pairing' };
     const generation = ++this.generation;
     const { state, saveCreds } = await createEncryptedAuthState(this.directory, this.encryptionKey);
+    this.appState = { keys: state.keys, hasKey: () => Boolean(state.creds.myAppStateKeyId) };
     const socket = makeWASocket({
       auth: state,
       printQRInTerminal: false,
@@ -909,7 +928,7 @@ export class WhatsAppConnection {
       await this.recordHistory(contacts, []);
       // Saved contacts arrive by name only; read them again to get first names.
       if (contacts.some((contact) => contact.name)) {
-        this.scheduleAddressBookSync(socket, state.keys, 10_000);
+        this.scheduleAddressBookSync(10_000);
       }
     });
     socket.ev.on('contacts.update', async (contacts) => {
@@ -939,7 +958,7 @@ export class WhatsAppConnection {
           phoneNumber: socket.user?.id?.split(':')[0],
         };
         this.onEventsQueued();
-        this.scheduleAddressBookSync(socket, state.keys, 0);
+        this.scheduleAddressBookSync(0);
         void socket
           .groupFetchAllParticipating()
           .then((groups) => {
