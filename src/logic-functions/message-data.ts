@@ -7,6 +7,7 @@ import {
   chatNumber,
   digits,
   isChatId,
+  isContactId,
   isDirectChatId,
   isEventId,
   isGroupChatId,
@@ -162,6 +163,54 @@ export const findPeopleByPhones = async (client: CoreApiClient, numbers: string[
   }
 
   return peopleByPhone;
+};
+
+// A contact saved in the phone's address book: the only people the app creates as People.
+export type SavedContact = { phoneNumber: string; firstName: string; lastName: string };
+
+// Creates a Person for each saved contact whose number no Person has yet, and adds them to peopleByPhone.
+export const createPeopleForContacts = async (
+  client: CoreApiClient,
+  contacts: SavedContact[],
+  peopleByPhone: Map<string, Person[]>,
+): Promise<number> => {
+  const missing = [...new Map(contacts.map((contact) => [digits(contact.phoneNumber), contact])).entries()].filter(
+    ([number, contact]) => number && contact.firstName.trim() && !peopleByPhone.has(number),
+  );
+
+  if (missing.length === 0) {
+    return 0;
+  }
+
+  const created = await client.mutation({
+    createPeople: {
+      __args: {
+        data: missing.map(([number, { firstName, lastName }]) => ({
+          name: { firstName: firstName.trim(), lastName: lastName.trim() },
+          phones: {
+            primaryPhoneNumber: `+${number}`,
+            primaryPhoneCountryCode: '',
+            primaryPhoneCallingCode: '',
+            additionalPhones: null,
+          },
+        })),
+      },
+      id: true,
+      name: { firstName: true, lastName: true },
+      phones: { primaryPhoneNumber: true, primaryPhoneCallingCode: true },
+    },
+  });
+  const people = (created.createPeople ?? []) as Person[];
+
+  if (people.length !== missing.length) {
+    throw new Error('Could not create People');
+  }
+
+  for (const person of people) {
+    peopleByPhone.set(personPhone(person), [person]);
+  }
+
+  return people.length;
 };
 
 export const ensureAccount = async (client: CoreApiClient, phoneNumber: string): Promise<string> => {
@@ -419,11 +468,15 @@ export const findConversations = async (
   );
 };
 
-// Imports the messages queued by the bridge. Direct chats need exactly one matching Person;
-// group chats are imported only once an admin has imported their history (the conversation exists).
+// Names the bridge knows for a chat: the display name, and first and last names from the phone's address book.
+export type ContactName = { chatId: string; name: string; firstName?: string; lastName?: string };
+
+// Imports the messages queued by the bridge. Direct chats need exactly one matching Person, created
+// when the contact is saved in the phone; group chats are imported only once an admin has imported
+// their history (the conversation exists), creating People for senders saved in the phone.
 export type SyncResult = { imported: number; ignored: number; acknowledged: number; remaining: boolean };
 
-export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
+export const syncMessages = async (logger: Logger, client = applicationClient()): Promise<SyncResult> => {
   const status = await getBridgeStatus();
 
   if (status.state !== 'connected' || !status.phoneNumber) {
@@ -443,11 +496,11 @@ export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
   let imported = 0;
   let ignored = 0;
   let acknowledged = 0;
+  let createdPeople = 0;
   let remaining: boolean;
   let completed = false;
 
   try {
-    const client = applicationClient();
     const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
     // Media uploads are slow: stop the batch after the first one, the bridge asks again for the rest.
     const firstMediaIndex = events.findIndex((event) => event.media);
@@ -457,10 +510,45 @@ export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
     for (const event of batch.filter(isValidBridgeEvent)) {
       eventsByChat.set(event.chatId, [...(eventsByChat.get(event.chatId) ?? []), event]);
     }
+    const chatIds = [...eventsByChat.keys()];
+    const groupSenderIds = [
+      ...new Set(
+        batch.flatMap((event) => (isGroupChatId(event.chatId) && isContactId(event.senderId) ? [event.senderId] : [])),
+      ),
+    ];
+    // Best effort: a group's messages are imported even when its senders cannot become People.
+    const savedSenders =
+      groupSenderIds.length > 0
+        ? await bridgePost<(SavedContact & { id: string })[]>('/contacts/saved', { ids: groupSenderIds }).catch(
+            (error: unknown) => {
+              logger.warn('Could not look up saved group senders', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+              return [];
+            },
+          )
+        : [];
+    const savedSenderById = new Map(savedSenders.map((sender) => [sender.id, sender]));
     const [people, conversations] = await Promise.all([
-      findPeopleByPhones(client, [...eventsByChat.keys()].filter(isDirectChatId).map(chatNumber)),
-      findConversations(client, accountId, [...eventsByChat.keys()]),
+      findPeopleByPhones(client, [
+        ...chatIds.filter(isDirectChatId).map(chatNumber),
+        ...savedSenders.map((sender) => digits(sender.phoneNumber)),
+      ]),
+      findConversations(client, accountId, chatIds),
     ]);
+    // New direct chats need the contact's saved name; conversations still named after a number need a better one.
+    const chatsToName = chatIds.filter((chatId) => {
+      const conversation = conversations.get(chatId);
+      return conversation ? isPhoneLikeName(conversation.name) : isDirectChatId(chatId);
+    });
+    const contactByChatId = new Map(
+      chatsToName.length > 0
+        ? (await bridgePost<ContactName[]>('/history/names', { chatIds: chatsToName }, 30_000)).map((contact) => [
+            contact.chatId,
+            contact,
+          ])
+        : [],
+    );
 
     if (invalid.length > 0) {
       logger.warn('Dropping invalid bridge events', { count: invalid.length });
@@ -471,14 +559,23 @@ export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
     for (const [chatId, chatEvents] of eventsByChat) {
       try {
         const conversation = conversations.get(chatId) ?? null;
+        const contact = contactByChatId.get(chatId);
 
         if (isGroupChatId(chatId)) {
           if (conversation) {
+            const senders = chatEvents.flatMap((event) => savedSenderById.get(event.senderId ?? '') ?? []);
+            createdPeople += await createPeopleForContacts(client, senders, people).catch((error: unknown) => {
+              logger.warn('Could not create People for group senders', {
+                chatId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              return 0;
+            });
             imported += await importChatMessages(
               client,
               accountId,
               chatId,
-              conversation.name,
+              contact?.name ?? conversation.name,
               chatEvents,
               undefined,
               conversation,
@@ -487,6 +584,14 @@ export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
             ignored += chatEvents.length;
           }
         } else {
+          // Only contacts saved in the phone become People; other unknown numbers are ignored.
+          if (!people.has(chatNumber(chatId)) && contact?.firstName) {
+            createdPeople += await createPeopleForContacts(
+              client,
+              [{ phoneNumber: chatNumber(chatId), firstName: contact.firstName, lastName: contact.lastName ?? '' }],
+              people,
+            );
+          }
           const matches = people.get(chatNumber(chatId)) ?? [];
 
           if (matches.length === 1) {
@@ -494,7 +599,7 @@ export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
               client,
               accountId,
               chatId,
-              personName(matches[0]) || chatNumber(chatId),
+              personName(matches[0]) || contact?.name || chatNumber(chatId),
               chatEvents,
               matches[0],
               conversation,
@@ -524,7 +629,7 @@ export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
     remaining = released?.remaining ?? true;
   }
 
-  logger.info('Synced messages', { imported, ignored, remaining });
+  logger.info('Synced messages', { imported, ignored, createdPeople, remaining });
   return { imported, ignored, acknowledged, remaining };
 };
 

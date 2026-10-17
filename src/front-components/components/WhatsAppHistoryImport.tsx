@@ -121,9 +121,10 @@ export const WhatsAppHistoryImport = () => {
         const result = await historyRequest<QueueResult>({
           action: 'import',
           rangeDays,
-          chats: importable
-            .slice(start, start + CHATS_PER_REQUEST)
-            .map((chat) => ({ chatId: chat.chatId, createPerson: chat.match === 'new' })),
+          chats: importable.slice(start, start + CHATS_PER_REQUEST).map((chat) => ({
+            chatId: chat.chatId,
+            createPerson: chat.match === 'new' || (chat.match === 'group' && createPeople),
+          })),
         });
         queued += result.queued;
         failed += result.failures.length;

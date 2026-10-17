@@ -90,8 +90,12 @@ export type GroupMember = {
   displayName?: string;
   firstName?: string;
   lastName?: string;
+  // Saved in the phone's address book, so Twenty may create a Person for them.
+  isSavedContact?: boolean;
   isMe?: boolean;
 };
+
+export type SavedContactInfo = { id: string; phoneNumber: string; firstName: string; lastName: string };
 
 export class WhatsAppConnection {
   private socket: WASocket | undefined;
@@ -112,9 +116,9 @@ export class WhatsAppConnection {
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
   readonly historyImports: HistoryImportQueue;
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
-  private readonly pendingGroupNameLookups = new Set<string>();
-  private readonly groupNameLookupQueue: string[] = [];
-  private activeGroupNameLookups = 0;
+  private readonly groupSubjectLookups = new Map<string, Promise<string | undefined>>();
+  private readonly groupSubjectQueue: (() => void)[] = [];
+  private activeGroupSubjectLookups = 0;
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
   private sendQueue: Promise<unknown> = Promise.resolve();
@@ -376,62 +380,90 @@ export class WhatsAppConnection {
   async getHistoryNames(
     chatIds: string[],
   ): Promise<{ chatId: string; name: string; firstName?: string; lastName?: string }[]> {
+    if (!chatIds.every(isSupportedChatId)) {
+      throw new Error('Invalid chat ID');
+    }
+
     await this.historyWrites;
-    const names: { chatId: string; name: string; firstName?: string; lastName?: string }[] = [];
+    const names = await Promise.all(
+      chatIds.map(async (chatId) => {
+        const saved = await this.historyChats.read(chatId);
+        return saved
+          ? [
+              {
+                chatId,
+                name: await this.resolveHistoryName(chatId, saved.name),
+                ...(await this.savedContactName(chatId)),
+              },
+            ]
+          : [];
+      }),
+    );
 
-    for (const chatId of chatIds) {
-      if (!isSupportedChatId(chatId)) {
-        throw new Error('Invalid chat ID');
-      }
-      const saved = await this.historyChats.read(chatId);
-      if (!saved) {
-        continue;
-      }
-      const name =
-        (isDirectChatId(chatId) ? (await this.addressBook.read(chatId))?.fullName : undefined) ||
-        saved.name ||
-        (isGroupChatId(chatId) ? chatId.split('@')[0] : `+${chatId.split('@')[0]}`);
-      if (isGroupChatId(chatId) && /^\+?\d+$/.test(name)) {
-        this.scheduleGroupNameLookup(chatId);
-      }
-      names.push({ chatId, name, ...(await this.savedContactName(chatId)) });
-    }
-
-    return names;
+    return names.flat();
   }
 
-  private scheduleGroupNameLookup(chatId: string): void {
-    if (this.status.state !== 'connected' || !this.socket || this.pendingGroupNameLookups.has(chatId)) {
-      return;
-    }
-    this.pendingGroupNameLookups.add(chatId);
-    this.groupNameLookupQueue.push(chatId);
-    this.drainGroupNameLookups();
-  }
+  // Phone-number and LID identities of people saved in the phone's address book; others are left out.
+  async getSavedContacts(ids: string[]): Promise<SavedContactInfo[]> {
+    await this.historyWrites;
+    const ownNumber = this.status.phoneNumber?.replace(/\D/g, '');
+    const contacts: SavedContactInfo[] = [];
 
-  private drainGroupNameLookups(): void {
-    while (this.activeGroupNameLookups < 3 && this.groupNameLookupQueue.length > 0) {
-      const chatId = this.groupNameLookupQueue.shift()!;
-      const socket = this.socket;
-      const generation = this.generation;
-      if (!socket) {
-        this.pendingGroupNameLookups.delete(chatId);
-        continue;
-      }
-      this.activeGroupNameLookups += 1;
-      void socket
-        .groupMetadata(chatId)
-        .then(async (metadata) => {
-          if (generation === this.generation && metadata.subject?.trim()) {
-            await this.recordHistory([{ id: chatId, name: metadata.subject }], []);
-          }
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          this.pendingGroupNameLookups.delete(chatId);
-          this.activeGroupNameLookups -= 1;
-          this.drainGroupNameLookups();
+    for (const id of new Set(ids)) {
+      const phoneId = id.endsWith('@lid') ? (await this.phoneNumbers.read(id))?.chatId : id;
+      const savedContact =
+        (phoneId ? await this.addressBook.read(phoneId) : undefined) ?? (await this.addressBook.read(id));
+      const phoneNumber = phoneId && isDirectChatId(phoneId) ? phoneId.split('@')[0] : undefined;
+
+      if (savedContact && phoneNumber && phoneNumber !== ownNumber) {
+        contacts.push({
+          id,
+          phoneNumber: `+${phoneNumber}`,
+          firstName: savedContact.firstName,
+          lastName: savedContact.lastName,
         });
+      }
+    }
+
+    return contacts;
+  }
+
+  // Queued three at a time: WhatsApp rate-limits group metadata requests.
+  private lookupGroupSubject(chatId: string): Promise<string | undefined> {
+    const pending = this.groupSubjectLookups.get(chatId);
+    const socket = this.socket;
+    if (pending || !socket || this.status.state !== 'connected') {
+      return pending ?? Promise.resolve(undefined);
+    }
+
+    const generation = this.generation;
+    const lookup = new Promise<void>((start) => {
+      this.groupSubjectQueue.push(start);
+      this.drainGroupSubjectLookups();
+    })
+      .then(() => socket.groupMetadata(chatId))
+      .then(async (metadata) => {
+        const subject = metadata.subject?.trim().slice(0, 120);
+        if (!subject || generation !== this.generation) {
+          return undefined;
+        }
+        await this.recordHistory([{ id: chatId, name: subject }], []);
+        return subject;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.groupSubjectLookups.delete(chatId);
+        this.activeGroupSubjectLookups -= 1;
+        this.drainGroupSubjectLookups();
+      });
+    this.groupSubjectLookups.set(chatId, lookup);
+    return lookup;
+  }
+
+  private drainGroupSubjectLookups(): void {
+    while (this.activeGroupSubjectLookups < 3 && this.groupSubjectQueue.length > 0) {
+      this.activeGroupSubjectLookups += 1;
+      this.groupSubjectQueue.shift()!();
     }
   }
 
@@ -567,12 +599,11 @@ export class WhatsAppConnection {
       return savedName;
     }
 
-    const name = isGroupChatId(chatId)
-      ? this.status.state === 'connected'
-        ? (await this.socket?.groupMetadata(chatId).catch(() => undefined))?.subject
-        : undefined
-      : (await this.contactNames.read(chatId))?.name;
-    const resolved = name?.trim().slice(0, 120);
+    if (isGroupChatId(chatId)) {
+      return (await this.lookupGroupSubject(chatId)) || savedName || fallback;
+    }
+
+    const resolved = (await this.contactNames.read(chatId))?.name?.trim().slice(0, 120);
     if (!resolved || /^\+?\d+$/.test(resolved)) {
       return savedName || fallback;
     }
@@ -635,6 +666,7 @@ export class WhatsAppConnection {
           id: participant.id,
           ...(phoneId ? { phoneNumber: `+${phoneId.split('@')[0]}` } : {}),
           ...(displayName ? { displayName, firstName, lastName: lastNameParts.join(' ') } : {}),
+          ...(savedContact && !isMe ? { isSavedContact: true } : {}),
           ...(isMe ? { isMe: true } : {}),
         };
       }),

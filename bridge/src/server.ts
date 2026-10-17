@@ -229,6 +229,14 @@ const jsonRoutes: Record<string, Route> = {
     requireConnected();
     return connection.syncAddressBook();
   },
+  'POST /contacts/saved': (body) => {
+    check(
+      Array.isArray(body.ids) &&
+        body.ids.length <= 200 &&
+        body.ids.every((id) => typeof id === 'string' && /^\d{7,15}@(?:s\.whatsapp\.net|lid)$/.test(id)),
+    );
+    return connection.getSavedContacts(body.ids as string[]);
+  },
   'POST /history/members': (body) => {
     check(isGroupChatId(body.chatId as string), 'Invalid group ID');
     return connection.getGroupMembers(body.chatId as string);

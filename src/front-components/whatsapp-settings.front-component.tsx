@@ -170,7 +170,7 @@ const WhatsAppSettings = () => {
             </span>
             <span style={styles.muted}>
               {t(
-                'New direct messages from matched People, including available images, videos, and audio, appear in the inbox and on Person records. Selected groups appear in the shared inbox after import.',
+                'New direct messages from People and saved contacts, including available images, videos, and audio, appear in the inbox and on Person records. Saved contacts become People; other numbers are ignored. Selected groups appear in the shared inbox after import.',
               )}
             </span>
             <div>
@@ -242,7 +242,7 @@ const WhatsAppSettings = () => {
               <strong>{t('Before you connect')}</strong>
               <p style={styles.muted}>
                 {t(
-                  'This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages and available images, videos, and audio from matched People are shared with permitted workspace members. Available earlier history is stored encrypted on the bridge and is shared only if you import it.',
+                  'This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages and available images, videos, and audio from People and saved contacts are shared with permitted workspace members, and saved contacts are added as People. Available earlier history is stored encrypted on the bridge and is shared only if you import it.',
                 )}
               </p>
               <a href="https://www.whatsapp.com/legal/terms-of-service" target="_blank" rel="noreferrer">
