@@ -1,7 +1,12 @@
 import { CoreApiClient } from 'twenty-client-sdk/core';
 
 import { bridgePost } from 'src/logic-functions/bridge-request';
-import { chunkRecords, MAX_UPSERT_RECORDS, upsertConversations } from 'src/logic-functions/record-writes';
+import {
+  chunkRecords,
+  countingClient,
+  MAX_UPSERT_RECORDS,
+  upsertConversations,
+} from 'src/logic-functions/record-writes';
 import type { Logger } from 'src/logic-functions/utils/logger';
 import { digits, isChatId, isEventId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
 
@@ -353,7 +358,9 @@ const fullNameRenames = async (client: CoreApiClient): Promise<{ id: string; nam
 
 // Updates conversation names from WhatsApp contact names, when the bridge signals name changes. The
 // bridge lists the chats renamed since the last refresh, so a refresh costs one query and one upsert.
-export const syncConversationNames = async (logger: Logger, client: CoreApiClient = applicationClient()) => {
+export const syncConversationNames = async (logger: Logger, baseClient: CoreApiClient = applicationClient()) => {
+  const counter = { requests: 0 };
+  const client = countingClient(baseClient, counter);
   // A bridge from before name changes were tracked answers 404: compare every conversation.
   const changes = await bridgePost<NameChanges>('/history/names/changes').catch(
     () => ({ full: true, names: [] }) as Omit<NameChanges, 'version'> & { version?: number },
@@ -380,6 +387,10 @@ export const syncConversationNames = async (logger: Logger, client: CoreApiClien
 
   if (changes.version !== undefined) {
     await bridgePost('/history/names/changes/ack', { version: changes.version });
+  }
+  // Charged to the bridge's budget afterwards, so the other background jobs leave room for it.
+  if (counter.requests > 0) {
+    await bridgePost('/budget/spend', { requests: counter.requests }).catch(() => undefined);
   }
 
   logger.info('Synced conversation names', { renamed: renames.length, full: changes.full });

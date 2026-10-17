@@ -166,3 +166,33 @@ test('imports a whole batch with media, handing the files to media jobs', async 
   assert.ok(queued.every((item) => item.fileName === 'photo.jpg'));
   assert.equal(twenty.store.whatsappMessages.filter((message) => message.mediaKind === 'IMAGE').length, 10);
 });
+
+test('waits as long as the bridge asks when its budget is spent, without touching Twenty', async () => {
+  const twenty = createFakeTwenty();
+  const bridge = mockBridge({
+    '/status': () => ({ state: 'connected', phoneNumber: '15550000000', twentyAccountId: ACCOUNT.id }),
+    '/events/claim': () => ({ events: [], jobKey: 'boot.9', waitMs: 1_500 }),
+  });
+  restore = bridge.restore;
+
+  const result = await syncMessages(silentLogger, { client: twenty.client });
+
+  assert.deepEqual(result, {
+    imported: 0,
+    ignored: 0,
+    acknowledged: 0,
+    remaining: true,
+    jobKey: 'boot.9',
+    retryInMs: 1_500,
+  });
+  assert.deepEqual(twenty.requests, []);
+});
+
+test('reports the requests a batch made, so the bridge can correct its estimate', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: [person(1)] });
+  const { released } = bridgeWith([event(1, chatId(1))]);
+
+  await syncMessages(silentLogger, { client: twenty.client });
+
+  assert.equal(released[0].requests, twenty.requests.length);
+});

@@ -134,3 +134,27 @@ test('queues the files it had no time for as a new job', async () => {
   assert.equal(queued[0].payload.items?.length, 3);
   assert.equal(queued[0].jobId, mediaJobId({ items: range(5).map(item).slice(2) }));
 });
+
+test('gives up only after the bridge stayed unreachable, not after waiting for a slot', async () => {
+  const queued: { payload: { attempt?: number; failures?: number } }[] = [];
+  const enqueue = async (payload: { attempt?: number; failures?: number }) => {
+    queued.push({ payload });
+  };
+  const twenty = createFakeTwenty();
+
+  bridgeWith({ waitMs: 5_000 });
+  await runMediaImport({ items: [item(1)], attempt: 20, failures: 7 }, silentLogger, {
+    client: twenty.client,
+    enqueue,
+  });
+  assert.deepEqual(queued[0].payload, { items: [item(1)], uploaded: [], attempt: 21, failures: 7 });
+
+  restore();
+  const bridge = mockBridge({});
+  restore = bridge.restore;
+  const result = await runMediaImport({ items: [item(1)], attempt: 21, failures: 7 }, silentLogger, {
+    client: twenty.client,
+    enqueue,
+  });
+  assert.deepEqual(result, { status: 'dropped' });
+});

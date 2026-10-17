@@ -140,3 +140,19 @@ export const upsertConversations = (
 
 export const upsertPeople = (client: CoreApiClient, records: Record<string, unknown>[]): Promise<{ id: string }[]> =>
   upsertRecords(client, 'createPeople', records, { id: true });
+
+// Counts the root operations made through the client: what Twenty rate limits, and what a job
+// reports back to the bridge's budget.
+export const countingClient = (client: CoreApiClient, counter: { requests: number }): CoreApiClient =>
+  new Proxy(client, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if ((property === 'query' || property === 'mutation') && typeof value === 'function') {
+        return (selection: Record<string, unknown>, ...rest: unknown[]) => {
+          counter.requests += Math.max(1, Object.keys(selection ?? {}).length);
+          return value.apply(target, [selection, ...rest]);
+        };
+      }
+      return value;
+    },
+  });

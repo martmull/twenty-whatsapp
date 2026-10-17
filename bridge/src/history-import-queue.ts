@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import type { ApiBudget } from './api-budget.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import type { MessageEvent } from './message-event.js';
 
@@ -15,6 +16,8 @@ export const MAX_PAGE_MESSAGES = 200;
 const MAX_PAGE_BYTES = 450_000;
 // Summaries of finished chats are written together, once this many are waiting or nothing else is.
 export const SUMMARY_FLUSH_SIZE = 20;
+// Stays under the 200 conversations Twenty returns for the summary query.
+const MAX_SUMMARIES_PER_PAGE = 100;
 const LEASE_MS = 6 * 60_000;
 // A chain that missed its scheduled run by this much is considered lost and can be resumed.
 const STALL_GRACE_MS = 3 * 60_000;
@@ -71,14 +74,22 @@ export type HistoryImportProgress = {
   state: 'queued' | 'done' | 'failed';
 };
 
-type ClaimResult = HistoryImportPage | { stale: true } | { done: true };
-
 // What Twenty needs to queue the next job: the page it should claim and the key naming the job.
 export type ChainStep = { remaining: number; pageSeq: number; nextJobKey: string };
+
+// The API budget is spent: the job queues itself for the same page after waitMs.
+type ClaimWait = { waitMs: number; pageSeq: number; nextJobKey: string };
+
+type ClaimResult = HistoryImportPage | ClaimWait | { stale: true } | { done: true };
+
+// A page costs one messages upsert, and a summary flush one query and one upsert.
+const PAGE_COST = 1;
+const SUMMARY_FLUSH_COST = 2;
 
 type Lease = {
   id: string;
   pageSeq: number;
+  cost: number;
   expiresAt: number;
   chats: (HistoryImportPageChat & { taskId: string })[];
   summaryTaskIds: { chatId: string; taskId: string }[];
@@ -91,6 +102,7 @@ type HistoryImportQueueOptions = {
   onChainRestarted?: (runToken: string) => void;
   // A chain is only restarted while WhatsApp is connected, since its jobs could not claim pages.
   canRun?: () => boolean;
+  budget?: Pick<ApiBudget, 'take' | 'adjust'>;
 };
 
 const isAfter = (message: MessageEvent, cursor?: Cursor) =>
@@ -111,15 +123,17 @@ export class HistoryImportQueue {
   private readonly now: () => number;
   private readonly onChainRestarted: (runToken: string) => void;
   private readonly canRun: () => boolean;
+  private readonly budget: Pick<ApiBudget, 'take' | 'adjust'> | undefined;
 
   constructor(
     directory: string,
     encryptionKey: Buffer,
     // Messages of a chat sorted by sentAt then eventId, as kept in the history cache.
     private readonly readMessages: (chatId: string) => Promise<MessageEvent[] | undefined>,
-    { now = Date.now, onChainRestarted = () => undefined, canRun = () => true }: HistoryImportQueueOptions = {},
+    { now = Date.now, onChainRestarted = () => undefined, canRun = () => true, budget }: HistoryImportQueueOptions = {},
   ) {
     this.tasks = new EncryptedJsonStore(directory, encryptionKey);
+    this.budget = budget;
     this.now = now;
     this.onChainRestarted = onChainRestarted;
     this.canRun = canRun;
@@ -257,7 +271,8 @@ export class HistoryImportQueue {
     }
 
     const pending = await this.pendingSummaries();
-    return { chats, summaryTasks: chats.length === 0 || pending.length >= SUMMARY_FLUSH_SIZE ? pending : [] };
+    const flush = chats.length === 0 || pending.length >= SUMMARY_FLUSH_SIZE;
+    return { chats, summaryTasks: flush ? pending.slice(0, MAX_SUMMARIES_PER_PAGE) : [] };
   }
 
   claim(runToken: string, pageSeq?: number): Promise<ClaimResult> {
@@ -284,6 +299,15 @@ export class HistoryImportQueue {
         return { done: true as const };
       }
 
+      const cost = (chats.length > 0 ? PAGE_COST : 0) + (summaryTasks.length > 0 ? SUMMARY_FLUSH_COST : 0);
+      const decision = this.budget?.take(cost, 'background') ?? { granted: true as const };
+      if (!decision.granted) {
+        this.pageAttempt += 1;
+        this.nextRunAt = this.now() + decision.waitMs;
+        this.armStallCheck(decision.waitMs);
+        return { waitMs: decision.waitMs, pageSeq: this.pageSeq, nextJobKey: this.nextJobKey() };
+      }
+
       const leaseId = randomUUID();
       const page: HistoryImportPage = {
         leaseId,
@@ -303,6 +327,7 @@ export class HistoryImportQueue {
       this.lease = {
         id: leaseId,
         pageSeq: this.pageSeq,
+        cost,
         expiresAt: this.now() + LEASE_MS,
         chats,
         summaryTaskIds: summaryTasks.map(({ chatId, taskId }) => ({ chatId, taskId })),
@@ -315,10 +340,17 @@ export class HistoryImportQueue {
   }
 
   // Records the page as imported. `importedByChat` counts the messages Twenty created, per chat.
-  complete(leaseId: string, importedByChat: Record<string, number>, nextRunInMs: number): Promise<ChainStep> {
+  // `requests` is what the job actually spent, correcting the claim's estimate.
+  complete(
+    leaseId: string,
+    importedByChat: Record<string, number>,
+    nextRunInMs: number,
+    requests?: number,
+  ): Promise<ChainStep> {
     return this.serialize(async () => {
       const lease = this.takeLease(leaseId);
 
+      if (lease && requests !== undefined) this.budget?.adjust(requests - lease.cost);
       if (lease) {
         for (const chat of lease.chats) {
           const task = await this.tasks.read(chat.chatId);
@@ -353,11 +385,17 @@ export class HistoryImportQueue {
   }
 
   // Gives the page back after a failure. A chat that keeps failing is set aside as failed.
-  release(leaseId: string, failed: boolean, nextRunInMs: number): Promise<ChainStep & { failures: number }> {
+  release(
+    leaseId: string,
+    failed: boolean,
+    nextRunInMs: number,
+    requests?: number,
+  ): Promise<ChainStep & { failures: number }> {
     return this.serialize(async () => {
       const lease = this.takeLease(leaseId);
       let failures = 0;
 
+      if (lease && requests !== undefined) this.budget?.adjust(requests - lease.cost);
       if (lease) {
         this.pageAttempt += 1;
         for (const chat of failed ? lease.chats : []) {

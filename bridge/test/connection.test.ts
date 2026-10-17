@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { proto, type Chat, type WAMessage } from '@whiskeysockets/baileys';
 
+import { ApiBudget } from '../src/api-budget.js';
 import { WhatsAppConnection, type BridgeSignal, type ConnectionStatus } from '../src/connection.js';
 import { createEncryptedAuthState } from '../src/encrypted-auth-state.js';
 import type { MessageEvent } from '../src/message-event.js';
@@ -691,6 +692,35 @@ test('lists the chats renamed since the last refresh, and asks for a full refres
 
     connection.acknowledgeNameChanges((await connection.getNameChanges()).version);
     assert.deepEqual(await connection.getNameChanges(), { version: 2, full: false, names: [] });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a sync batch waits for the API budget, and only one sync job waits at a time', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-budget-'));
+  const budget = new ApiBudget(10);
+  const connection = new WhatsAppConnection(directory, randomBytes(32), undefined, undefined, budget);
+  const events = (connection as unknown as { events: { write: (key: string, value: MessageEvent) => Promise<void> } })
+    .events;
+
+  try {
+    await events.write('a'.repeat(64), {
+      eventId: 'a'.repeat(64),
+      chatId: CHAT_ID,
+      providerMessageId: 'message-a',
+      direction: 'inbound',
+      text: 'Hello',
+      sentAt: new Date().toISOString(),
+    });
+    budget.adjust(20);
+
+    const first = await connection.claimEvents();
+    assert.equal(first.leaseId, undefined);
+    assert.ok(first.waitMs && first.waitMs > 0, 'the job is told when to come back');
+    const second = await connection.claimEvents();
+    assert.equal(second.waitMs, undefined, 'a second job ends: the first one will come back');
+    assert.equal(second.leaseId, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

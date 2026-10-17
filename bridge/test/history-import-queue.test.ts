@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { ApiBudget } from '../src/api-budget.js';
 import { HistoryImportQueue, MAX_PAGE_MESSAGES, type HistoryImportPage } from '../src/history-import-queue.js';
 import type { MessageEvent } from '../src/message-event.js';
 
@@ -30,18 +31,23 @@ const withQueue = async (
   run: (
     queue: HistoryImportQueue,
     clock: { now: number },
-    world: { connected: boolean; restartedChains: string[] },
+    world: { connected: boolean; restartedChains: string[]; budget: ApiBudget },
   ) => Promise<void>,
 ) => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-imports-'));
   const clock = { now: Date.UTC(2026, 9, 16) };
-  const world = { connected: true, restartedChains: [] as string[] };
+  const world = {
+    connected: true,
+    restartedChains: [] as string[],
+    budget: new ApiBudget(100, () => clock.now),
+  };
   try {
     await run(
       new HistoryImportQueue(directory, randomBytes(32), async (chatId) => messagesByChat[chatId], {
         now: () => clock.now,
         onChainRestarted: (runToken) => world.restartedChains.push(runToken),
         canRun: () => world.connected,
+        budget: world.budget,
       }),
       clock,
       world,
@@ -240,5 +246,21 @@ test('counts only the messages inside the selected range', async () => {
       asPage(await queue.claim(runToken!, 0)).chats[0].messages.map((item) => item.eventId),
       [recent.eventId],
     );
+  });
+});
+
+test('when the API budget is spent, tells the job to come back for the same page', async () => {
+  await withQueue({ [CHAT_ID]: messages(3) }, async (queue, clock, world) => {
+    const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
+    world.budget.adjust(95);
+
+    const wait = await queue.claim(runToken!, 0);
+    assert.deepEqual(wait, { waitMs: 3_600, pageSeq: 0, nextJobKey: '0-1' });
+    assert.deepEqual(await queue.recoverStalled(), {}, 'a waiting chain is alive');
+
+    clock.now += 3_600;
+    const page = asPage(await queue.claim(runToken!, 0));
+    await queue.complete(page.leaseId, {}, 0, 3);
+    assert.ok('waitMs' in (await queue.claim(runToken!, 1)), 'requests beyond the estimate are charged');
   });
 });

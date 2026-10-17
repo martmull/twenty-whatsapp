@@ -1,13 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
-import {
-  HISTORY_IMPORT_REQUESTS_PER_MINUTE,
-  historyJobId,
-  paceDelay,
-  runHistoryImportStep,
-  type ChainPosition,
-} from '../src/logic-functions/history-import';
+import { historyJobId, runHistoryImportStep, type ChainPosition } from '../src/logic-functions/history-import';
 import { createFakeTwenty, mockBridge } from './fake-twenty';
 
 const RUN_TOKEN = '22222222-2222-4222-8222-222222222222';
@@ -94,7 +88,8 @@ test('imports a 200-message page of two chats in one request, then queues the ne
   });
   assert.equal(scheduled.length, 1);
   assert.deepEqual(scheduled[0].position, { pageSeq: 5, jobKey: '5' });
-  assert.ok(scheduled[0].delayMs <= 60_000 / HISTORY_IMPORT_REQUESTS_PER_MINUTE);
+  assert.equal(scheduled[0].delayMs, 0, 'the bridge paces the chain');
+  assert.equal(calls.find((call) => call.path === '/history/imports/complete')?.body.requests, 1);
   assert.equal(historyJobId(RUN_TOKEN, '5'), `history.${RUN_TOKEN}.5`);
 });
 
@@ -188,6 +183,7 @@ test('gives the page back without blaming its chats when Twenty rate limits, and
     leaseId: LEASE_ID,
     failed: false,
     nextRunInMs: 7_000,
+    requests: 1,
   });
   assert.deepEqual(scheduled, [{ runToken: RUN_TOKEN, delayMs: 7_000, position: { pageSeq: 4, jobKey: '4-1' } }]);
 });
@@ -212,7 +208,23 @@ test('without a page position from the bridge, queues the next job without a job
   assert.equal(scheduled[0].position, undefined);
 });
 
-test('paces requests over the per-minute budget', () => {
-  assert.equal(paceDelay(HISTORY_IMPORT_REQUESTS_PER_MINUTE, 0), 60_000);
-  assert.equal(paceDelay(1, 60_000), 0);
+test('comes back for the same page when the bridge has no budget for it', async () => {
+  const twenty = createFakeTwenty();
+  bridgeWith({ waitMs: 2_500, pageSeq: 4, nextJobKey: '4-2' });
+
+  const { result, scheduled } = await run(twenty);
+
+  assert.deepEqual(result, { status: 'waiting', waitMs: 2_500 });
+  assert.deepEqual(twenty.requests, []);
+  assert.deepEqual(scheduled, [{ runToken: RUN_TOKEN, delayMs: 2_500, position: { pageSeq: 4, jobKey: '4-2' } }]);
+});
+
+test('reports a rate limit to the bridge, so other background jobs hold off too', async () => {
+  const twenty = createFakeTwenty();
+  twenty.failNextRequest({ errors: [{ extensions: { code: 'RATE_LIMITED', retryAfterMs: 9_000 } }] });
+  const calls = bridgeWith(page(), { remaining: 1, pageSeq: 4, nextJobKey: '4-1' });
+
+  await run(twenty);
+
+  assert.deepEqual(calls.find((call) => call.path === '/budget/penalty')?.body, { retryAfterMs: 9_000 });
 });

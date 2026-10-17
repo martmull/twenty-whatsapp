@@ -2,7 +2,7 @@ import type { CoreApiClient } from 'twenty-client-sdk/core';
 import { enqueueJobs } from 'twenty-sdk/logic-function';
 
 import { HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
-import { bridgePost } from 'src/logic-functions/bridge-request';
+import { bridgePost, reportRateLimit } from 'src/logic-functions/bridge-request';
 import { enqueueMediaImports } from 'src/logic-functions/media-import';
 import {
   applicationClient,
@@ -15,6 +15,7 @@ import {
 } from 'src/logic-functions/message-data';
 import { attachMedia, pendingMedia, type MediaItem } from 'src/logic-functions/message-media';
 import {
+  countingClient,
   MAX_UPSERT_RECORDS,
   rateLimitRetryAfterMs,
   upsertConversations,
@@ -23,9 +24,8 @@ import {
 import type { Logger } from 'src/logic-functions/utils/logger';
 import { isUuid } from 'src/logic-functions/utils/validators';
 
-// History import runs as a chain of jobs, one page per job, paced to leave most of the app's API
-// budget (500 requests per minute, shared by every workspace using the app) to live sync and the UI.
-export const HISTORY_IMPORT_REQUESTS_PER_MINUTE = 120;
+// History import runs as a chain of jobs, one page per job. The bridge paces the chain: it grants
+// each page from its API budget, or tells the job when to come back.
 const RETRY_DELAY_MS = 30_000;
 // Platform retries of a page are safe: the bridge hands the same page back and writes are upserts.
 const HISTORY_JOB_RETRY_LIMIT = 2;
@@ -40,35 +40,19 @@ type PageSummary = {
 };
 type HistoryImportPage = { leaseId: string; pageSeq: number; chats: PageChat[]; summaries: PageSummary[] };
 type ChainStep = { remaining: number; pageSeq?: number; nextJobKey?: string };
+type ClaimWait = { waitMs: number; pageSeq: number; nextJobKey: string };
 
 export type HistoryImportPayload = { runToken?: unknown; pageSeq?: unknown };
 
 export type HistoryImportStepResult =
   | { status: 'idle' }
+  | { status: 'waiting'; waitMs: number }
   | { status: 'imported'; imported: number; remaining: number; nextRunInMs: number }
   | { status: 'failed'; remaining: number; nextRunInMs: number };
 
 // Where the chain stands: the page the next job claims, and the key naming that job.
 export type ChainPosition = { pageSeq: number; jobKey: string };
 type EnqueueHistory = (runToken: string, delayMs: number, position?: ChainPosition) => Promise<void>;
-
-// Spreads requests evenly: a job that made N requests waits until N requests' worth of budget has passed.
-export const paceDelay = (requests: number, elapsedMs: number): number =>
-  Math.max(0, Math.ceil((requests * 60_000) / HISTORY_IMPORT_REQUESTS_PER_MINUTE - elapsedMs));
-
-const countRequests = (client: CoreApiClient, counter: { requests: number }): CoreApiClient =>
-  new Proxy(client, {
-    get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver);
-      if ((property === 'query' || property === 'mutation') && typeof value === 'function') {
-        return (...args: unknown[]) => {
-          counter.requests += 1;
-          return value.apply(target, args);
-        };
-      }
-      return value;
-    },
-  });
 
 // Each page gets its own job ID, so a page job queued twice (a retry after it queued the next one)
 // runs once.
@@ -175,12 +159,16 @@ export const runHistoryImportStep = async (
     return { status: 'idle' };
   }
 
-  const startedAt = Date.now();
-  const claimed = await bridgePost<HistoryImportPage | { stale: true } | { done: true }>(
+  const claimed = await bridgePost<HistoryImportPage | ClaimWait | { stale: true } | { done: true }>(
     '/history/imports/claim',
     { runToken, ...(pageSeq !== undefined ? { pageSeq } : {}) },
     30_000,
   );
+
+  if ('waitMs' in claimed) {
+    await enqueue(runToken, claimed.waitMs, { pageSeq: claimed.pageSeq, jobKey: claimed.nextJobKey });
+    return { status: 'waiting', waitMs: claimed.waitMs };
+  }
 
   if (!('leaseId' in claimed)) {
     logger.info('History import chain ended', { reason: 'done' in claimed ? 'done' : 'superseded' });
@@ -189,25 +177,28 @@ export const runHistoryImportStep = async (
 
   const page = claimed;
   const counter = { requests: 0 };
+  const countedClient = countingClient(client, counter);
   let step: ChainStep;
   let result: HistoryImportStepResult;
 
   try {
-    const imported = await importPage(countRequests(client, counter), page);
+    const imported = await importPage(countedClient, page);
 
     if (imported.media.length > 0) {
       // Files upload in their own jobs, so the chain never waits behind them.
       await enqueueMedia(imported.media).catch(async (error: unknown) => {
         logger.warn('Could not queue media imports, importing them now', { error: String(error) });
-        await attachMedia(client, imported.media, Date.now() + INLINE_MEDIA_TIME_BUDGET_MS);
+        await attachMedia(countedClient, imported.media, Date.now() + INLINE_MEDIA_TIME_BUDGET_MS);
       });
     }
 
-    const nextRunInMs = paceDelay(counter.requests, Date.now() - startedAt);
+    // The next page follows at once; the bridge makes it wait if the budget is spent.
+    const nextRunInMs = 0;
     step = await bridgePost<ChainStep>('/history/imports/complete', {
       leaseId: page.leaseId,
       imported: imported.importedByChat,
       nextRunInMs,
+      requests: counter.requests,
     });
 
     logger.info('Imported history page', {
@@ -226,11 +217,13 @@ export const runHistoryImportStep = async (
       rateLimited: retryAfterMs !== undefined,
       error: error instanceof Error ? error.message : String(error),
     });
+    if (retryAfterMs !== undefined) await reportRateLimit(retryAfterMs);
     // Rate limiting is not the chats' fault, so it does not count toward setting them aside.
     step = await bridgePost<ChainStep>('/history/imports/release', {
       leaseId: page.leaseId,
       failed: retryAfterMs === undefined,
       nextRunInMs,
+      requests: counter.requests,
     });
     result = { status: 'failed', remaining: step.remaining, nextRunInMs };
   }

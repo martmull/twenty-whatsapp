@@ -1,6 +1,6 @@
 import type { CoreApiClient } from 'twenty-client-sdk/core';
 
-import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
+import { bridgePost, getBridgeStatus, reportRateLimit } from 'src/logic-functions/bridge-request';
 import {
   applicationClient,
   ensureAccount,
@@ -18,6 +18,7 @@ import {
 import { enqueueMediaImports } from 'src/logic-functions/media-import';
 import { attachMedia, pendingMedia, type MediaItem } from 'src/logic-functions/message-media';
 import {
+  countingClient,
   deterministicId,
   rateLimitRetryAfterMs,
   upsertConversations,
@@ -53,7 +54,8 @@ type ChatBatch = {
   name: string;
 };
 
-type ClaimedEvents = { leaseId?: string; events: BridgeMessageEvent[]; jobKey?: string };
+// `waitMs` without a lease: the API budget is spent, come back then.
+type ClaimedEvents = { leaseId?: string; events: BridgeMessageEvent[]; jobKey?: string; waitMs?: number };
 
 // The account record is looked up once, then remembered by the bridge.
 const resolveAccountId = async (client: CoreApiClient, phoneNumber: string, cached?: string): Promise<string> => {
@@ -155,8 +157,10 @@ const INLINE_MEDIA_TIME_BUDGET_MS = 120_000;
 // bad chat cannot hold the queue.
 export const syncMessages = async (
   logger: Logger,
-  { client = applicationClient(), enqueueMedia = enqueueMediaImports }: SyncDependencies = {},
+  { client: baseClient = applicationClient(), enqueueMedia = enqueueMediaImports }: SyncDependencies = {},
 ): Promise<SyncResult> => {
+  const counter = { requests: 0 };
+  const client = countingClient(baseClient, counter);
   const status = await getBridgeStatus();
 
   if (status.state !== 'connected' || !status.phoneNumber) {
@@ -168,7 +172,18 @@ export const syncMessages = async (
   // Claimed before any Twenty query, so a sync with nothing to do costs no API request.
   const claimed = await bridgePost<ClaimedEvents>('/events/claim');
 
-  // Nothing queued, or another sync holds the batch and will queue the next one itself.
+  if (!claimed.leaseId && claimed.waitMs !== undefined) {
+    return {
+      imported: 0,
+      ignored: 0,
+      acknowledged: 0,
+      remaining: true,
+      jobKey: claimed.jobKey,
+      retryInMs: claimed.waitMs,
+    };
+  }
+
+  // Nothing queued, or another sync holds the batch (or waits for budget) and queues the next one.
   if (!claimed.leaseId) {
     return { imported: 0, ignored: 0, acknowledged: 0, remaining: false, jobKey: claimed.jobKey };
   }
@@ -251,6 +266,7 @@ export const syncMessages = async (
     retryInMs = rateLimitRetryAfterMs(error);
     if (retryInMs === undefined) throw error;
     logger.warn('Twenty rate limited the sync', { retryInMs });
+    await reportRateLimit(retryInMs);
   } finally {
     // Acknowledged before release, so the remaining count leaves out what this batch handled.
     if (acknowledge.length > 0) {
@@ -262,6 +278,7 @@ export const syncMessages = async (
     released = await bridgePost<{ remaining?: boolean; jobKey?: string }>('/events/release', {
       leaseId,
       completed,
+      requests: counter.requests,
     }).catch(() => undefined);
   }
 

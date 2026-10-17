@@ -1,6 +1,6 @@
 # Import jobs optimization plan
 
-**Status:** Proposal · **Scope:** contact (People), message, conversation and media (files) import jobs · **Updated:** 17 October 2026
+**Status:** Implemented in 0.4 (bridge 0.2) · **Scope:** contact (People), message, conversation and media (files) import jobs · **Updated:** 17 October 2026
 
 This plan covers four paths: the live sync (`whatsapp-message-sync`), the history import chain (`whatsapp-history-import-job`), the import request (`whatsapp-history`, which creates People and conversations), and the conversation name refresh. Every Twenty limit cited below was read in the twentyhq/twenty source, not taken from the docs.
 
@@ -64,7 +64,7 @@ This plan covers four paths: the live sync (`whatsapp-message-sync`), the histor
 
 - **One People upsert** as the admin (`userClient`, so their permissions apply). New People get deterministic `person:+E164` ids with name and phone; renamed People get `{ id, name }`.
 - **One conversations upsert**: new conversations with deterministic ids, existing ones still named after a phone number with `{ id, name }`.
-- About **4 calls** for 50 chats instead of up to ~100. A double submit creates nothing twice.
+- **5 calls** for 50 chats (account, People and conversations lookups, then the two upserts) instead of up to ~100. A double submit creates nothing twice.
 
 **Name refresh**
 
@@ -88,7 +88,7 @@ This plan covers four paths: the live sync (`whatsapp-message-sync`), the histor
 | Bridge unavailable | Re-enqueue at 30 s × 2ⁿ, capped at 15 min. After 8 tries, stop; the bridge's next signal restarts the chain (kept from today). |
 | Invalid event / permanent 4xx | Ack and skip (kept from today) |
 
-Budget defaults: background jobs **≤ 200/min** (40 % of the bucket), leaving ~300/min for the inbox (≈ 12 calls/min per open thread from the 5 s poll), sends and other installs. Self-hosted admins can raise it with the app variable.
+Budget defaults: background jobs **≤ 200/min** (40 % of the bucket), leaving ~300/min for the inbox (≈ 12 calls/min per open thread from the 5 s poll), sends and other installs. Self-hosted admins can change it with `WHATSAPP_BACKGROUND_REQUESTS_PER_MINUTE` in `bridge/.env`. Live sync may borrow up to a quarter of a minute's budget; history and media leave a tenth of it for live sync. Waiting background jobs, and media jobs waiting for a lease, get successive wake-up times instead of all retrying at once, which keeps re-enqueues far below the 500 jobs/min limit.
 
 ## 4. Before / after
 
@@ -98,7 +98,7 @@ Scenarios use the request formulas from sections 2 and 3. Latency assumptions: ~
 | --- | --- | --- | --- | --- | --- |
 | **A. History, 50 chats, 10,000 messages, 300 media** | ~300 (100 pages × 2 + 50 summaries × 2); pacing counts ~1,000 | ~120 (50 page upserts + ~10 summary flushes + 60 media upserts) | **~25 min** (1,000 ÷ 40/min floor; serial media overlaps) | **~3–5 min** (API floor < 1 min at 200/min; media 300 × 2 s ÷ 3 parallel) | 2.5× fewer calls, **5–8× faster**, 100 serial jobs → 50 page jobs + 60 parallel media jobs |
 | **B. Reconnect burst, 1,000 queued events, 80 chats, 40 media** | ~2,000 (≈ 41 batches cut at each media × ~48 calls) | ~28 (5 batches × 4 + 8 media upserts) | ~4–5 min, and **likely `RATE_LIMITED`** (~575 calls/min with no pacing) | **< 1 min**, never above budget | **~70× fewer calls**, no throttling of the inbox |
-| **C. Import request, 50 chats, 30 new People, 10 People renames, 10 conversation renames** | ~55 calls in one 60 s route (~6–11 s) | ~4 (People 1 + conversations 1 + People upsert 1 + conversations upsert 1) | 6–11 s, duplicates on double submit | **< 1 s**, idempotent | **~14× fewer calls**, no duplicate People |
+| **C. Import request, 50 chats, 30 new People, 10 People renames, 10 conversation renames** | ~55 calls in one 60 s route (~6–11 s) | 5 (account 1 + People 1 + conversations 1 + People upsert 1 + conversations upsert 1) | 6–11 s, duplicates on double submit | **< 1 s**, idempotent | **~11× fewer calls**, no duplicate People |
 | **D. Name refresh, 500 conversations, 200 renamed** | ~205 (5 pages + 200 `updateOne`) | 2 (delta query + 1 upsert) | ~20 s burst, 40 % of the app budget | < 1 s | **~100× fewer calls** |
 | **Steady state, 1 message/min on 10 chats** | ~6 per message (account, People, conversations, existence, create, summary) | 4 per batch, and the 1 s signal merge plus `jobId` dedup fold close messages into one batch | n/a | n/a | ~1.5–5× depending on burstiness |
 
@@ -121,8 +121,8 @@ Each step keeps the existing tests (`test/history-import-job.test.ts`, `test/mes
 
 ## 6. Risks and caveats
 
-- **Upsert overwrites the fields it sends.** Message upserts send only immutable fields (`conversationId`, `externalId`, `direction`, `text`, `sentAt`, `senderId`, `senderName`, `mediaKind`). `deliveryState` is sent only on rows the upsert response shows as just created, so a phone echo of a Twenty-sent message cannot rewrite its delivery state. `media` is written only by the media job.
-- **Deterministic ids and soft-deleted rows.** If an admin deletes a Person the app created, re-importing hits the same id. On a unique-violation error, fall back to a random id for that row only. Pre-existing records keep their random ids; they are found through the unique indexes, so no migration is needed.
+- **Upsert overwrites the fields it sends.** Message upserts send only the fields an import owns (`conversationId`, `externalId`, `direction`, `text`, `sentAt`, `deliveryState`, `senderId`, `senderName`, `mediaKind`). `deliveryState` is always `SENT` or `RECEIVED` for an event seen on WhatsApp, so rewriting it on a replay is correct. `media` is written only by the media job, and `requestId` only by the send route.
+- **Upsert restores soft-deleted rows.** Twenty matches deleted records too and clears `deletedAt`. A Person or conversation deleted in Twenty comes back if the same chat is imported again, instead of failing on its unique index. Pre-existing records keep their random ids; they are found through the unique indexes, so no migration is needed.
 - **`jobId` dedup is best effort.** BullMQ only remembers a completed job for 4 h or 1,000 jobs queue-wide. Idempotent upserts and the bridge leases remain the real guarantee.
 - **Request size.** 200 messages × 4,096 characters is about 0.8 MB. Cap pages by bytes too (~512 KB).
 - **Cross-workspace budget.** On Twenty Cloud the 500/min is shared by every workspace using this app. The bridge budget only sees its own installation, so `RATE_LIMITED` handling with `retryAfterMs` stays essential.

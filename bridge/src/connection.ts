@@ -20,6 +20,7 @@ import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
 import { fetchAddressBook, type AddressBookEntry, type AddressBookReport } from './address-book.js';
+import { ApiBudget } from './api-budget.js';
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { HistoryImportQueue } from './history-import-queue.js';
@@ -65,6 +66,12 @@ export type ConnectionStatus = {
 
 // Twenty imports at most this many queued events per sync job.
 export const MAX_SYNC_EVENTS = 200;
+// A sync batch makes one People query, one conversations query and two upserts, plus the account
+// lookup until Twenty's account ID is remembered.
+const SYNC_BATCH_COST = 4;
+const ACCOUNT_LOOKUP_COST = 2;
+// If the sync job told to wait never comes back, the bridge signals again this long after.
+const SYNC_RESIGNAL_GRACE_MS = 30_000;
 
 export type SendReceipt = {
   requestId: string;
@@ -119,7 +126,7 @@ export class WhatsAppConnection {
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
   readonly historyImports: HistoryImportQueue;
-  readonly mediaLeases = new MediaLeases();
+  readonly mediaLeases: MediaLeases;
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
   private readonly pendingGroupNameLookups = new Set<string>();
   private readonly groupNameLookupQueue: string[] = [];
@@ -127,7 +134,10 @@ export class WhatsAppConnection {
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
   private sendQueue: Promise<unknown> = Promise.resolve();
-  private syncLease: { id: string; expiresAt: number } | undefined;
+  private syncLease: { id: string; expiresAt: number; cost: number } | undefined;
+  // A sync job told to wait for budget is due back then; others end instead of waiting too.
+  private syncRetryAt = 0;
+  private lastSyncClaimAt = 0;
   // Twenty names its sync and names jobs after these keys, so signals sent before a job claims its
   // batch fold into that one job. The boot ID keeps keys from repeating after a restart.
   private readonly bootId = randomBytes(4).toString('hex');
@@ -147,6 +157,7 @@ export class WhatsAppConnection {
     // Delivered to Twenty's bridge webhook (see server.ts).
     private readonly onSignal: (signal: BridgeSignal) => void = () => undefined,
     private readonly log: (message: string, data?: Record<string, unknown>) => void = () => undefined,
+    readonly budget: ApiBudget = new ApiBudget(),
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
@@ -168,8 +179,10 @@ export class WhatsAppConnection {
       {
         onChainRestarted: (historyRunToken) => this.onSignal({ historyRunToken }),
         canRun: () => this.status.state === 'connected',
+        budget,
       },
     );
+    this.mediaLeases = new MediaLeases(undefined, undefined, budget);
   }
 
   async recordHistory(
@@ -736,8 +749,10 @@ export class WhatsAppConnection {
     return `${this.bootId}.${this.namesSequence}`;
   }
 
-  async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[]; jobKey: string }> {
+  // `waitMs` tells the job to come back once the API budget allows the batch.
+  async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[]; jobKey: string; waitMs?: number }> {
     this.syncGeneration += 1;
+    this.lastSyncClaimAt = Date.now();
     const jobKey = this.syncJobKey();
 
     if (this.syncLease && this.syncLease.expiresAt > Date.now()) {
@@ -745,12 +760,19 @@ export class WhatsAppConnection {
     }
 
     const leaseId = randomUUID();
-    this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000 };
+    const cost = SYNC_BATCH_COST + (this.twentyAccount ? 0 : ACCOUNT_LOOKUP_COST);
+    this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000, cost };
     try {
       const events = await this.getEvents();
-      if (events.length === 0) {
+      const decision = events.length > 0 ? this.budget.take(cost, 'live') : undefined;
+      if (!decision?.granted) {
         if (this.syncLease?.id === leaseId) this.syncLease = undefined;
+      }
+      if (!decision) {
         return { events, jobKey };
+      }
+      if (!decision.granted) {
+        return { events: [], jobKey, ...this.scheduleSyncRetry(decision.waitMs) };
       }
       return { leaseId, events, jobKey };
     } catch (error) {
@@ -759,12 +781,29 @@ export class WhatsAppConnection {
     }
   }
 
+  // One job waits for the budget at a time; one that never comes back is replaced by a new signal.
+  private scheduleSyncRetry(waitMs: number): { waitMs?: number } {
+    const now = Date.now();
+    if (this.syncRetryAt > now) {
+      return {};
+    }
+    this.syncRetryAt = now + waitMs;
+    setTimeout(() => {
+      if (this.lastSyncClaimAt <= now) this.signalEvents();
+    }, waitMs + SYNC_RESIGNAL_GRACE_MS).unref();
+    return { waitMs };
+  }
+
   // Tells the sync whether events remain: the Twenty job then queues itself for the next batch.
-  async releaseEvents(leaseId: string): Promise<{ released: boolean; remaining?: boolean; jobKey: string }> {
+  async releaseEvents(
+    leaseId: string,
+    requests?: number,
+  ): Promise<{ released: boolean; remaining?: boolean; jobKey: string }> {
     if (this.syncLease?.id !== leaseId) {
       return { released: false, jobKey: this.syncJobKey() };
     }
 
+    if (requests !== undefined) this.budget.adjust(requests - this.syncLease.cost);
     this.syncLease = undefined;
     return { released: true, remaining: (await this.events.list(1)).length > 0, jobKey: this.syncJobKey() };
   }

@@ -50,3 +50,7 @@ export const bridgePost = async <TResponse>(
 
 export const getBridgeStatus = async (): Promise<BridgeStatus> =>
   (await (await bridgeFetch('/status')).json()) as BridgeStatus;
+
+// Tells the bridge Twenty rate limited a job, so no background job starts before the window passes.
+export const reportRateLimit = (retryAfterMs: number): Promise<unknown> =>
+  bridgePost('/budget/penalty', { retryAfterMs }).catch(() => undefined);
