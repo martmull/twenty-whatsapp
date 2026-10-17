@@ -20,100 +20,149 @@ class RecordingConnection extends WhatsAppConnection {
   }
 }
 
-test('a sent message remains available for a recipient retry after bridge restart', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-retry-'));
-  const encryptionKey = randomBytes(32);
-  const chatId = '15551234567@s.whatsapp.net';
-  let messageId = '';
-  const connection = new WhatsAppConnection(directory, encryptionKey);
+const ACCOUNT_PHONE = '+15557654321';
+const CHAT_ID = '15551234567@s.whatsapp.net';
 
-  try {
-    Object.defineProperty(connection, 'socket', {
-      value: {
-        sendMessage: async (_jid: string, _content: unknown, options?: { messageId?: string }) => {
-          messageId = options?.messageId ?? '';
-          assert.ok(messageId);
-          assert.equal((await connection.getSentMessage({ id: messageId }))?.conversation, 'Hello');
-          return {
-            key: { id: messageId, remoteJid: chatId, fromMe: true },
-            message: proto.Message.create({ conversation: 'Hello' }),
-          };
-        },
+type FakeSocketOptions = {
+  upload?: () => Promise<{ mediaUrl: string; directPath: string }>;
+  relay?: (message: proto.IMessage, messageId: string) => Promise<void>;
+};
+
+// Stands in for the Baileys socket: the real generateWAMessage builds and encrypts the payload.
+const connectFakeSocket = (connection: WhatsAppConnection, { upload, relay }: FakeSocketOptions = {}) => {
+  const calls = { uploads: 0, relays: [] as { jid: string; message: proto.IMessage; messageId: string }[] };
+  Object.defineProperty(connection, 'socket', {
+    value: {
+      user: { id: '15557654321:7@s.whatsapp.net' },
+      waUploadToServer: async () => {
+        calls.uploads += 1;
+        return upload ? upload() : { mediaUrl: 'https://mmg.whatsapp.net/media', directPath: '/media' };
       },
-    });
-    Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
+      relayMessage: async (jid: string, message: proto.IMessage, options: { messageId: string }) => {
+        calls.relays.push({ jid, message, messageId: options.messageId });
+        await relay?.(message, options.messageId);
+        return options.messageId;
+      },
+    },
+  });
+  Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
+  return calls;
+};
 
-    assert.equal((await connection.sendText(randomUUID(), chatId, 'Hello', '+15557654321')).state, 'sent');
-    const restarted = new WhatsAppConnection(directory, encryptionKey);
-    assert.equal((await restarted.getSentMessage({ id: messageId, remoteJid: chatId }))?.conversation, 'Hello');
+const withConnection = async (
+  run: (connection: WhatsAppConnection, directory: string, key: Buffer) => Promise<void>,
+) => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-send-'));
+  const encryptionKey = randomBytes(32);
+  try {
+    await run(new WhatsAppConnection(directory, encryptionKey), directory, encryptionKey);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+};
+
+const PNG_PIXEL = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+const sendImage = (connection: WhatsAppConnection, requestId: string) =>
+  connection.sendMedia(requestId, CHAT_ID, ACCOUNT_PHONE, 'image', 'image/png', 'photo.png', 'Look', PNG_PIXEL);
+
+test('a sent message is available for a recipient retry before relaying and after a bridge restart', async () => {
+  await withConnection(async (connection, directory, encryptionKey) => {
+    const calls = connectFakeSocket(connection, {
+      relay: async (_message, messageId) => {
+        assert.ok(await connection.getSentMessage({ id: messageId }), 'payload stored before the relay');
+      },
+    });
+
+    const receipt = await connection.sendText(randomUUID(), CHAT_ID, 'Hello', ACCOUNT_PHONE);
+    assert.equal(receipt.state, 'sent');
+    assert.equal(calls.relays[0].jid, CHAT_ID);
+    const restarted = new WhatsAppConnection(directory, encryptionKey);
+    const saved = await restarted.getSentMessage({ id: receipt.providerMessageId, remoteJid: CHAT_ID });
+    assert.equal(saved?.conversation ?? saved?.extendedTextMessage?.text, 'Hello');
+  });
 });
 
-test('an attachment is sent once and its payload is available for a recipient retry', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-media-send-'));
-  const encryptionKey = randomBytes(32);
-  const connection = new WhatsAppConnection(directory, encryptionKey);
-  const chatId = '15551234567@s.whatsapp.net';
-  const requestId = randomUUID();
-  let sendCount = 0;
-  let messageId = '';
-
-  try {
-    Object.defineProperty(connection, 'socket', {
-      value: {
-        sendMessage: async (
-          _jid: string,
-          content: { image?: Buffer; video?: Buffer; document?: Buffer; caption?: string },
-          options?: { messageId?: string },
-        ) => {
-          sendCount += 1;
-          messageId = options?.messageId ?? '';
-          assert.equal(_jid, chatId);
-          assert.equal(content.caption, 'Look');
-          assert.equal(content.image?.toString(), 'image bytes');
-          return {
-            key: { id: messageId, remoteJid: chatId, fromMe: true },
-            message: proto.Message.create({ imageMessage: { caption: 'Look' } }),
-          };
-        },
+test('an attachment is uploaded and sent once, and its payload is available for a recipient retry', async () => {
+  await withConnection(async (connection, directory, encryptionKey) => {
+    const calls = connectFakeSocket(connection, {
+      relay: async (message, messageId) => {
+        assert.equal(message.imageMessage?.caption, 'Look');
+        assert.ok((await connection.getSentMessage({ id: messageId }))?.imageMessage);
       },
     });
-    Object.defineProperty(connection, 'status', { value: { state: 'connected', phoneNumber: '15557654321' } });
+    const requestId = randomUUID();
 
-    const first = await connection.sendMedia(
-      requestId,
-      chatId,
-      '+15557654321',
-      'image',
-      'image/png',
-      'photo.png',
-      'Look',
-      Buffer.from('image bytes'),
-    );
-    assert.equal(first.state, 'sent');
-    assert.equal(
-      (
-        await connection.sendMedia(
-          requestId,
-          chatId,
-          '+15557654321',
-          'image',
-          'image/png',
-          'photo.png',
-          'Look',
-          Buffer.from('image bytes'),
-        )
-      ).state,
-      'sent',
-    );
-    assert.equal(sendCount, 1);
+    assert.equal((await sendImage(connection, requestId)).state, 'sent');
+    assert.equal((await sendImage(connection, requestId)).state, 'sent');
+    assert.equal(calls.uploads, 1);
+    assert.equal(calls.relays.length, 1);
     const restarted = new WhatsAppConnection(directory, encryptionKey);
-    assert.ok((await restarted.getSentMessage({ id: messageId }))?.imageMessage);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+    assert.ok((await restarted.getSentMessage({ id: calls.relays[0].messageId }))?.imageMessage?.mediaKey);
+  });
+});
+
+test('a failed upload sent nothing, so retrying the same request sends the attachment', async () => {
+  await withConnection(async (connection) => {
+    let failUpload = true;
+    const calls = connectFakeSocket(connection, {
+      upload: async () => {
+        if (failUpload) throw new Error('Upload timed out');
+        return { mediaUrl: 'https://mmg.whatsapp.net/media', directPath: '/media' };
+      },
+    });
+    const requestId = randomUUID();
+
+    await assert.rejects(sendImage(connection, requestId), /Upload timed out/);
+    assert.equal(calls.relays.length, 0);
+    failUpload = false;
+    assert.equal((await sendImage(connection, requestId)).state, 'sent');
+    assert.equal(calls.relays.length, 1);
+  });
+});
+
+test('a failed relay may have reached WhatsApp, so the request stays unknown instead of sending twice', async () => {
+  await withConnection(async (connection) => {
+    const calls = connectFakeSocket(connection, {
+      relay: async () => {
+        throw new Error('Connection closed');
+      },
+    });
+    const requestId = randomUUID();
+
+    await assert.rejects(sendImage(connection, requestId), /Connection closed/);
+    assert.equal((await sendImage(connection, requestId)).state, 'unknown');
+    assert.equal(calls.relays.length, 1);
+  });
+});
+
+test('sends are relayed one at a time', async () => {
+  await withConnection(async (connection) => {
+    let active = 0;
+    let maxActive = 0;
+    connectFakeSocket(connection, {
+      relay: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+      },
+    });
+
+    const receipts = await Promise.all([
+      sendImage(connection, randomUUID()),
+      connection.sendText(randomUUID(), CHAT_ID, 'Second', ACCOUNT_PHONE),
+      connection.sendText(randomUUID(), CHAT_ID, 'Third', ACCOUNT_PHONE),
+    ]);
+    assert.deepEqual(
+      receipts.map((receipt) => receipt.state),
+      ['sent', 'sent', 'sent'],
+    );
+    assert.equal(maxActive, 1);
+  });
 });
 
 test('only one importer claims a queued batch at a time', async () => {
