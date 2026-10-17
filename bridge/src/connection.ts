@@ -22,6 +22,7 @@ import { toDataURL } from 'qrcode';
 import { fetchAddressBook, type AddressBookEntry, type AddressBookReport } from './address-book.js';
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
+import { HistoryImportQueue } from './history-import-queue.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
 import {
   isDirectChatId,
@@ -42,6 +43,13 @@ const MEDIA_UPLOAD_TIMEOUT_MS = 90_000;
 
 // Baileys reports decryption retries and send failures as warnings; set WHATSAPP_LOG_LEVEL=debug for more.
 const baileysLogger = pino({ level: process.env.WHATSAPP_LOG_LEVEL ?? 'warn', base: { component: 'baileys' } });
+
+// What the bridge asks Twenty to do: import queued events, refresh conversation names, or start a
+// history import job chain with this run token.
+export type BridgeSignal = { events?: boolean; names?: boolean; historyRunToken?: string };
+
+// Name changes arrive in bursts during a history sync; Twenty refreshes names once per burst.
+const NAMES_SIGNAL_DELAY_MS = 60_000;
 
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
@@ -102,6 +110,7 @@ export class WhatsAppConnection {
   private readonly historyChats: EncryptedJsonStore<HistoryChat>;
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
+  readonly historyImports: HistoryImportQueue;
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
   private readonly pendingGroupNameLookups = new Set<string>();
   private readonly groupNameLookupQueue: string[] = [];
@@ -109,14 +118,14 @@ export class WhatsAppConnection {
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
   private sendQueue: Promise<unknown> = Promise.resolve();
-  private ackedSinceClaim = 0;
   private syncLease: { id: string; expiresAt: number } | undefined;
+  private namesTimer: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly directory: string,
     private readonly encryptionKey: Buffer,
-    // Called when Twenty should import queued events (see the bridge webhook in server.ts).
-    private readonly onEventsQueued: () => void = () => undefined,
+    // Delivered to Twenty's bridge webhook (see server.ts).
+    private readonly onSignal: (signal: BridgeSignal) => void = () => undefined,
     private readonly log: (message: string, data?: Record<string, unknown>) => void = () => undefined,
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
@@ -128,6 +137,18 @@ export class WhatsAppConnection {
     this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
     this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
     this.mediaReferences = new EncryptedJsonStore(join(directory, 'media-references'), encryptionKey);
+    this.historyImports = new HistoryImportQueue(
+      join(directory, 'history-imports'),
+      encryptionKey,
+      async (chatId) => {
+        await this.historyWrites;
+        return (await this.historyChats.read(chatId))?.messages;
+      },
+      {
+        onChainRestarted: (historyRunToken) => this.onSignal({ historyRunToken }),
+        canRun: () => this.status.state === 'connected',
+      },
+    );
   }
 
   async recordHistory(
@@ -281,6 +302,7 @@ export class WhatsAppConnection {
       }
       if (namesChanged) {
         this.groupMembersCache.clear();
+        this.signalNamesChanged();
       }
     };
 
@@ -351,9 +373,11 @@ export class WhatsAppConnection {
     }, delayMs);
   }
 
-  async getHistoryNames(chatIds: string[]): Promise<{ chatId: string; name: string }[]> {
+  async getHistoryNames(
+    chatIds: string[],
+  ): Promise<{ chatId: string; name: string; firstName?: string; lastName?: string }[]> {
     await this.historyWrites;
-    const names: { chatId: string; name: string }[] = [];
+    const names: { chatId: string; name: string; firstName?: string; lastName?: string }[] = [];
 
     for (const chatId of chatIds) {
       if (!isSupportedChatId(chatId)) {
@@ -370,7 +394,7 @@ export class WhatsAppConnection {
       if (isGroupChatId(chatId) && /^\+?\d+$/.test(name)) {
         this.scheduleGroupNameLookup(chatId);
       }
-      names.push({ chatId, name });
+      names.push({ chatId, name, ...(await this.savedContactName(chatId)) });
     }
 
     return names;
@@ -640,7 +664,6 @@ export class WhatsAppConnection {
 
     const leaseId = randomUUID();
     this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000 };
-    this.ackedSinceClaim = 0;
     try {
       const events = await this.getEvents();
       if (events.length === 0) {
@@ -654,17 +677,27 @@ export class WhatsAppConnection {
     }
   }
 
-  async releaseEvents(leaseId: string, completed: boolean): Promise<{ released: boolean }> {
+  // Tells the sync whether events remain: the Twenty job then queues itself for the next batch.
+  async releaseEvents(leaseId: string): Promise<{ released: boolean; remaining?: boolean }> {
     if (this.syncLease?.id !== leaseId) {
       return { released: false };
     }
 
     this.syncLease = undefined;
-    // A sync handles a limited batch: ask for another one while it makes progress.
-    if (completed && this.ackedSinceClaim > 0 && (await this.events.list(1)).length > 0) {
-      this.onEventsQueued();
-    }
-    return { released: true };
+    return { released: true, remaining: (await this.events.list(1)).length > 0 };
+  }
+
+  private signalEvents(): void {
+    this.onSignal({ events: true });
+  }
+
+  private signalNamesChanged(): void {
+    if (this.namesTimer) return;
+    this.namesTimer = setTimeout(() => {
+      this.namesTimer = undefined;
+      if (this.status.state === 'connected') this.onSignal({ names: true });
+    }, NAMES_SIGNAL_DELAY_MS);
+    this.namesTimer.unref();
   }
 
   async ackEvents(eventIds: string[]): Promise<{ acknowledged: number }> {
@@ -674,7 +707,6 @@ export class WhatsAppConnection {
       }
 
       await this.events.delete(eventId);
-      this.ackedSinceClaim += 1;
     }
 
     return { acknowledged: eventIds.length };
@@ -881,7 +913,7 @@ export class WhatsAppConnection {
             await this.linkPhoneNumber(remoteJid, event.chatId);
           }
           await this.events.write(event.eventId, event);
-          this.onEventsQueued();
+          this.signalEvents();
         }
       }
     });
@@ -965,7 +997,8 @@ export class WhatsAppConnection {
           state: 'connected',
           phoneNumber: socket.user?.id?.split(':')[0],
         };
-        this.onEventsQueued();
+        if ((await this.events.list(1)).length > 0) this.signalEvents();
+        void this.historyImports.recoverStalled();
         this.scheduleAddressBookSync(0);
         void socket
           .groupFetchAllParticipating()
@@ -1014,6 +1047,8 @@ export class WhatsAppConnection {
     this.intentionallyDisconnected = true;
     this.generation += 1;
     clearTimeout(this.reconnectTimer);
+    clearTimeout(this.namesTimer);
+    this.namesTimer = undefined;
     clearTimeout(this.addressBookTimer);
     const socket = this.socket;
     this.socket = undefined;

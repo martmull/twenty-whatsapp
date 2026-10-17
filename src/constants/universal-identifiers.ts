@@ -35,3 +35,7 @@ export const MESSAGE_MEDIA_FIELD_ID = '57b1e370-557f-4f91-9b40-a882b21a5817';
 
 export const WHATSAPP_CONVERSATION_READ_STATE_OBJECT_ID = 'd6f8675d-d4d4-420f-8d20-39fd2dc73fdc';
 export const READ_STATE_NAME_FIELD_ID = 'f4a537ae-210d-4b2d-b0b7-e3f989ba4145';
+
+// Logic functions run only as background jobs (enqueueJobs targets them by identifier).
+export const HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER = 'a4263ad0-7172-4490-9297-8431fb3966ac';
+export const MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER = '4353a880-c060-4b74-a96e-9dd03e387618';

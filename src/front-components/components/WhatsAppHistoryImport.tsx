@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
 import { t } from 'twenty-sdk/front-component';
 import { Callout } from 'twenty-ui/components';
@@ -23,7 +23,12 @@ type HistoryCandidate = {
 
 type HistoryList = { items: HistoryCandidate[]; total: number };
 
-type ImportResult = { imported: number; total: number; nextOffset?: number; createdPerson: boolean };
+type QueueResult = { queued: number; createdPeople: number; failures: { chatId: string; error: string }[] };
+
+type ImportProgress = { chatId: string; processed: number; total: number; state: 'queued' | 'done' | 'failed' };
+
+// The history route queues at most this many chats per request.
+const CHATS_PER_REQUEST = 50;
 
 const RANGE_OPTIONS: { value: RangeDays; label: string }[] = [
   { value: 7, label: t('Last week') },
@@ -53,18 +58,53 @@ export const WhatsAppHistoryImport = () => {
   const styles = getPreviewStyles();
   const [rangeDays, setRangeDays] = useState<RangeDays>(30);
   const [createPeople, setCreatePeople] = useState(true);
+  const [starting, setStarting] = useState(false);
   // From 0 to 100 while an import runs.
   const [progress, setProgress] = useState<number>();
-  const [summary, setSummary] = useState('');
+  const [importRunning, setImportRunning] = useState(false);
   const [error, setError] = useState('');
 
+  // The import runs in background jobs: check once on open, then poll the bridge while it runs.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const check = async () => {
+      try {
+        const tasks = await historyRequest<ImportProgress[]>({ action: 'progress' });
+        if (cancelled) return;
+        const failed = tasks.filter((task) => task.state === 'failed').length;
+
+        if (!tasks.some((task) => task.state === 'queued')) {
+          setProgress(undefined);
+          if (importRunning) {
+            setImportRunning(false);
+            if (failed > 0) setError(`${failed} ${t('chats failed; import again to retry them')}`);
+          }
+          return;
+        }
+
+        // Covers the whole run: finished chats count as complete, failed ones as settled.
+        const total = tasks.reduce((sum, task) => sum + task.total, 0);
+        const settled = tasks.reduce((sum, task) => sum + (task.state === 'queued' ? task.processed : task.total), 0);
+        setProgress(total > 0 ? (100 * settled) / total : 0);
+        setImportRunning(true);
+      } catch {
+        // The bridge may be restarting; keep checking while an import runs.
+      }
+      if (!cancelled && importRunning) timer = setTimeout(check, 4_000);
+    };
+
+    void check();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [importRunning]);
+
   const runImport = async () => {
-    setProgress(0);
-    setSummary('');
+    setStarting(true);
     setError('');
-    let messages = 0;
-    let people = 0;
-    let failed = 0;
 
     try {
       const chats = (await listChats(rangeDays)).filter((chat) => chat.messageCount > 0);
@@ -74,48 +114,34 @@ export const WhatsAppHistoryImport = () => {
           chat.match === 'matched' ||
           (chat.match === 'new' && createPeople && hasContactName(chat)),
       );
-      const skipped = chats.length - importable.length;
+      let queued = 0;
+      let failed = 0;
 
-      for (const [index, chat] of importable.entries()) {
-        try {
-          for (let offset: number | undefined = 0; offset !== undefined;) {
-            const result: ImportResult = await historyRequest<ImportResult>({
-              action: 'import',
-              rangeDays,
-              chatId: chat.chatId,
-              offset,
-              createPerson: chat.match === 'new',
-            });
-            messages += result.imported;
-            people += Number(result.createdPerson);
-            offset = result.nextOffset;
-            // Each chat is an equal share of the bar, filled as its pages are imported.
-            const chatDone = offset !== undefined && result.total ? offset / result.total : 1;
-            setProgress((100 * (index + chatDone)) / importable.length);
-          }
-        } catch {
-          failed += 1;
-        }
+      for (let start = 0; start < importable.length; start += CHATS_PER_REQUEST) {
+        const result = await historyRequest<QueueResult>({
+          action: 'import',
+          rangeDays,
+          chats: importable
+            .slice(start, start + CHATS_PER_REQUEST)
+            .map((chat) => ({ chatId: chat.chatId, createPerson: chat.match === 'new' })),
+        });
+        queued += result.queued;
+        failed += result.failures.length;
       }
 
-      setSummary(
-        [
-          `${t('Imported')} ${messages} ${t('messages from')} ${importable.length - failed} ${t('chats')}`,
-          `${people} ${t('new People')}`,
-          skipped ? `${skipped} ${t('chats skipped without a matching Person')}` : '',
-          failed ? `${failed} ${t('chats failed; import again to retry them')}` : '',
-        ]
-          .filter(Boolean)
-          .join(' · '),
-      );
+      if (failed > 0) setError(`${failed} ${t('chats failed; import again to retry them')}`);
+      if (queued > 0) {
+        setProgress((previous) => previous ?? 0);
+        setImportRunning(true);
+      }
     } catch {
       setError(t('Could not reach the WhatsApp bridge. Check that it is running and retry.'));
     } finally {
-      setProgress(undefined);
+      setStarting(false);
     }
   };
 
-  const running = progress !== undefined;
+  const running = starting || importRunning;
 
   return (
     <section
@@ -181,7 +207,7 @@ export const WhatsAppHistoryImport = () => {
           {t('Import')}
         </Button>
       </div>
-      {running && (
+      {progress !== undefined && (
         <div
           role="progressbar"
           aria-label={t('Import progress')}
@@ -189,7 +215,8 @@ export const WhatsAppHistoryImport = () => {
           style={{
             background: themeCssVariables.background.tertiary,
             borderRadius: themeCssVariables.border.radius.sm,
-            height: 6,
+            height: 4,
+            maxWidth: 240,
             overflow: 'hidden',
           }}
         >
@@ -202,11 +229,6 @@ export const WhatsAppHistoryImport = () => {
             }}
           />
         </div>
-      )}
-      {summary && (
-        <p role="status" style={{ ...styles.muted, margin: 0 }}>
-          {summary}
-        </p>
       )}
       {error && <Callout variant="error" title={t('History import unavailable')} description={error} />}
     </section>

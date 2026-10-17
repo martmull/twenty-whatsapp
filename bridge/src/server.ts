@@ -2,8 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { resolve } from 'node:path';
 
-import { WhatsAppConnection } from './connection.js';
-import { isGroupChatId } from './message-event.js';
+import { WhatsAppConnection, type BridgeSignal } from './connection.js';
+import { isGroupChatId, isSupportedChatId } from './message-event.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
 const keyHex = process.env.WHATSAPP_SESSION_KEY;
@@ -16,28 +16,51 @@ if (!token || !keyHex || !/^[a-f\d]{64}$/i.test(keyHex)) {
 const log = (message: string, data: Record<string, unknown> = {}) =>
   process.stdout.write(`${JSON.stringify({ time: new Date().toISOString(), message, ...data })}\n`);
 
-// Tells Twenty that events are queued. Calls within one second are merged into one.
+// Sends signals to Twenty's webhook. Signals within one second are merged into one call; a failed
+// call is retried with a growing delay, keeping any signals that arrive meanwhile.
+const WEBHOOK_RETRY_MIN_MS = 30_000;
+const WEBHOOK_RETRY_MAX_MS = 10 * 60_000;
+let pendingSignal: BridgeSignal = {};
 let webhookTimer: NodeJS.Timeout | undefined;
-const notifyTwenty = () => {
-  if (!webhookUrl || webhookTimer) return;
+let webhookRetryDelayMs = WEBHOOK_RETRY_MIN_MS;
 
-  webhookTimer = setTimeout(async () => {
-    webhookTimer = undefined;
-    const body = JSON.stringify({ sentAt: new Date().toISOString() });
-    const signature = createHmac('sha256', token).update(body).digest('hex');
+const mergeSignals = (older: BridgeSignal, newer: BridgeSignal): BridgeSignal => ({
+  ...(older.events || newer.events ? { events: true } : {}),
+  ...(older.names || newer.names ? { names: true } : {}),
+  ...((newer.historyRunToken ?? older.historyRunToken)
+    ? { historyRunToken: newer.historyRunToken ?? older.historyRunToken }
+    : {}),
+});
 
-    try {
-      const response = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-whatsapp-signature': signature },
-        body,
-        signal: AbortSignal.timeout(130_000),
-      });
-      if (!response.ok) log('Twenty webhook failed', { status: response.status });
-    } catch (error) {
-      log('Twenty webhook unreachable', { error: String(error) });
-    }
-  }, 1_000);
+const deliverSignal = async () => {
+  webhookTimer = undefined;
+  const signal = pendingSignal;
+  pendingSignal = {};
+  const body = JSON.stringify({ sentAt: new Date().toISOString(), ...signal });
+  const signature = createHmac('sha256', token).update(body).digest('hex');
+
+  try {
+    const response = await fetch(webhookUrl!, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-whatsapp-signature': signature },
+      body,
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    webhookRetryDelayMs = WEBHOOK_RETRY_MIN_MS;
+  } catch (error) {
+    log('Twenty webhook failed, will retry', { error: String(error), retryInMs: webhookRetryDelayMs });
+    pendingSignal = mergeSignals(signal, pendingSignal);
+    clearTimeout(webhookTimer);
+    webhookTimer = setTimeout(deliverSignal, webhookRetryDelayMs);
+    webhookRetryDelayMs = Math.min(webhookRetryDelayMs * 2, WEBHOOK_RETRY_MAX_MS);
+  }
+};
+
+const notifyTwenty = (signal: BridgeSignal) => {
+  if (!webhookUrl) return;
+  pendingSignal = mergeSignals(pendingSignal, signal);
+  if (!webhookTimer) webhookTimer = setTimeout(deliverSignal, 1_000);
 };
 
 const expectedToken = Buffer.from(token);
@@ -92,6 +115,11 @@ const isPage = (offset: unknown, limit: unknown, maxLimit: number) =>
   Number.isInteger(limit) &&
   (limit as number) >= 1 &&
   (limit as number) <= maxLimit;
+const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d-]{36}$/i.test(value);
+const isEventId = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{64}$/.test(value);
+const isCount = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 10_000;
+const isDelay = (value: unknown) =>
+  Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24 * 60 * 60_000;
 const requireConnected = () => check(connection.getStatus().state === 'connected', 'WhatsApp is disconnected');
 
 type Route = (body: Record<string, unknown>) => unknown;
@@ -102,10 +130,8 @@ const jsonRoutes: Record<string, Route> = {
   'POST /disconnect': () => connection.disconnect(),
   'POST /events/claim': () => connection.claimEvents(),
   'POST /events/release': (body) => {
-    check(
-      typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId) && typeof body.completed === 'boolean',
-    );
-    return connection.releaseEvents(body.leaseId as string, body.completed as boolean);
+    check(typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId));
+    return connection.releaseEvents(body.leaseId as string);
   },
   'POST /events/ack': (body) => {
     check(Array.isArray(body.eventIds) && body.eventIds.every((id) => typeof id === 'string'));
@@ -156,6 +182,49 @@ const jsonRoutes: Record<string, Route> = {
     );
     return connection.getHistoryNames(body.chatIds as string[]);
   },
+  'POST /history/imports/queue': (body) => {
+    requireConnected();
+    check(
+      Array.isArray(body.tasks) &&
+        body.tasks.length >= 1 &&
+        body.tasks.length <= 50 &&
+        body.tasks.every(
+          (task: Record<string, unknown>) =>
+            isSupportedChatId(task?.chatId as string) && isUuid(task.conversationId) && isRange(task.rangeDays),
+        ),
+    );
+    return connection.historyImports.queue(
+      body.tasks as { chatId: string; conversationId: string; rangeDays: number }[],
+    );
+  },
+  'POST /history/imports/claim': (body) => {
+    requireConnected();
+    check(isUuid(body.runToken));
+    return connection.historyImports.claim(body.runToken as string);
+  },
+  'POST /history/imports/complete': (body) => {
+    check(
+      isUuid(body.leaseId) &&
+        (body.lastEventId === undefined || isEventId(body.lastEventId)) &&
+        isCount(body.imported) &&
+        isDelay(body.nextRunInMs),
+    );
+    return connection.historyImports.complete(
+      body.leaseId as string,
+      body.lastEventId as string | undefined,
+      body.imported as number,
+      body.nextRunInMs as number,
+    );
+  },
+  'POST /history/imports/release': (body) => {
+    check(isUuid(body.leaseId) && typeof body.failed === 'boolean' && isDelay(body.nextRunInMs));
+    return connection.historyImports.release(
+      body.leaseId as string,
+      body.failed as boolean,
+      body.nextRunInMs as number,
+    );
+  },
+  'POST /history/imports/progress': () => connection.historyImports.progress(),
   'POST /address-book/sync': () => {
     requireConnected();
     return connection.syncAddressBook();
