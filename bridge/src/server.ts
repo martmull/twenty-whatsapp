@@ -68,6 +68,7 @@ const connection = new WhatsAppConnection(
   resolve(process.env.WHATSAPP_DATA_DIR ?? './data/session'),
   Buffer.from(keyHex, 'hex'),
   notifyTwenty,
+  log,
 );
 
 const isAuthorized = (header: string | undefined) => {
@@ -107,7 +108,7 @@ const check = (condition: unknown, message = 'Invalid request'): void => {
   if (!condition) throw new BadRequest(message);
 };
 
-const isRange = (value: unknown): value is 0 | 30 | 90 => value === 0 || value === 30 || value === 90;
+const isRange = (value: unknown): value is number => [7, 30, 90, 365].includes(value as number);
 const isPage = (offset: unknown, limit: unknown, maxLimit: number) =>
   Number.isInteger(offset) &&
   (offset as number) >= 0 &&
@@ -158,7 +159,7 @@ const jsonRoutes: Record<string, Route> = {
         (body.kind === undefined || ['all', 'direct', 'group'].includes(body.kind as string)),
     );
     return connection.getHistoryCandidates(
-      body.rangeDays as 0 | 30 | 90,
+      body.rangeDays as number,
       body.offset as number,
       body.limit as number,
       body.kind as 'all' | 'direct' | 'group' | undefined,
@@ -169,7 +170,7 @@ const jsonRoutes: Record<string, Route> = {
     check(typeof body.chatId === 'string' && isRange(body.rangeDays) && isPage(body.offset, body.limit, 100));
     return connection.getHistoryMessages(
       body.chatId as string,
-      body.rangeDays as 0 | 30 | 90,
+      body.rangeDays as number,
       body.offset as number,
       body.limit as number,
     );
@@ -193,7 +194,7 @@ const jsonRoutes: Record<string, Route> = {
         ),
     );
     return connection.historyImports.queue(
-      body.tasks as { chatId: string; conversationId: string; rangeDays: 0 | 30 | 90 }[],
+      body.tasks as { chatId: string; conversationId: string; rangeDays: number }[],
     );
   },
   'POST /history/imports/claim': (body) => {
@@ -224,6 +225,10 @@ const jsonRoutes: Record<string, Route> = {
     );
   },
   'POST /history/imports/progress': () => connection.historyImports.progress(),
+  'POST /address-book/sync': () => {
+    requireConnected();
+    return connection.syncAddressBook();
+  },
   'POST /history/members': (body) => {
     check(isGroupChatId(body.chatId as string), 'Invalid group ID');
     return connection.getGroupMembers(body.chatId as string);
@@ -262,8 +267,11 @@ const sendMedia = async (request: IncomingMessage) => {
   );
 };
 
+let resumed: Promise<unknown> = new Promise(() => undefined);
+
 // Node's default 16 KB header limit would reject the metadata of a long caption.
 const server = createServer({ maxHeaderSize: 32 * 1024 }, async (request, response) => {
+  await resumed;
   response.setHeader('cache-control', 'no-store');
   response.setHeader('content-type', 'application/json');
 
@@ -313,8 +321,30 @@ const server = createServer({ maxHeaderSize: 32 * 1024 }, async (request, respon
 const host = process.env.WHATSAPP_BRIDGE_HOST ?? '127.0.0.1';
 const port = Number(process.env.WHATSAPP_BRIDGE_PORT ?? 8765);
 
-await connection.resume();
-
-server.listen(port, host, () => {
-  log('WhatsApp bridge listening', { host, port, webhook: Boolean(webhookUrl) });
+// Take the port before linking to WhatsApp: a second bridge on the same account would replace the first session.
+server.once('error', (error: NodeJS.ErrnoException) => {
+  log(
+    error.code === 'EADDRINUSE' ? 'Another bridge is already running; use npm run restart' : 'Bridge failed to start',
+    {
+      host,
+      port,
+      error: error.message,
+    },
+  );
+  process.exit(1);
 });
+server.listen(port, host, () => {
+  log('WhatsApp bridge listening', { host, port, webhook: Boolean(webhookUrl), pid: process.pid });
+  resumed = connection
+    .resume()
+    .catch((error: unknown) => log('Could not resume WhatsApp session', { error: String(error) }));
+});
+
+const stop = async (signal: NodeJS.Signals) => {
+  log('WhatsApp bridge stopping', { signal });
+  server.close();
+  await connection.close();
+  process.exit(0);
+};
+process.once('SIGTERM', stop);
+process.once('SIGINT', stop);

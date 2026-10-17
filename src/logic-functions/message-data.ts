@@ -420,7 +420,7 @@ export const findConversations = async (
 };
 
 // Imports the messages queued by the bridge. Direct chats need exactly one matching Person;
-// group chats are imported only once an admin has selected them (the conversation exists).
+// group chats are imported only once an admin has imported their history (the conversation exists).
 export type SyncResult = { imported: number; ignored: number; acknowledged: number; remaining: boolean };
 
 export const syncMessages = async (logger: Logger): Promise<SyncResult> => {

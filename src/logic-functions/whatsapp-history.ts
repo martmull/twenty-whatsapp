@@ -17,6 +17,8 @@ import type { Logger } from 'src/logic-functions/utils/logger';
 import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
 import { chatNumber, digits, isChatId, isGroupChatId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
 
+const RANGE_DAYS = [7, 30, 90, 365];
+
 type ChatSelection = {
   chatId?: string;
   createPerson?: boolean;
@@ -25,12 +27,10 @@ type ChatSelection = {
 };
 
 type HistoryRequest = {
-  action?: 'list' | 'import' | 'members' | 'progress';
-  rangeDays?: 0 | 30 | 90;
+  action?: 'list' | 'import' | 'progress';
+  rangeDays?: number;
   kind?: 'all' | 'direct' | 'group';
   offset?: number;
-  chatId?: string;
-  acknowledged?: boolean;
   chats?: ChatSelection[];
 };
 
@@ -40,9 +40,13 @@ type HistoryCandidate = {
   chatId: string;
   kind: 'direct' | 'group';
   name: string;
+  firstName?: string;
+  lastName?: string;
   messageCount: number;
   lastMessageAt?: string;
 };
+// Names the bridge knows for a chat: the display name, and first and last names from the phone's address book.
+type ContactName = { name: string; firstName?: string; lastName?: string };
 
 const listCandidates = async (request: HistoryRequest) => {
   const offset = request.offset ?? 0;
@@ -54,7 +58,7 @@ const listCandidates = async (request: HistoryRequest) => {
 
   const history = await bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
     '/history/list',
-    { rangeDays: request.rangeDays, kind, offset, limit: 20 },
+    { rangeDays: request.rangeDays, kind, offset, limit: 50 },
     30_000,
   );
   const directNumbers = history.items.filter((item) => item.kind === 'direct').map((item) => chatNumber(item.chatId));
@@ -68,20 +72,11 @@ const listCandidates = async (request: HistoryRequest) => {
       }
 
       const matches = peopleByPhone.get(chatNumber(item.chatId)) ?? [];
-      const matchedName = matches.length === 1 ? personName(matches[0]) : undefined;
-      // A Person named after their phone number can be renamed during import.
-      const renameable =
-        matches.length === 1 &&
-        isPhoneLikeName(matchedName || '') &&
-        digits(matchedName || '') === chatNumber(item.chatId);
 
       return {
         ...item,
-        name: renameable ? item.name : matchedName || item.name,
         match:
           matches.length === 1 ? ('matched' as const) : matches.length > 1 ? ('ambiguous' as const) : ('new' as const),
-        personName: matchedName,
-        renameable,
       };
     }),
   };
@@ -91,7 +86,7 @@ const listCandidates = async (request: HistoryRequest) => {
 const resolvePerson = async (
   request: ChatSelection,
   chatId: string,
-  historyName: string,
+  contact: ContactName,
   matches: Person[],
 ): Promise<{ person: Person; createdPerson: boolean }> => {
   if (matches.length > 1) {
@@ -99,16 +94,20 @@ const resolvePerson = async (
   }
 
   for (const value of [request.firstName, request.lastName]) {
-    if (value !== undefined && (typeof value !== 'string' || value.length > 80 || !value.trim())) {
+    if (value !== undefined && (typeof value !== 'string' || value.length > 80)) {
       throw new HttpError(400, 'Invalid Person name');
     }
   }
 
-  const [suggestedFirstName = '', ...suggestedLastName] = isPhoneLikeName(historyName)
-    ? []
-    : historyName.trim().split(/\s+/);
-  const firstName = request.firstName?.trim() || suggestedFirstName;
-  const lastName = request.lastName?.trim() || suggestedLastName.join(' ');
+  const [suggestedFirstName = '', ...suggestedLastName] = contact.firstName
+    ? [contact.firstName, contact.lastName ?? '']
+    : isPhoneLikeName(contact.name)
+      ? []
+      : contact.name.trim().split(/\s+/);
+  // An edited first name comes with the last name as typed, which may be blank.
+  const [firstName, lastName] = request.firstName?.trim()
+    ? [request.firstName.trim(), request.lastName?.trim() ?? '']
+    : [suggestedFirstName, suggestedLastName.join(' ')];
   const existing = matches[0];
 
   if (!existing) {
@@ -154,7 +153,6 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
   const chats = request.chats;
 
   if (
-    request.acknowledged !== true ||
     !Array.isArray(chats) ||
     chats.length === 0 ||
     chats.length > MAX_CHATS_PER_IMPORT ||
@@ -172,10 +170,10 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
 
   const client = applicationClient();
   const [names, accountId] = await Promise.all([
-    bridgePost<{ chatId: string; name: string }[]>('/history/names', { chatIds }, 30_000),
+    bridgePost<(ContactName & { chatId: string })[]>('/history/names', { chatIds }, 30_000),
     ensureAccount(client, `+${accountPhoneNumber}`),
   ]);
-  const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name]));
+  const contactByChatId = new Map(names.map(({ chatId, ...contact }) => [chatId, contact]));
   const [peopleByPhone, conversations] = await Promise.all([
     findPeopleByPhones(client, chatIds.filter((chatId) => !isGroupChatId(chatId)).map(chatNumber)),
     findConversations(client, accountId, chatIds),
@@ -186,16 +184,16 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
 
   for (const chat of chats) {
     const chatId = chat.chatId as string;
-    const historyName = nameByChatId.get(chatId) ?? chatNumber(chatId);
+    const contact = contactByChatId.get(chatId) ?? { name: chatNumber(chatId) };
 
     try {
       const { person, createdPerson } = isGroupChatId(chatId)
         ? { person: undefined, createdPerson: false }
-        : await resolvePerson(chat, chatId, historyName, peopleByPhone.get(chatNumber(chatId)) ?? []);
+        : await resolvePerson(chat, chatId, contact, peopleByPhone.get(chatNumber(chatId)) ?? []);
       createdPeople += Number(createdPerson);
       resolved.push({
         chatId,
-        name: person ? personName(person) || chatNumber(chatId) : historyName.slice(0, 120),
+        name: person ? personName(person) || chatNumber(chatId) : contact.name.slice(0, 120),
         person,
       });
     } catch (error) {
@@ -272,7 +270,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     });
   }
 
-  if (request.rangeDays !== 0 && request.rangeDays !== 30 && request.rangeDays !== 90) {
+  if (!RANGE_DAYS.includes(request.rangeDays ?? 0)) {
     throw new HttpError(400, 'Invalid history range');
   }
 
@@ -280,11 +278,6 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
 
   if (status.state !== 'connected' || !status.phoneNumber) {
     throw new HttpError(409, 'WhatsApp is disconnected');
-  }
-
-  if (request.action === 'members') {
-    if (!isGroupChatId(request.chatId)) throw new HttpError(400, 'Invalid group ID');
-    return bridgePost('/history/members', { chatId: request.chatId });
   }
 
   if (request.action === 'list') {

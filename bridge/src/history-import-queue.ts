@@ -137,7 +137,7 @@ export class HistoryImportQueue {
 
   // Queues chats for import. Returns a run token when Twenty must start a new job chain.
   queue(
-    tasks: { chatId: string; conversationId: string; rangeDays: 0 | 30 | 90 }[],
+    tasks: { chatId: string; conversationId: string; rangeDays: number }[],
   ): Promise<{ queued: number; runToken?: string }> {
     return this.serialize(async () => {
       const queuedAt = new Date(this.now()).toISOString();
