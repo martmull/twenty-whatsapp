@@ -23,6 +23,7 @@ import { fetchAddressBook, type AddressBookEntry, type AddressBookReport } from 
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { HistoryImportQueue } from './history-import-queue.js';
+import { MediaLeases } from './media-leases.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
 import {
   isDirectChatId,
@@ -118,6 +119,7 @@ export class WhatsAppConnection {
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
   readonly historyImports: HistoryImportQueue;
+  readonly mediaLeases = new MediaLeases();
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
   private readonly pendingGroupNameLookups = new Set<string>();
   private readonly groupNameLookupQueue: string[] = [];

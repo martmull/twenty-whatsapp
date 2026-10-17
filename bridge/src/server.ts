@@ -248,6 +248,11 @@ const jsonRoutes: Record<string, Route> = {
     );
   },
   'POST /history/imports/progress': () => connection.historyImports.progress(),
+  'POST /media/claim': () => connection.mediaLeases.claim(),
+  'POST /media/release': (body) => {
+    check(isUuid(body.leaseId));
+    return connection.mediaLeases.release(body.leaseId as string);
+  },
   'POST /address-book/sync': () => {
     requireConnected();
     return connection.syncAddressBook();

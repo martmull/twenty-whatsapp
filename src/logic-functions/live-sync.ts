@@ -15,6 +15,7 @@ import {
   type Conversation,
   type Person,
 } from 'src/logic-functions/message-data';
+import { enqueueMediaImports } from 'src/logic-functions/media-import';
 import { attachMedia, type MediaItem } from 'src/logic-functions/message-media';
 import {
   deterministicId,
@@ -157,14 +158,16 @@ export const pendingMedia = (written: UpsertedMessage[], events: BridgeMessageEv
   });
 };
 
-type SyncDependencies = { client?: CoreApiClient };
+type SyncDependencies = { client?: CoreApiClient; enqueueMedia?: (items: MediaItem[]) => Promise<unknown> };
+
+const INLINE_MEDIA_TIME_BUDGET_MS = 120_000;
 
 // Imports the messages queued by the bridge: a fixed number of requests per batch, whatever the
 // number of chats in it. If the batch cannot be written, chats are retried one by one so a single
 // bad chat cannot hold the queue.
 export const syncMessages = async (
   logger: Logger,
-  { client = applicationClient() }: SyncDependencies = {},
+  { client = applicationClient(), enqueueMedia = enqueueMediaImports }: SyncDependencies = {},
 ): Promise<SyncResult> => {
   const status = await getBridgeStatus();
 
@@ -191,9 +194,7 @@ export const syncMessages = async (
   let released: { remaining?: boolean; jobKey?: string } | undefined;
 
   try {
-    // Media uploads are slow: stop the batch after the first one, the bridge asks again for the rest.
-    const firstMediaIndex = claimed.events.findIndex((event) => event.media);
-    const events = firstMediaIndex < 0 ? claimed.events : claimed.events.slice(0, firstMediaIndex + 1);
+    const events = claimed.events;
     const valid = events.filter(isValidBridgeEvent);
     const invalid = events.filter((event) => !isValidBridgeEvent(event));
 
@@ -242,11 +243,20 @@ export const syncMessages = async (
       }
     }
 
+    const media: MediaItem[] = [];
     for (const { batches: written, written: messages } of writtenBatches) {
       const writtenEvents = written.flatMap((batch) => batch.events);
-      await attachMedia(client, pendingMedia(messages, writtenEvents));
+      media.push(...pendingMedia(messages, writtenEvents));
       imported += messages.filter((message) => message.created).length;
       acknowledge.push(...writtenEvents.map((event) => event.eventId));
+    }
+
+    if (media.length > 0) {
+      // Files upload in their own jobs, so text never waits behind them.
+      await enqueueMedia(media).catch(async (error: unknown) => {
+        logger.warn('Could not queue media imports, importing them now', { error: String(error) });
+        await attachMedia(client, media, Date.now() + INLINE_MEDIA_TIME_BUDGET_MS);
+      });
     }
     completed = true;
   } catch (error) {

@@ -148,3 +148,21 @@ test('when Twenty rate limits, acknowledges nothing and waits as long as Twenty 
   assert.deepEqual(acknowledged, []);
   assert.equal(released[0].completed, false);
 });
+
+test('imports a whole batch with media, handing the files to media jobs', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: [person(1)] });
+  const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
+  const events = range(30).map((index) => event(index, chatId(1), index % 3 ? {} : { media }));
+  bridgeWith(events);
+  const queued: { eventId: string; fileName: string }[] = [];
+
+  const result = await syncMessages(silentLogger, {
+    client: twenty.client,
+    enqueueMedia: async (items) => queued.push(...items),
+  });
+
+  assert.equal(result.imported, 30, 'media no longer cuts the batch short');
+  assert.equal(queued.length, 10);
+  assert.ok(queued.every((item) => item.fileName === 'photo.jpg'));
+  assert.equal(twenty.store.whatsappMessages.filter((message) => message.mediaKind === 'IMAGE').length, 10);
+});

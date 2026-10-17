@@ -110,23 +110,35 @@ export const importMessageMedia = async (
 };
 
 export type MediaItem = { messageId: string; eventId: string; fileName: string };
+export type MediaWrite = { id: string; media: { fileId: string; label: string }[] };
 
-// Uploads each file, then attaches them all with one upsert. Uploads cost no API budget; the upsert
-// costs one request. Stops starting uploads after the deadline; the caller retries the rest.
+// Uploads each file; uploads cost no API budget. Stops starting uploads after the deadline and
+// reports how many items it went through, so the caller can retry the rest.
+export const uploadMedia = async (
+  items: MediaItem[],
+  deadline = Number.POSITIVE_INFINITY,
+  importFile = importMessageMedia,
+): Promise<{ writes: MediaWrite[]; processed: number }> => {
+  const writes: MediaWrite[] = [];
+  let processed = 0;
+
+  for (const item of items) {
+    if (processed > 0 && Date.now() > deadline) break;
+    const file = await importFile(item.eventId, item.fileName);
+    processed += 1;
+    if (file) writes.push({ id: item.messageId, media: [file] });
+  }
+
+  return { writes, processed };
+};
+
+// Uploads the files, then attaches them all with one upsert.
 export const attachMedia = async (
   client: CoreApiClient,
   items: MediaItem[],
   deadline = Number.POSITIVE_INFINITY,
 ): Promise<{ attached: number; processed: number }> => {
-  const writes: Record<string, unknown>[] = [];
-  let processed = 0;
-
-  for (const item of items) {
-    if (processed > 0 && Date.now() > deadline) break;
-    const file = await importMessageMedia(item.eventId, item.fileName);
-    processed += 1;
-    if (file) writes.push({ id: item.messageId, media: [file] });
-  }
+  const { writes, processed } = await uploadMedia(items, deadline);
 
   if (writes.length > 0) {
     await upsertMessages(client, writes);
