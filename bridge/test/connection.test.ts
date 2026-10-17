@@ -185,10 +185,50 @@ test('only one importer claims a queued batch at a time', async () => {
   const claimed = await connection.claimEvents();
   assert.equal(claimed.events.length, 1);
   assert.ok(claimed.leaseId);
-  assert.deepEqual(await connection.claimEvents(), { events: [] });
+  const second = await connection.claimEvents();
+  assert.deepEqual(second.events, []);
+  assert.equal(second.leaseId, undefined);
 
-  assert.deepEqual(await connection.releaseEvents(claimed.leaseId), { released: true, remaining: false });
+  const released = await connection.releaseEvents(claimed.leaseId);
+  assert.equal(released.released, true);
+  assert.equal(released.remaining, false);
   assert.ok((await connection.claimEvents()).leaseId);
+});
+
+test('every claim moves the sync job key on, so a later signal gets its own job', async () => {
+  const connection = new WhatsAppConnection(join(tmpdir(), 'twenty-whatsapp-key-test'), randomBytes(32));
+  const before = connection.syncJobKey();
+  const claimed = await connection.claimEvents();
+
+  assert.notEqual(claimed.jobKey, before);
+  assert.equal(connection.syncJobKey(), claimed.jobKey, 'signals sent now name the next job');
+  assert.match(claimed.jobKey, /^[a-f\d]{8}\.\d+$/);
+  assert.notEqual(
+    new WhatsAppConnection(join(tmpdir(), 'twenty-whatsapp-key-test'), randomBytes(32)).syncJobKey(),
+    before,
+    'a restarted bridge does not reuse the keys of jobs Twenty still remembers',
+  );
+});
+
+test('remembers the Twenty account of the linked number until it disconnects', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-account-'));
+  const encryptionKey = randomBytes(32);
+  const accountId = '44444444-4444-4444-8444-444444444444';
+
+  try {
+    const connection = new WhatsAppConnection(directory, encryptionKey);
+    connectFakeSocket(connection);
+    assert.deepEqual(await connection.rememberTwentyAccount('+15550000000', accountId), { remembered: false });
+    assert.deepEqual(await connection.rememberTwentyAccount(ACCOUNT_PHONE, accountId), { remembered: true });
+    assert.equal(connection.getStatus().twentyAccountId, accountId);
+
+    const restarted = new RecordingConnection(directory, encryptionKey);
+    await restarted.resume();
+    connectFakeSocket(restarted);
+    assert.equal(restarted.getStatus().twentyAccountId, accountId);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('releasing a batch reports remaining events to the sync instead of signaling Twenty again', async () => {
@@ -212,11 +252,11 @@ test('releasing a batch reports remaining events to the sync instead of signalin
 
     const first = await connection.claimEvents();
     await connection.ackEvents(['a'.repeat(64)]);
-    assert.deepEqual(await connection.releaseEvents(first.leaseId!), { released: true, remaining: true });
+    assert.equal((await connection.releaseEvents(first.leaseId!)).remaining, true);
 
     const second = await connection.claimEvents();
     await connection.ackEvents(['b'.repeat(64)]);
-    assert.deepEqual(await connection.releaseEvents(second.leaseId!), { released: true, remaining: false });
+    assert.equal((await connection.releaseEvents(second.leaseId!)).remaining, false);
     assert.deepEqual(signals, [], 'the Twenty job queues itself; the bridge does not signal again');
   } finally {
     await connection.disconnect();

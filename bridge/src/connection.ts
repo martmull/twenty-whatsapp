@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -58,7 +58,12 @@ export type ConnectionStatus = {
   qrDataUrl?: string;
   qrExpiresAt?: number;
   phoneNumber?: string;
+  // The WhatsApp account record in Twenty, once Twenty has reported it, so a sync need not look it up.
+  twentyAccountId?: string;
 };
+
+// Twenty imports at most this many queued events per sync job.
+export const MAX_SYNC_EVENTS = 200;
 
 export type SendReceipt = {
   requestId: string;
@@ -121,6 +126,12 @@ export class WhatsAppConnection {
   private readonly sendingRequests = new Set<string>();
   private sendQueue: Promise<unknown> = Promise.resolve();
   private syncLease: { id: string; expiresAt: number } | undefined;
+  // Twenty names its sync and names jobs after these keys, so signals sent before a job claims its
+  // batch fold into that one job. The boot ID keeps keys from repeating after a restart.
+  private readonly bootId = randomBytes(4).toString('hex');
+  private syncGeneration = 0;
+  private readonly twentyAccounts: EncryptedJsonStore<{ phoneNumber: string; accountId: string }>;
+  private twentyAccount: { phoneNumber: string; accountId: string } | undefined;
   private namesTimer: NodeJS.Timeout | undefined;
   // Chats whose name changed since Twenty last refreshed names, with the change sequence. Lost on
   // restart, so the first refresh after a start covers every conversation.
@@ -144,6 +155,7 @@ export class WhatsAppConnection {
     this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
     this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
     this.mediaReferences = new EncryptedJsonStore(join(directory, 'media-references'), encryptionKey);
+    this.twentyAccounts = new EncryptedJsonStore(join(directory, 'twenty-account'), encryptionKey);
     this.historyImports = new HistoryImportQueue(
       join(directory, 'history-imports'),
       encryptionKey,
@@ -709,12 +721,25 @@ export class WhatsAppConnection {
   // Oldest first, so Twenty imports messages in the order they were received.
   async getEvents(): Promise<MessageEvent[]> {
     const events = await this.events.list();
-    return events.sort((left, right) => left.sentAt.localeCompare(right.sentAt)).slice(0, 100);
+    return events.sort((left, right) => left.sentAt.localeCompare(right.sentAt)).slice(0, MAX_SYNC_EVENTS);
   }
 
-  async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[] }> {
+  // The key Twenty gives the next sync job. Every claim moves it on before reading the queue, so an
+  // event queued after a job read its batch is signaled under a new key and gets its own job.
+  syncJobKey(): string {
+    return `${this.bootId}.${this.syncGeneration}`;
+  }
+
+  namesJobKey(): string {
+    return `${this.bootId}.${this.namesSequence}`;
+  }
+
+  async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[]; jobKey: string }> {
+    this.syncGeneration += 1;
+    const jobKey = this.syncJobKey();
+
     if (this.syncLease && this.syncLease.expiresAt > Date.now()) {
-      return { events: [] };
+      return { events: [], jobKey };
     }
 
     const leaseId = randomUUID();
@@ -723,9 +748,9 @@ export class WhatsAppConnection {
       const events = await this.getEvents();
       if (events.length === 0) {
         if (this.syncLease?.id === leaseId) this.syncLease = undefined;
-        return { events };
+        return { events, jobKey };
       }
-      return { leaseId, events };
+      return { leaseId, events, jobKey };
     } catch (error) {
       if (this.syncLease?.id === leaseId) this.syncLease = undefined;
       throw error;
@@ -733,13 +758,22 @@ export class WhatsAppConnection {
   }
 
   // Tells the sync whether events remain: the Twenty job then queues itself for the next batch.
-  async releaseEvents(leaseId: string): Promise<{ released: boolean; remaining?: boolean }> {
+  async releaseEvents(leaseId: string): Promise<{ released: boolean; remaining?: boolean; jobKey: string }> {
     if (this.syncLease?.id !== leaseId) {
-      return { released: false };
+      return { released: false, jobKey: this.syncJobKey() };
     }
 
     this.syncLease = undefined;
-    return { released: true, remaining: (await this.events.list(1)).length > 0 };
+    return { released: true, remaining: (await this.events.list(1)).length > 0, jobKey: this.syncJobKey() };
+  }
+
+  async rememberTwentyAccount(phoneNumber: string, accountId: string): Promise<{ remembered: boolean }> {
+    if (`+${this.status.phoneNumber?.replace(/\D/g, '')}` !== phoneNumber) {
+      return { remembered: false };
+    }
+    this.twentyAccount = { phoneNumber, accountId };
+    await this.twentyAccounts.write('current', this.twentyAccount);
+    return { remembered: true };
   }
 
   private signalEvents(): void {
@@ -910,10 +944,14 @@ export class WhatsAppConnection {
       return { state: 'pairing' };
     }
 
-    return this.status;
+    const phoneNumber = this.status.phoneNumber ? `+${this.status.phoneNumber.replace(/\D/g, '')}` : undefined;
+    return phoneNumber && this.twentyAccount?.phoneNumber === phoneNumber
+      ? { ...this.status, twentyAccountId: this.twentyAccount.accountId }
+      : this.status;
   }
 
   async resume(): Promise<void> {
+    this.twentyAccount = (await this.twentyAccounts.read('current')) ?? undefined;
     const { state } = await createEncryptedAuthState(this.directory, this.encryptionKey);
 
     if (state.creds.me?.id) {
@@ -1106,6 +1144,7 @@ export class WhatsAppConnection {
     this.namesTimer = undefined;
     this.changedNames.clear();
     this.fullNamesRefreshUntil = this.namesSequence;
+    this.twentyAccount = undefined;
     clearTimeout(this.addressBookTimer);
     const socket = this.socket;
     this.socket = undefined;

@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { resolve } from 'node:path';
 
-import { WhatsAppConnection, type BridgeSignal } from './connection.js';
+import { MAX_SYNC_EVENTS, WhatsAppConnection, type BridgeSignal } from './connection.js';
 import { isGroupChatId, isSupportedChatId } from './message-event.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
@@ -36,7 +36,13 @@ const deliverSignal = async () => {
   webhookTimer = undefined;
   const signal = pendingSignal;
   pendingSignal = {};
-  const body = JSON.stringify({ sentAt: new Date().toISOString(), ...signal });
+  // Keys are read when the signal leaves, so they name the job that will claim the latest events.
+  const body = JSON.stringify({
+    sentAt: new Date().toISOString(),
+    ...signal,
+    ...(signal.events ? { eventsJobKey: connection.syncJobKey() } : {}),
+    ...(signal.names ? { namesJobKey: connection.namesJobKey() } : {}),
+  });
   const signature = createHmac('sha256', token).update(body).digest('hex');
 
   try {
@@ -92,7 +98,8 @@ const readBuffer = async (request: IncomingMessage, maxBytes: number): Promise<B
 };
 
 const readJson = async (request: IncomingMessage): Promise<Record<string, unknown>> => {
-  const raw = (await readBuffer(request, 16_384)).toString('utf8');
+  // A sync acknowledges up to 200 event IDs (about 14 KB) in one call.
+  const raw = (await readBuffer(request, 65_536)).toString('utf8');
   const value: unknown = raw ? JSON.parse(raw) : {};
 
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -133,8 +140,16 @@ const jsonRoutes: Record<string, Route> = {
     check(typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId));
     return connection.releaseEvents(body.leaseId as string);
   },
+  'POST /account': (body) => {
+    check(typeof body.phoneNumber === 'string' && /^\+\d{7,15}$/.test(body.phoneNumber) && isUuid(body.accountId));
+    return connection.rememberTwentyAccount(body.phoneNumber as string, body.accountId as string);
+  },
   'POST /events/ack': (body) => {
-    check(Array.isArray(body.eventIds) && body.eventIds.every((id) => typeof id === 'string'));
+    check(
+      Array.isArray(body.eventIds) &&
+        body.eventIds.length <= MAX_SYNC_EVENTS &&
+        body.eventIds.every((id) => typeof id === 'string'),
+    );
     return connection.ackEvents(body.eventIds as string[]);
   },
   'POST /send': (body) => {

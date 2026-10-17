@@ -5,6 +5,7 @@ export type BridgeStatus = {
   qrDataUrl?: string;
   qrExpiresAt?: number;
   phoneNumber?: string;
+  twentyAccountId?: string;
 };
 
 export const bridgeFetch = async (path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<Response> => {

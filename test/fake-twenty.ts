@@ -51,10 +51,12 @@ export const createFakeTwenty = (seed: Partial<Record<string, Row[]>> = {}) => {
   let clock = Date.UTC(2026, 9, 17);
   let nextId = 1;
   let failNext: unknown;
+  let rejectRecord: ((record: Record<string, unknown>) => boolean) | undefined;
 
   const tick = () => new Date((clock += 1000)).toISOString();
 
   const upsert = (objectName: string, data: Record<string, unknown>[]) => {
+    if (data.some((record) => rejectRecord?.(record))) throw new Error('Invalid record');
     const { collection, uniqueKeys } = OBJECTS[objectName];
     const rows = store[collection];
 
@@ -121,6 +123,9 @@ export const createFakeTwenty = (seed: Partial<Record<string, Row[]>> = {}) => {
     requests,
     failNextRequest: (error: unknown) => {
       failNext = error;
+    },
+    rejectRecords: (predicate: (record: Record<string, unknown>) => boolean) => {
+      rejectRecord = predicate;
     },
   };
 };
