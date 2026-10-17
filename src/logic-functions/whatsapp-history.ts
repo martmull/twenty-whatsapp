@@ -31,10 +31,19 @@ type HistoryCandidate = {
   chatId: string;
   kind: 'direct' | 'group';
   name: string;
+  firstName?: string;
+  lastName?: string;
   messageCount: number;
   lastMessageAt?: string;
 };
-type HistoryMessages = { name: string; messages: BridgeMessageEvent[]; total: number; nextOffset?: number };
+type HistoryMessages = {
+  name: string;
+  firstName?: string;
+  lastName?: string;
+  messages: BridgeMessageEvent[];
+  total: number;
+  nextOffset?: number;
+};
 
 const listCandidates = async (request: HistoryRequest) => {
   const offset = request.offset ?? 0;
@@ -83,7 +92,7 @@ const listCandidates = async (request: HistoryRequest) => {
 const resolvePerson = async (
   request: HistoryRequest,
   chatId: string,
-  historyName: string,
+  history: HistoryMessages,
 ): Promise<{ person: Person; createdPerson: boolean }> => {
   const matches = (await findPeopleByPhones(applicationClient(), [chatNumber(chatId)])).get(chatNumber(chatId)) ?? [];
 
@@ -92,16 +101,20 @@ const resolvePerson = async (
   }
 
   for (const value of [request.firstName, request.lastName]) {
-    if (value !== undefined && (typeof value !== 'string' || value.length > 80 || !value.trim())) {
+    if (value !== undefined && (typeof value !== 'string' || value.length > 80)) {
       throw new HttpError(400, 'Invalid Person name');
     }
   }
 
-  const [suggestedFirstName = '', ...suggestedLastName] = isPhoneLikeName(historyName)
-    ? []
-    : historyName.trim().split(/\s+/);
-  const firstName = request.firstName?.trim() || suggestedFirstName;
-  const lastName = request.lastName?.trim() || suggestedLastName.join(' ');
+  const [suggestedFirstName = '', ...suggestedLastName] = history.firstName
+    ? [history.firstName, history.lastName ?? '']
+    : isPhoneLikeName(history.name)
+      ? []
+      : history.name.trim().split(/\s+/);
+  // An edited first name comes with the last name as typed, which may be blank.
+  const [firstName, lastName] = request.firstName?.trim()
+    ? [request.firstName.trim(), request.lastName?.trim() ?? '']
+    : [suggestedFirstName, suggestedLastName.join(' ')];
   const existing = matches[0];
 
   if (!existing) {
@@ -194,7 +207,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
   const accountId = await ensureAccount(client, `+${digits(status.phoneNumber)}`);
   const { person, createdPerson } = isGroupChatId(chatId)
     ? { person: undefined, createdPerson: false }
-    : await resolvePerson(request, chatId, history.name);
+    : await resolvePerson(request, chatId, history);
   const name = person ? personName(person) || chatNumber(chatId) : history.name.slice(0, 120);
   const imported = await importChatMessages(client, accountId, chatId, name, history.messages, person);
 

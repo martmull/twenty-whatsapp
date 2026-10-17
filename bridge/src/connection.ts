@@ -10,12 +10,14 @@ import makeWASocket, {
   type AnyMediaMessageContent,
   type Chat,
   type Contact,
+  type SignalKeyStore,
   type WAMessage,
   type WASocket,
 } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
+import { fetchAddressBook, type AddressBookEntry } from './address-book.js';
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
@@ -58,9 +60,13 @@ export type HistoryCandidate = {
   chatId: string;
   kind: 'direct' | 'group';
   name: string;
+  firstName?: string;
+  lastName?: string;
   messageCount: number;
   lastMessageAt?: string;
 };
+
+type SavedContact = { fullName: string; firstName: string; lastName: string };
 
 export type GroupMember = {
   id: string;
@@ -82,6 +88,8 @@ export class WhatsAppConnection {
   private readonly sentMessages: EncryptedJsonStore<{ encodedMessage: string }>;
   private readonly phoneNumbers: EncryptedJsonStore<{ chatId: string }>;
   private readonly contactNames: EncryptedJsonStore<{ name: string }>;
+  private readonly addressBook: EncryptedJsonStore<SavedContact>;
+  private addressBookTimer: NodeJS.Timeout | undefined;
   private readonly historyChats: EncryptedJsonStore<HistoryChat>;
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
@@ -106,6 +114,7 @@ export class WhatsAppConnection {
     this.sentMessages = new EncryptedJsonStore(join(directory, 'sent-messages'), encryptionKey);
     this.phoneNumbers = new EncryptedJsonStore(join(directory, 'phone-numbers'), encryptionKey);
     this.contactNames = new EncryptedJsonStore(join(directory, 'contact-names'), encryptionKey);
+    this.addressBook = new EncryptedJsonStore(join(directory, 'address-book'), encryptionKey);
     this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
     this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
     this.mediaReferences = new EncryptedJsonStore(join(directory, 'media-references'), encryptionKey);
@@ -126,11 +135,16 @@ export class WhatsAppConnection {
           /^\d{7,15}@lid$/.test(contact.lid) &&
           /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)
         ) {
-          await this.phoneNumbers.write(contact.lid, { chatId: contact.jid });
+          await this.linkPhoneNumber(contact.lid, contact.jid);
         }
         const name = (contact.name || contact.notify || contact.verifiedName)?.trim().slice(0, 120);
         if (name) {
-          for (const id of [contact.id, contact.lid, contact.jid].filter((value): value is string => Boolean(value))) {
+          const mappedPhoneId = contact.id.endsWith('@lid')
+            ? (await this.phoneNumbers.read(contact.id))?.chatId
+            : undefined;
+          for (const id of new Set(
+            [contact.id, contact.lid, contact.jid, mappedPhoneId].filter((value): value is string => Boolean(value)),
+          )) {
             if ((await this.contactNames.read(id))?.name !== name) {
               await this.contactNames.write(id, { name });
               namesChanged = true;
@@ -184,7 +198,7 @@ export class WhatsAppConnection {
               namesChanged = true;
             }
             if (message.key.participant.endsWith('@lid')) {
-              await this.phoneNumbers.write(message.key.participant, { chatId: message.key.participantPn });
+              await this.linkPhoneNumber(message.key.participant, message.key.participantPn);
             }
           }
         }
@@ -264,6 +278,53 @@ export class WhatsAppConnection {
     await this.historyWrites;
   }
 
+  async recordAddressBook(entries: AddressBookEntry[]): Promise<void> {
+    const write = async () => {
+      for (const { ids, fullName, firstName, lastName } of entries) {
+        const lid = ids.find((id) => id.endsWith('@lid'));
+        const phoneId = ids.find(isDirectChatId) ?? (lid ? (await this.phoneNumbers.read(lid))?.chatId : undefined);
+        if (lid && phoneId) {
+          await this.phoneNumbers.write(lid, { chatId: phoneId });
+        }
+        for (const id of new Set([...ids, ...(phoneId ? [phoneId] : [])])) {
+          await this.addressBook.write(id, { fullName, firstName, lastName });
+          await this.contactNames.write(id, { name: fullName });
+        }
+      }
+      this.groupMembersCache.clear();
+    };
+
+    this.historyWrites = this.historyWrites.then(write, write);
+    await this.historyWrites;
+  }
+
+  // Names saved under a LID only become reachable from the phone number once WhatsApp shares the mapping.
+  private async linkPhoneNumber(lid: string, phoneId: string): Promise<void> {
+    await this.phoneNumbers.write(lid, { chatId: phoneId });
+    const savedContact = await this.addressBook.read(lid);
+    if (savedContact && !(await this.addressBook.read(phoneId))) {
+      await this.addressBook.write(phoneId, savedContact);
+    }
+    const savedName = savedContact?.fullName ?? (await this.contactNames.read(lid))?.name;
+    if (savedName && (savedContact || !(await this.contactNames.read(phoneId)))) {
+      await this.contactNames.write(phoneId, { name: savedName });
+    }
+  }
+
+  // Baileys reports saved contacts without their first name, so the address book is read again after changes.
+  private scheduleAddressBookSync(socket: WASocket, keys: SignalKeyStore, delayMs: number): void {
+    clearTimeout(this.addressBookTimer);
+    const generation = this.generation;
+    this.addressBookTimer = setTimeout(() => {
+      if (generation !== this.generation || this.socket !== socket) {
+        return;
+      }
+      void fetchAddressBook(socket, keys)
+        .then((entries) => (generation === this.generation ? this.recordAddressBook(entries) : undefined))
+        .catch(() => undefined);
+    }, delayMs);
+  }
+
   async getHistoryNames(chatIds: string[]): Promise<{ chatId: string; name: string }[]> {
     await this.historyWrites;
     const names: { chatId: string; name: string }[] = [];
@@ -276,7 +337,10 @@ export class WhatsAppConnection {
       if (!saved) {
         continue;
       }
-      const name = saved.name || (isGroupChatId(chatId) ? chatId.split('@')[0] : `+${chatId.split('@')[0]}`);
+      const name =
+        (isDirectChatId(chatId) ? (await this.addressBook.read(chatId))?.fullName : undefined) ||
+        saved.name ||
+        (isGroupChatId(chatId) ? chatId.split('@')[0] : `+${chatId.split('@')[0]}`);
       if (isGroupChatId(chatId) && /^\+?\d+$/.test(name)) {
         this.scheduleGroupNameLookup(chatId);
       }
@@ -368,6 +432,7 @@ export class WhatsAppConnection {
       candidates.slice(offset, offset + limit).map(async (candidate) => ({
         ...candidate,
         name: await this.resolveHistoryName(candidate.chatId, candidate.name),
+        ...(await this.savedContactName(candidate.chatId)),
       })),
     );
 
@@ -383,7 +448,14 @@ export class WhatsAppConnection {
     rangeDays: 0 | 30 | 90,
     offset: number,
     limit: number,
-  ): Promise<{ name: string; messages: MessageEvent[]; total: number; nextOffset?: number }> {
+  ): Promise<{
+    name: string;
+    firstName?: string;
+    lastName?: string;
+    messages: MessageEvent[];
+    total: number;
+    nextOffset?: number;
+  }> {
     if (!isSupportedChatId(chatId)) {
       throw new Error('Invalid chat ID');
     }
@@ -408,6 +480,7 @@ export class WhatsAppConnection {
 
     return {
       name: await this.resolveHistoryName(chatId, chat.name),
+      ...(await this.savedContactName(chatId)),
       messages: page,
       total: messages.length,
       nextOffset,
@@ -428,8 +501,17 @@ export class WhatsAppConnection {
     return { bytes: await downloadMedia(reference), mimeType: reference.mimeType, fileName: reference.fileName };
   }
 
+  private async savedContactName(chatId: string): Promise<{ firstName: string; lastName: string } | undefined> {
+    const savedContact = isDirectChatId(chatId) ? await this.addressBook.read(chatId) : undefined;
+    return savedContact ? { firstName: savedContact.firstName, lastName: savedContact.lastName } : undefined;
+  }
+
   private async resolveHistoryName(chatId: string, savedName?: string): Promise<string> {
     const fallback = isGroupChatId(chatId) ? chatId.split('@')[0] : `+${chatId.split('@')[0]}`;
+    const savedContact = isDirectChatId(chatId) ? await this.addressBook.read(chatId) : undefined;
+    if (savedContact) {
+      return savedContact.fullName;
+    }
     if (savedName && !/^\+?\d+$/.test(savedName)) {
       return savedName;
     }
@@ -475,10 +557,13 @@ export class WhatsAppConnection {
           ? (await this.phoneNumbers.read(participant.id))?.chatId
           : undefined;
         const phoneId = [participant.jid, mappedPhoneId, participant.id].find((id) => id && isDirectChatId(id));
+        const savedContact =
+          (phoneId ? await this.addressBook.read(phoneId) : undefined) ?? (await this.addressBook.read(participant.id));
         const savedName =
           (await this.contactNames.read(participant.id))?.name ??
           (participant.jid ? (await this.contactNames.read(participant.jid))?.name : undefined);
         const displayName = (
+          savedContact?.fullName ||
           participant.name ||
           savedName ||
           participant.notify ||
@@ -487,7 +572,9 @@ export class WhatsAppConnection {
         )
           ?.trim()
           .slice(0, 120);
-        const [firstName, ...lastNameParts] = displayName?.split(/\s+/) ?? [];
+        const [firstName, ...lastNameParts] = savedContact
+          ? [savedContact.firstName, savedContact.lastName]
+          : (displayName?.split(/\s+/) ?? []);
         const isMe = Boolean(
           (this.socket?.user?.lid && participant.id === this.socket.user.lid) ||
           (this.status.phoneNumber && phoneId?.split('@')[0] === this.status.phoneNumber),
@@ -764,7 +851,7 @@ export class WhatsAppConnection {
 
         if (event) {
           if (remoteJid?.endsWith('@lid') && !message.key.fromMe) {
-            await this.phoneNumbers.write(remoteJid, { chatId: event.chatId });
+            await this.linkPhoneNumber(remoteJid, event.chatId);
           }
           await this.events.write(event.eventId, event);
           this.onEventsQueued();
@@ -801,7 +888,7 @@ export class WhatsAppConnection {
     });
     socket.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
       if (generation === this.generation && /^\d{7,15}@lid$/.test(lid) && /^\d{7,15}@s\.whatsapp\.net$/.test(jid)) {
-        await this.phoneNumbers.write(lid, { chatId: jid });
+        await this.linkPhoneNumber(lid, jid);
       }
     });
     socket.ev.on('contacts.upsert', async (contacts) => {
@@ -816,10 +903,14 @@ export class WhatsAppConnection {
           /^\d{7,15}@lid$/.test(contact.lid) &&
           /^\d{7,15}@s\.whatsapp\.net$/.test(contact.jid)
         ) {
-          await this.phoneNumbers.write(contact.lid, { chatId: contact.jid });
+          await this.linkPhoneNumber(contact.lid, contact.jid);
         }
       }
       await this.recordHistory(contacts, []);
+      // Saved contacts arrive by name only; read them again to get first names.
+      if (contacts.some((contact) => contact.name)) {
+        this.scheduleAddressBookSync(socket, state.keys, 10_000);
+      }
     });
     socket.ev.on('contacts.update', async (contacts) => {
       if (generation === this.generation) {
@@ -848,6 +939,7 @@ export class WhatsAppConnection {
           phoneNumber: socket.user?.id?.split(':')[0],
         };
         this.onEventsQueued();
+        this.scheduleAddressBookSync(socket, state.keys, 0);
         void socket
           .groupFetchAllParticipating()
           .then((groups) => {
@@ -883,6 +975,7 @@ export class WhatsAppConnection {
     this.intentionallyDisconnected = true;
     this.generation += 1;
     clearTimeout(this.reconnectTimer);
+    clearTimeout(this.addressBookTimer);
     const socket = this.socket;
     this.socket = undefined;
     this.groupMembersCache.clear();

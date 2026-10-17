@@ -18,6 +18,9 @@ type HistoryCandidate = {
   chatId: string;
   kind: 'direct' | 'group';
   name: string;
+  // Present when the number is a contact saved on the phone.
+  firstName?: string;
+  lastName?: string;
   messageCount: number;
   lastMessageAt?: string;
   match: 'matched' | 'new' | 'ambiguous' | 'group';
@@ -45,6 +48,14 @@ type GroupMember = {
   firstName?: string;
   lastName?: string;
   isMe?: boolean;
+};
+
+const suggestedName = (item: HistoryCandidate): { firstName: string; lastName: string } => {
+  if (item.firstName) {
+    return { firstName: item.firstName, lastName: item.lastName ?? '' };
+  }
+  const [firstName = '', ...lastName] = /^\+?\d+$/.test(item.name) ? [] : item.name.trim().split(/\s+/);
+  return { firstName, lastName: lastName.join(' ') };
 };
 
 const rangeOptions: { value: RangeDays; label: string }[] = [
@@ -174,8 +185,7 @@ export const WhatsAppHistoryImport = () => {
         if (item.match !== 'new' && !item.renameable) {
           return false;
         }
-        const suggested = /^\+?\d+$/.test(item.name) ? '' : item.name.trim().split(/\s+/)[0];
-        return !(names[item.chatId]?.firstName.trim() || suggested);
+        return !(names[item.chatId] ?? suggestedName(item)).firstName.trim();
       });
       if (missingName) {
         setError(t('Enter a first name for contacts whose name is unavailable before importing.'));
@@ -358,13 +368,7 @@ export const WhatsAppHistoryImport = () => {
                 </span>
               </div>
               {items.map((item) => {
-                const [suggestedFirstName, ...suggestedLastName] = /^\+?\d+$/.test(item.name)
-                  ? ['', '']
-                  : item.name.trim().split(/\s+/);
-                const name = names[item.chatId] ?? {
-                  firstName: suggestedFirstName,
-                  lastName: suggestedLastName.join(' '),
-                };
+                const name = names[item.chatId] ?? suggestedName(item);
 
                 return (
                   <div
@@ -439,7 +443,7 @@ export const WhatsAppHistoryImport = () => {
                         </strong>
                         <span style={styles.muted}>
                           {t(
-                            'WhatsApp provides display names, not separate first and last names. The suggestions below split the available name and may need correction.',
+                            'Contacts saved on your phone keep their first and last names. Other members only have a WhatsApp display name, split here as a suggestion that may need correction.',
                           )}
                         </span>
                         {membersError && (
