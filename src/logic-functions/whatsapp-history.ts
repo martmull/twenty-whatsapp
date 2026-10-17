@@ -15,14 +15,15 @@ import {
 import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
 import { chatNumber, digits, isChatId, isGroupChatId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
 
+const RANGE_DAYS = [7, 30, 90, 365];
+
 type HistoryRequest = {
-  action?: 'list' | 'import' | 'members';
-  rangeDays?: 0 | 30 | 90;
+  action?: 'list' | 'import';
+  rangeDays?: number;
   kind?: 'all' | 'direct' | 'group';
   offset?: number;
   chatId?: string;
   createPerson?: boolean;
-  acknowledged?: boolean;
   firstName?: string;
   lastName?: string;
 };
@@ -55,7 +56,7 @@ const listCandidates = async (request: HistoryRequest) => {
 
   const history = await bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
     '/history/list',
-    { rangeDays: request.rangeDays, kind, offset, limit: 20 },
+    { rangeDays: request.rangeDays, kind, offset, limit: 50 },
     30_000,
   );
   const directNumbers = history.items.filter((item) => item.kind === 'direct').map((item) => chatNumber(item.chatId));
@@ -69,20 +70,11 @@ const listCandidates = async (request: HistoryRequest) => {
       }
 
       const matches = peopleByPhone.get(chatNumber(item.chatId)) ?? [];
-      const matchedName = matches.length === 1 ? personName(matches[0]) : undefined;
-      // A Person named after their phone number can be renamed during import.
-      const renameable =
-        matches.length === 1 &&
-        isPhoneLikeName(matchedName || '') &&
-        digits(matchedName || '') === chatNumber(item.chatId);
 
       return {
         ...item,
-        name: renameable ? item.name : matchedName || item.name,
         match:
           matches.length === 1 ? ('matched' as const) : matches.length > 1 ? ('ambiguous' as const) : ('new' as const),
-        personName: matchedName,
-        renameable,
       };
     }),
   };
@@ -163,7 +155,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
 
   const request = event.body ?? {};
 
-  if (request.rangeDays !== 0 && request.rangeDays !== 30 && request.rangeDays !== 90) {
+  if (!RANGE_DAYS.includes(request.rangeDays ?? 0)) {
     throw new HttpError(400, 'Invalid history range');
   }
 
@@ -173,24 +165,13 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     throw new HttpError(409, 'WhatsApp is disconnected');
   }
 
-  if (request.action === 'members') {
-    if (!isGroupChatId(request.chatId)) throw new HttpError(400, 'Invalid group ID');
-    return bridgePost('/history/members', { chatId: request.chatId });
-  }
-
   if (request.action === 'list') {
     return listCandidates(request);
   }
 
   const chatId = request.chatId;
 
-  if (
-    request.action !== 'import' ||
-    !isChatId(chatId) ||
-    !Number.isInteger(request.offset) ||
-    request.offset! < 0 ||
-    request.acknowledged !== true
-  ) {
+  if (request.action !== 'import' || !isChatId(chatId) || !Number.isInteger(request.offset) || request.offset! < 0) {
     throw new HttpError(400, 'Invalid history import request');
   }
 

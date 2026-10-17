@@ -412,7 +412,8 @@ export class WhatsAppConnection {
   }
 
   async getHistoryCandidates(
-    rangeDays: 0 | 30 | 90,
+    // 0 means all available history.
+    rangeDays: number,
     offset: number,
     limit: number,
     kind: 'all' | 'direct' | 'group' = 'all',
@@ -471,7 +472,7 @@ export class WhatsAppConnection {
 
   async getHistoryMessages(
     chatId: string,
-    rangeDays: 0 | 30 | 90,
+    rangeDays: number,
     offset: number,
     limit: number,
   ): Promise<{

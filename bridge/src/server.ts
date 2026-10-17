@@ -85,7 +85,7 @@ const check = (condition: unknown, message = 'Invalid request'): void => {
   if (!condition) throw new BadRequest(message);
 };
 
-const isRange = (value: unknown): value is 0 | 30 | 90 => value === 0 || value === 30 || value === 90;
+const isRange = (value: unknown): value is number => [7, 30, 90, 365].includes(value as number);
 const isPage = (offset: unknown, limit: unknown, maxLimit: number) =>
   Number.isInteger(offset) &&
   (offset as number) >= 0 &&
@@ -133,7 +133,7 @@ const jsonRoutes: Record<string, Route> = {
         (body.kind === undefined || ['all', 'direct', 'group'].includes(body.kind as string)),
     );
     return connection.getHistoryCandidates(
-      body.rangeDays as 0 | 30 | 90,
+      body.rangeDays as number,
       body.offset as number,
       body.limit as number,
       body.kind as 'all' | 'direct' | 'group' | undefined,
@@ -144,7 +144,7 @@ const jsonRoutes: Record<string, Route> = {
     check(typeof body.chatId === 'string' && isRange(body.rangeDays) && isPage(body.offset, body.limit, 100));
     return connection.getHistoryMessages(
       body.chatId as string,
-      body.rangeDays as 0 | 30 | 90,
+      body.rangeDays as number,
       body.offset as number,
       body.limit as number,
     );
