@@ -421,23 +421,29 @@ export const findConversations = async (
 
 // Imports the messages queued by the bridge. Direct chats need exactly one matching Person;
 // group chats are imported only once an admin has selected them (the conversation exists).
-export const syncMessages = async (logger: Logger): Promise<{ imported: number; ignored: number }> => {
+export type SyncResult = { imported: number; ignored: number; acknowledged: number; remaining: boolean };
+
+export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
   const status = await getBridgeStatus();
 
   if (status.state !== 'connected' || !status.phoneNumber) {
+    // The bridge signals again when it reconnects.
     logger.info('Bridge not connected, nothing to sync', { state: status.state });
-    return { imported: 0, ignored: 0 };
+    return { imported: 0, ignored: 0, acknowledged: 0, remaining: false };
   }
 
   // Claimed before any Twenty query, so a sync with nothing to do costs no API request.
   const { leaseId, events } = await bridgePost<{ leaseId?: string; events: BridgeMessageEvent[] }>('/events/claim');
 
+  // Nothing queued, or another sync holds the batch and will queue the next one itself.
   if (!leaseId) {
-    return { imported: 0, ignored: 0 };
+    return { imported: 0, ignored: 0, acknowledged: 0, remaining: false };
   }
 
   let imported = 0;
   let ignored = 0;
+  let acknowledged = 0;
+  let remaining: boolean;
   let completed = false;
 
   try {
@@ -459,6 +465,7 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
     if (invalid.length > 0) {
       logger.warn('Dropping invalid bridge events', { count: invalid.length });
       await bridgePost('/events/ack', { eventIds: invalid.map((event) => event.eventId) });
+      acknowledged += invalid.length;
     }
 
     for (const [chatId, chatEvents] of eventsByChat) {
@@ -498,6 +505,7 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
         }
 
         await bridgePost('/events/ack', { eventIds: chatEvents.map((event) => event.eventId) });
+        acknowledged += chatEvents.length;
       } catch (error) {
         // Keep the chat's events queued for the next sync and carry on with the other chats.
         logger.error('Could not import chat', {
@@ -509,11 +517,15 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
 
     completed = true;
   } finally {
-    await bridgePost('/events/release', { leaseId, completed }).catch(() => undefined);
+    // `completed` is read by bridges from before `remaining` was returned.
+    const released = await bridgePost<{ remaining?: boolean }>('/events/release', { leaseId, completed }).catch(
+      () => undefined,
+    );
+    remaining = released?.remaining ?? true;
   }
 
-  logger.info('Synced messages', { imported, ignored });
-  return { imported, ignored };
+  logger.info('Synced messages', { imported, ignored, remaining });
+  return { imported, ignored, acknowledged, remaining };
 };
 
 // Updates conversation names from WhatsApp contact names, when the bridge signals name changes.

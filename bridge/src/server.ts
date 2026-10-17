@@ -129,10 +129,8 @@ const jsonRoutes: Record<string, Route> = {
   'POST /disconnect': () => connection.disconnect(),
   'POST /events/claim': () => connection.claimEvents(),
   'POST /events/release': (body) => {
-    check(
-      typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId) && typeof body.completed === 'boolean',
-    );
-    return connection.releaseEvents(body.leaseId as string, body.completed as boolean);
+    check(typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId));
+    return connection.releaseEvents(body.leaseId as string);
   },
   'POST /events/ack': (body) => {
     check(Array.isArray(body.eventIds) && body.eventIds.every((id) => typeof id === 'string'));

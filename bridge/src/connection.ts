@@ -46,9 +46,6 @@ const baileysLogger = pino({ level: process.env.WHATSAPP_LOG_LEVEL ?? 'warn', ba
 // history import job chain with this run token.
 export type BridgeSignal = { events?: boolean; names?: boolean; historyRunToken?: string };
 
-// Queued events left untouched are signaled again, backing off while nothing makes progress.
-const EVENTS_RETRY_MIN_MS = 60_000;
-const EVENTS_RETRY_MAX_MS = 15 * 60_000;
 // Name changes arrive in bursts during a history sync; Twenty refreshes names once per burst.
 const NAMES_SIGNAL_DELAY_MS = 60_000;
 
@@ -112,10 +109,7 @@ export class WhatsAppConnection {
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
   private sendQueue: Promise<unknown> = Promise.resolve();
-  private ackedSinceClaim = 0;
   private syncLease: { id: string; expiresAt: number } | undefined;
-  private eventsRetryTimer: NodeJS.Timeout | undefined;
-  private eventsRetryDelayMs = EVENTS_RETRY_MIN_MS;
   private namesTimer: NodeJS.Timeout | undefined;
 
   constructor(
@@ -562,10 +556,6 @@ export class WhatsAppConnection {
 
     const leaseId = randomUUID();
     this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000 };
-    this.ackedSinceClaim = 0;
-    // A sync is running: it reports back through releaseEvents.
-    clearTimeout(this.eventsRetryTimer);
-    this.eventsRetryTimer = undefined;
     try {
       const events = await this.getEvents();
       if (events.length === 0) {
@@ -579,41 +569,18 @@ export class WhatsAppConnection {
     }
   }
 
-  async releaseEvents(leaseId: string, completed: boolean): Promise<{ released: boolean }> {
+  // Tells the sync whether events remain: the Twenty job then queues itself for the next batch.
+  async releaseEvents(leaseId: string): Promise<{ released: boolean; remaining?: boolean }> {
     if (this.syncLease?.id !== leaseId) {
       return { released: false };
     }
 
     this.syncLease = undefined;
-    if ((await this.events.list(1)).length > 0) {
-      // A sync handles a limited batch: ask for the next one at once while it makes progress,
-      // otherwise retry later with a growing delay (a chat that fails to import, Twenty down).
-      if (completed && this.ackedSinceClaim > 0) {
-        this.signalEvents();
-      } else {
-        this.armEventsRetry();
-      }
-    }
-    return { released: true };
+    return { released: true, remaining: (await this.events.list(1)).length > 0 };
   }
 
   private signalEvents(): void {
-    this.eventsRetryDelayMs = EVENTS_RETRY_MIN_MS;
     this.onSignal({ events: true });
-    this.armEventsRetry();
-  }
-
-  // Signals again if no sync claims the events in time, e.g. when the job Twenty queued was lost.
-  private armEventsRetry(): void {
-    if (this.eventsRetryTimer) return;
-    this.eventsRetryTimer = setTimeout(async () => {
-      this.eventsRetryTimer = undefined;
-      if (this.status.state !== 'connected' || (await this.events.list(1)).length === 0) return;
-      this.eventsRetryDelayMs = Math.min(this.eventsRetryDelayMs * 2, EVENTS_RETRY_MAX_MS);
-      this.onSignal({ events: true });
-      this.armEventsRetry();
-    }, this.eventsRetryDelayMs);
-    this.eventsRetryTimer.unref();
   }
 
   private signalNamesChanged(): void {
@@ -632,7 +599,6 @@ export class WhatsAppConnection {
       }
 
       await this.events.delete(eventId);
-      this.ackedSinceClaim += 1;
     }
 
     return { acknowledged: eventIds.length };
@@ -954,9 +920,7 @@ export class WhatsAppConnection {
     this.intentionallyDisconnected = true;
     this.generation += 1;
     clearTimeout(this.reconnectTimer);
-    clearTimeout(this.eventsRetryTimer);
     clearTimeout(this.namesTimer);
-    this.eventsRetryTimer = undefined;
     this.namesTimer = undefined;
     const socket = this.socket;
     this.socket = undefined;
