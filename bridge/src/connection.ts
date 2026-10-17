@@ -971,6 +971,18 @@ export class WhatsAppConnection {
     return this.getStatus();
   }
 
+  // Stops this process without logging the device out, so the next start resumes the session.
+  async close(): Promise<void> {
+    this.intentionallyDisconnected = true;
+    this.generation += 1;
+    clearTimeout(this.reconnectTimer);
+    clearTimeout(this.addressBookTimer);
+    const socket = this.socket;
+    this.socket = undefined;
+    socket?.end(undefined);
+    await this.historyWrites.catch(() => undefined);
+  }
+
   async disconnect(): Promise<ConnectionStatus> {
     this.intentionallyDisconnected = true;
     this.generation += 1;

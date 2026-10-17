@@ -243,5 +243,14 @@ const port = Number(process.env.WHATSAPP_BRIDGE_PORT ?? 8765);
 await connection.resume();
 
 server.listen(port, host, () => {
-  log('WhatsApp bridge listening', { host, port, webhook: Boolean(webhookUrl) });
+  log('WhatsApp bridge listening', { host, port, webhook: Boolean(webhookUrl), pid: process.pid });
 });
+
+const stop = async (signal: NodeJS.Signals) => {
+  log('WhatsApp bridge stopping', { signal });
+  server.close();
+  await connection.close();
+  process.exit(0);
+};
+process.once('SIGTERM', stop);
+process.once('SIGINT', stop);

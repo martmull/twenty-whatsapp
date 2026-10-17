@@ -524,3 +524,22 @@ test('image, video, and audio history stays ordered and exposes media details wi
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('stopping the bridge keeps the linked device for the next start', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-close-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const calls: string[] = [];
+
+  try {
+    Object.defineProperty(connection, 'socket', {
+      value: { end: () => calls.push('end'), logout: async () => calls.push('logout') },
+      writable: true,
+    });
+
+    await connection.close();
+
+    assert.deepEqual(calls, ['end']);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
