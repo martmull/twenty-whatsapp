@@ -356,7 +356,7 @@ export const importChatMessages = async (
 };
 
 // Imports the messages queued by the bridge. Direct chats need exactly one matching Person;
-// group chats are imported only once an admin has selected them (the conversation exists).
+// group chats are imported only once an admin has imported their history (the conversation exists).
 export const syncMessages = async (logger: Logger): Promise<{ imported: number; ignored: number }> => {
   const status = await getBridgeStatus();
 
