@@ -50,6 +50,8 @@ export type BridgeSignal = { events?: boolean; names?: boolean; historyRunToken?
 
 // Name changes arrive in bursts during a history sync; Twenty refreshes names once per burst.
 const NAMES_SIGNAL_DELAY_MS = 60_000;
+// Beyond this many changed chats, Twenty compares every conversation instead of a list.
+const MAX_TRACKED_NAME_CHANGES = 1_000;
 
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
@@ -120,6 +122,11 @@ export class WhatsAppConnection {
   private sendQueue: Promise<unknown> = Promise.resolve();
   private syncLease: { id: string; expiresAt: number } | undefined;
   private namesTimer: NodeJS.Timeout | undefined;
+  // Chats whose name changed since Twenty last refreshed names, with the change sequence. Lost on
+  // restart, so the first refresh after a start covers every conversation.
+  private readonly changedNames = new Map<string, number>();
+  private namesSequence = 0;
+  private fullNamesRefreshUntil: number | undefined = 0;
 
   constructor(
     private readonly directory: string,
@@ -159,6 +166,7 @@ export class WhatsAppConnection {
   ): Promise<void> {
     const write = async () => {
       let namesChanged = false;
+      const namesSequence = this.namesSequence;
       for (const contact of contacts) {
         if (
           contact.lid &&
@@ -283,6 +291,7 @@ export class WhatsAppConnection {
         const name = candidate.name ?? existing?.name;
         if (name && name !== existing?.name) {
           namesChanged = true;
+          this.recordNameChange(chatId);
         }
         await this.historyChats.write(chatId, {
           chatId,
@@ -302,6 +311,8 @@ export class WhatsAppConnection {
       }
       if (namesChanged) {
         this.groupMembersCache.clear();
+      }
+      if (this.namesSequence !== namesSequence) {
         this.signalNamesChanged();
       }
     };
@@ -312,6 +323,7 @@ export class WhatsAppConnection {
 
   async recordAddressBook(entries: AddressBookEntry[]): Promise<void> {
     const write = async () => {
+      const namesSequence = this.namesSequence;
       for (const { ids, fullName, firstName, lastName } of entries) {
         const lid = ids.find((id) => id.endsWith('@lid'));
         const phoneId = ids.find(isDirectChatId) ?? (lid ? (await this.phoneNumbers.read(lid))?.chatId : undefined);
@@ -319,11 +331,17 @@ export class WhatsAppConnection {
           await this.phoneNumbers.write(lid, { chatId: phoneId });
         }
         for (const id of new Set([...ids, ...(phoneId ? [phoneId] : [])])) {
+          if ((await this.addressBook.read(id))?.fullName !== fullName && isDirectChatId(id)) {
+            this.recordNameChange(id);
+          }
           await this.addressBook.write(id, { fullName, firstName, lastName });
           await this.contactNames.write(id, { name: fullName });
         }
       }
       this.groupMembersCache.clear();
+      if (this.namesSequence !== namesSequence) {
+        this.signalNamesChanged();
+      }
     };
 
     this.historyWrites = this.historyWrites.then(write, write);
@@ -398,6 +416,43 @@ export class WhatsAppConnection {
     }
 
     return names;
+  }
+
+  private recordNameChange(chatId: string): void {
+    if (!isSupportedChatId(chatId)) return;
+    this.namesSequence += 1;
+    if (this.changedNames.size >= MAX_TRACKED_NAME_CHANGES) {
+      this.changedNames.clear();
+      this.fullNamesRefreshUntil = this.namesSequence;
+      return;
+    }
+    this.changedNames.set(chatId, this.namesSequence);
+  }
+
+  // Names changed since Twenty's last refresh. `full` asks Twenty to compare every conversation, after
+  // a bridge start or when too many changed to list. Acknowledging the version clears what was read.
+  async getNameChanges(): Promise<{
+    version: number;
+    full: boolean;
+    names: { chatId: string; name: string }[];
+  }> {
+    const version = this.namesSequence;
+    const full = this.fullNamesRefreshUntil !== undefined;
+    const names = full
+      ? []
+      : (await this.getHistoryNames([...this.changedNames.keys()])).map(({ chatId, name }) => ({ chatId, name }));
+
+    return { version, full, names };
+  }
+
+  acknowledgeNameChanges(version: number): { acknowledged: boolean } {
+    for (const [chatId, sequence] of this.changedNames) {
+      if (sequence <= version) this.changedNames.delete(chatId);
+    }
+    if (this.fullNamesRefreshUntil !== undefined && this.fullNamesRefreshUntil <= version) {
+      this.fullNamesRefreshUntil = undefined;
+    }
+    return { acknowledged: true };
   }
 
   private scheduleGroupNameLookup(chatId: string): void {
@@ -1049,6 +1104,8 @@ export class WhatsAppConnection {
     clearTimeout(this.reconnectTimer);
     clearTimeout(this.namesTimer);
     this.namesTimer = undefined;
+    this.changedNames.clear();
+    this.fullNamesRefreshUntil = this.namesSequence;
     clearTimeout(this.addressBookTimer);
     const socket = this.socket;
     this.socket = undefined;

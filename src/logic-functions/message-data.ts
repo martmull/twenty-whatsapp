@@ -2,6 +2,7 @@ import { CoreApiClient } from 'twenty-client-sdk/core';
 
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { importMessageMedia } from 'src/logic-functions/message-media';
+import { chunkRecords, MAX_UPSERT_RECORDS, upsertConversations } from 'src/logic-functions/record-writes';
 import type { Logger } from 'src/logic-functions/utils/logger';
 import {
   chatNumber,
@@ -544,11 +545,22 @@ export const syncMessages = async (logger: Logger): Promise<SyncResult> => {
   return { imported, ignored, acknowledged, remaining };
 };
 
-// Updates conversation names from WhatsApp contact names, when the bridge signals name changes.
-export const syncConversationNames = async (logger: Logger): Promise<void> => {
-  const client = applicationClient();
+type NameChanges = { version: number; full: boolean; names: { chatId: string; name: string }[] };
+type NamedConversation = { id: string; chatId: string; name: string };
+
+const renamesFor = (conversations: NamedConversation[], names: { chatId: string; name: string }[]) => {
+  const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name.trim().slice(0, 120)]));
+
+  return conversations.flatMap((conversation) => {
+    const name = nameByChatId.get(conversation.chatId);
+    return name && !isPhoneLikeName(name) && name !== conversation.name ? [{ id: conversation.id, name }] : [];
+  });
+};
+
+// Compares every conversation with the bridge's names, a page of 100 at a time (the bridge's limit).
+const fullNameRenames = async (client: CoreApiClient): Promise<{ id: string; name: string }[]> => {
+  const renames: { id: string; name: string }[] = [];
   let after: string | undefined;
-  let renamed = 0;
 
   for (let page = 0; page < 100; page += 1) {
     const result = await client.query({
@@ -558,24 +570,13 @@ export const syncConversationNames = async (logger: Logger): Promise<void> => {
         pageInfo: { hasNextPage: true, endCursor: true },
       },
     });
-    const conversations = nodesOf<{ id: string; chatId: string; name: string }>(result.whatsappConversations);
+    const conversations = nodesOf<NamedConversation>(result.whatsappConversations);
 
     if (conversations.length > 0) {
       const names = await bridgePost<{ chatId: string; name: string }[]>('/history/names', {
         chatIds: conversations.map((conversation) => conversation.chatId),
       });
-      const nameByChatId = new Map(names.map(({ chatId, name }) => [chatId, name.trim().slice(0, 120)]));
-
-      for (const conversation of conversations) {
-        const name = nameByChatId.get(conversation.chatId);
-
-        if (name && !isPhoneLikeName(name) && name !== conversation.name) {
-          await client.mutation({
-            updateWhatsappConversation: { __args: { id: conversation.id, data: { name } }, id: true },
-          });
-          renamed += 1;
-        }
-      }
+      renames.push(...renamesFor(conversations, names));
     }
 
     after = result.whatsappConversations?.pageInfo?.endCursor ?? undefined;
@@ -585,5 +586,39 @@ export const syncConversationNames = async (logger: Logger): Promise<void> => {
     }
   }
 
-  logger.info('Synced conversation names', { renamed });
+  return renames;
+};
+
+// Updates conversation names from WhatsApp contact names, when the bridge signals name changes. The
+// bridge lists the chats renamed since the last refresh, so a refresh costs one query and one upsert.
+export const syncConversationNames = async (logger: Logger, client: CoreApiClient = applicationClient()) => {
+  // A bridge from before name changes were tracked answers 404: compare every conversation.
+  const changes = await bridgePost<NameChanges>('/history/names/changes').catch(
+    () => ({ full: true, names: [] }) as Omit<NameChanges, 'version'> & { version?: number },
+  );
+  let renames: { id: string; name: string }[] = [];
+
+  if (changes.full) {
+    renames = await fullNameRenames(client);
+  } else if (changes.names.length > 0) {
+    for (const chunk of chunkRecords(changes.names)) {
+      const result = await client.query({
+        whatsappConversations: {
+          __args: { filter: { chatId: { in: chunk.map(({ chatId }) => chatId) } }, first: MAX_UPSERT_RECORDS },
+          edges: { node: { id: true, chatId: true, name: true } },
+        },
+      });
+      renames.push(...renamesFor(nodesOf<NamedConversation>(result.whatsappConversations), chunk));
+    }
+  }
+
+  if (renames.length > 0) {
+    await upsertConversations(client, renames);
+  }
+
+  if (changes.version !== undefined) {
+    await bridgePost('/history/names/changes/ack', { version: changes.version });
+  }
+
+  logger.info('Synced conversation names', { renamed: renames.length, full: changes.full });
 };

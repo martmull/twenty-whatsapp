@@ -182,6 +182,14 @@ const jsonRoutes: Record<string, Route> = {
     );
     return connection.getHistoryNames(body.chatIds as string[]);
   },
+  'POST /history/names/changes': () => {
+    requireConnected();
+    return connection.getNameChanges();
+  },
+  'POST /history/names/changes/ack': (body) => {
+    check(Number.isSafeInteger(body.version) && (body.version as number) >= 0);
+    return connection.acknowledgeNameChanges(body.version as number);
+  },
   'POST /history/imports/queue': (body) => {
     requireConnected();
     check(

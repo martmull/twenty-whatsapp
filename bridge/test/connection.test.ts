@@ -625,3 +625,33 @@ test('stopping the bridge keeps the linked device for the next start', async () 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('lists the chats renamed since the last refresh, and asks for a full refresh after a start', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-names-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const rename = (name: string) => connection.recordHistory([], [], false, [{ id: CHAT_ID, name } as Chat]);
+
+  try {
+    const start = await connection.getNameChanges();
+    assert.equal(start.full, true, 'changes made before this start were not tracked');
+    connection.acknowledgeNameChanges(start.version);
+
+    await rename('Alice');
+    const first = await connection.getNameChanges();
+    assert.deepEqual(first.names, [{ chatId: CHAT_ID, name: 'Alice' }]);
+    assert.equal(first.full, false);
+
+    await rename('Alice Martin');
+    connection.acknowledgeNameChanges(first.version);
+    assert.deepEqual(
+      (await connection.getNameChanges()).names,
+      [{ chatId: CHAT_ID, name: 'Alice Martin' }],
+      'a change after the refresh read its list stays listed',
+    );
+
+    connection.acknowledgeNameChanges((await connection.getNameChanges()).version);
+    assert.deepEqual(await connection.getNameChanges(), { version: 2, full: false, names: [] });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
