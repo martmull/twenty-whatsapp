@@ -190,7 +190,10 @@ const sendMedia = async (request: IncomingMessage) => {
   );
 };
 
+let resumed: Promise<unknown> = new Promise(() => undefined);
+
 const server = createServer(async (request, response) => {
+  await resumed;
   response.setHeader('cache-control', 'no-store');
   response.setHeader('content-type', 'application/json');
 
@@ -240,10 +243,23 @@ const server = createServer(async (request, response) => {
 const host = process.env.WHATSAPP_BRIDGE_HOST ?? '127.0.0.1';
 const port = Number(process.env.WHATSAPP_BRIDGE_PORT ?? 8765);
 
-await connection.resume();
-
+// Take the port before linking to WhatsApp: a second bridge on the same account would replace the first session.
+server.once('error', (error: NodeJS.ErrnoException) => {
+  log(
+    error.code === 'EADDRINUSE' ? 'Another bridge is already running; use npm run restart' : 'Bridge failed to start',
+    {
+      host,
+      port,
+      error: error.message,
+    },
+  );
+  process.exit(1);
+});
 server.listen(port, host, () => {
   log('WhatsApp bridge listening', { host, port, webhook: Boolean(webhookUrl), pid: process.pid });
+  resumed = connection
+    .resume()
+    .catch((error: unknown) => log('Could not resume WhatsApp session', { error: String(error) }));
 });
 
 const stop = async (signal: NodeJS.Signals) => {

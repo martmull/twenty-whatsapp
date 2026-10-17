@@ -1,33 +1,27 @@
-// Stops the bridge listening on the configured port, if any, then runs `npm run dev` in this terminal.
+// Restarts the bridge listening on the configured port. A bridge run by a macOS launchd service is restarted
+// through that service; otherwise its launch chain is stopped and `npm run dev` runs in this terminal.
 import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 const bridgeDirectory = fileURLToPath(new URL('..', import.meta.url));
 const env = await readFile(new URL('../.env', import.meta.url), 'utf8').catch(() => '');
-const host = env.match(/^WHATSAPP_BRIDGE_HOST=(.+)$/m)?.[1]?.trim() || '127.0.0.1';
 const port = Number(env.match(/^WHATSAPP_BRIDGE_PORT=(\d+)$/m)?.[1] ?? 8765);
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-const isListening = () =>
-  new Promise((resolve) => {
-    const socket = connect({ host, port });
-    socket.once('connect', () => {
-      socket.end();
-      resolve(true);
-    });
-    socket.once('error', () => resolve(false));
-  });
 
 const waitFor = async (condition, timeoutMs) => {
   for (const deadline = Date.now() + timeoutMs; Date.now() < deadline; await sleep(250)) {
     if (await condition()) return true;
   }
   return false;
+};
+
+const fail = (message) => {
+  console.error(message);
+  process.exit(1);
 };
 
 const listeningProcessIds = async () => {
@@ -41,23 +35,112 @@ const listeningProcessIds = async () => {
   }
 };
 
-for (const processId of await listeningProcessIds()) {
-  const { stdout: command } = await run('ps', ['-o', 'command=', '-p', String(processId)]);
-  if (!command.includes('src/server.ts')) {
-    throw new Error(`Port ${port} is used by another program (pid ${processId}): ${command.trim()}`);
+// The process and its parents, closest first, up to (not including) launchd/init.
+const processChain = async (processId) => {
+  const chain = [];
+  for (let id = processId; id > 1 && chain.length < 12;) {
+    try {
+      const { stdout } = await run('ps', ['-o', 'ppid=,command=', '-p', String(id)]);
+      const [, parentId, command] = stdout.trim().match(/^(\d+)\s+(.*)$/s) ?? [];
+      if (!parentId) break;
+      chain.push({ id, parentId: Number(parentId), command });
+      id = Number(parentId);
+    } catch {
+      break;
+    }
+  }
+  return chain;
+};
+
+const isBridge = (command) => command.includes('src/server.ts');
+// Processes that only exist to run the bridge: npm/sh wrappers, file watchers, and an earlier restart.
+const isBridgeLauncher = (command) =>
+  isBridge(command) || /\bnpm(?:-cli\.js)? run (?:dev|restart)\b|restart\.mjs|\btsx watch\b|nodemon/.test(command);
+
+const launchdLabels = async () => {
+  if (process.platform !== 'darwin') return new Map();
+  const { stdout } = await run('launchctl', ['list']);
+  return new Map(
+    stdout
+      .split('\n')
+      .map((line) => line.split('\t'))
+      .filter(([processId, , label]) => /^\d+$/.test(processId) && label)
+      .map(([processId, , label]) => [Number(processId), label]),
+  );
+};
+
+const describe = (chain) => chain.map(({ id, command }) => `  ${id}  ${command}`).join('\n');
+
+const runningIds = await listeningProcessIds();
+
+for (const processId of runningIds) {
+  const chain = await processChain(processId);
+  if (!isBridge(chain[0]?.command ?? '')) {
+    fail(`Port ${port} is used by another program:\n${describe(chain)}`);
+  }
+
+  const labels = await launchdLabels();
+  const service = chain.map(({ id }) => labels.get(id)).find(Boolean);
+  if (service) {
+    console.log(`Restarting the WhatsApp bridge through its launchd service "${service}"…`);
+    const domains = [`gui/${process.getuid()}`, `user/${process.getuid()}`];
+    let kicked = false;
+    for (const domain of domains) {
+      kicked ||= await run('launchctl', ['kickstart', '-k', `${domain}/${service}`]).then(
+        () => true,
+        () => false,
+      );
+    }
+    if (!kicked) fail(`launchctl could not restart "${service}"; restart it with launchctl kickstart -k.`);
+    const restarted = await waitFor(async () => {
+      const ids = await listeningProcessIds();
+      return ids.length > 0 && ids.every((id) => !runningIds.includes(id));
+    }, 60_000);
+    if (!restarted) fail('The service did not bring the bridge back within 60 seconds; check its log.');
+    console.log(`WhatsApp bridge restarted by launchd (pid ${(await listeningProcessIds()).join(', ')}).`);
+    console.log(
+      `Its output goes to the service log, not this terminal (see: launchctl print gui/${process.getuid()}/${service}).`,
+    );
+    process.exit(0);
+  }
+
+  const ownIds = (await processChain(process.pid)).map(({ id }) => id);
+  const launchers = [];
+  for (const entry of chain) {
+    if (!isBridgeLauncher(entry.command) || ownIds.includes(entry.id)) break;
+    launchers.push(entry);
   }
 
   console.log(`Stopping WhatsApp bridge (pid ${processId})…`);
-  process.kill(processId, 'SIGTERM');
-  if (!(await waitFor(async () => !(await isListening()), 15_000))) {
+  for (const { id } of launchers.reverse()) {
+    try {
+      process.kill(id, 'SIGTERM');
+    } catch {
+      // Already exited along with its parent.
+    }
+  }
+  if (!(await waitFor(async () => (await listeningProcessIds()).length === 0, 15_000))) {
     console.log('The bridge did not stop in time; forcing it.');
-    process.kill(processId, 'SIGKILL');
-    await waitFor(async () => !(await isListening()), 5_000);
+    for (const { id } of launchers) {
+      try {
+        process.kill(id, 'SIGKILL');
+      } catch {
+        // Already exited.
+      }
+    }
+    await waitFor(async () => (await listeningProcessIds()).length === 0, 5_000);
   }
 }
 
-if (await isListening()) {
-  throw new Error(`Port ${port} is still in use; stop the process holding it and retry.`);
+// Something outside this script may bring the bridge straight back; never start a second copy next to it.
+await sleep(runningIds.length > 0 ? 2_000 : 0);
+const [respawnedId] = await listeningProcessIds();
+if (respawnedId) {
+  const chain = await processChain(respawnedId);
+  fail(
+    `Something else restarted the bridge on port ${port}. Stop it there, or restart through it instead:\n${describe(chain)}\n` +
+      `If the last line's parent is launchd, it is a background service: find it with launchctl list | grep ${chain.at(-1)?.id}`,
+  );
 }
 
 console.log('Starting WhatsApp bridge…');
@@ -67,8 +150,15 @@ process.once('SIGTERM', () => bridge.kill('SIGTERM'));
 process.on('SIGINT', () => undefined);
 bridge.once('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 
-if (await waitFor(isListening, 60_000)) {
-  console.log(`WhatsApp bridge restarted on ${host}:${port}.`);
+const isOurs = async () => {
+  for (const id of await listeningProcessIds()) {
+    if ((await processChain(id)).some((entry) => entry.id === bridge.pid)) return true;
+  }
+  return false;
+};
+
+if (await waitFor(isOurs, 60_000)) {
+  console.log(`WhatsApp bridge restarted on port ${port}.`);
 } else {
   console.error('The bridge has not started listening after 60 seconds; check the log above.');
 }
