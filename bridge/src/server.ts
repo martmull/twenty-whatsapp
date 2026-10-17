@@ -45,6 +45,7 @@ const connection = new WhatsAppConnection(
   resolve(process.env.WHATSAPP_DATA_DIR ?? './data/session'),
   Buffer.from(keyHex, 'hex'),
   notifyTwenty,
+  log,
 );
 
 const isAuthorized = (header: string | undefined) => {
@@ -155,6 +156,10 @@ const jsonRoutes: Record<string, Route> = {
     );
     return connection.getHistoryNames(body.chatIds as string[]);
   },
+  'POST /address-book/sync': () => {
+    requireConnected();
+    return connection.syncAddressBook();
+  },
   'POST /history/members': (body) => {
     check(isGroupChatId(body.chatId as string), 'Invalid group ID');
     return connection.getGroupMembers(body.chatId as string);
@@ -193,8 +198,11 @@ const sendMedia = async (request: IncomingMessage) => {
   );
 };
 
+let resumed: Promise<unknown> = new Promise(() => undefined);
+
 // Node's default 16 KB header limit would reject the metadata of a long caption.
 const server = createServer({ maxHeaderSize: 32 * 1024 }, async (request, response) => {
+  await resumed;
   response.setHeader('cache-control', 'no-store');
   response.setHeader('content-type', 'application/json');
 
@@ -244,8 +252,30 @@ const server = createServer({ maxHeaderSize: 32 * 1024 }, async (request, respon
 const host = process.env.WHATSAPP_BRIDGE_HOST ?? '127.0.0.1';
 const port = Number(process.env.WHATSAPP_BRIDGE_PORT ?? 8765);
 
-await connection.resume();
-
-server.listen(port, host, () => {
-  log('WhatsApp bridge listening', { host, port, webhook: Boolean(webhookUrl) });
+// Take the port before linking to WhatsApp: a second bridge on the same account would replace the first session.
+server.once('error', (error: NodeJS.ErrnoException) => {
+  log(
+    error.code === 'EADDRINUSE' ? 'Another bridge is already running; use npm run restart' : 'Bridge failed to start',
+    {
+      host,
+      port,
+      error: error.message,
+    },
+  );
+  process.exit(1);
 });
+server.listen(port, host, () => {
+  log('WhatsApp bridge listening', { host, port, webhook: Boolean(webhookUrl), pid: process.pid });
+  resumed = connection
+    .resume()
+    .catch((error: unknown) => log('Could not resume WhatsApp session', { error: String(error) }));
+});
+
+const stop = async (signal: NodeJS.Signals) => {
+  log('WhatsApp bridge stopping', { signal });
+  server.close();
+  await connection.close();
+  process.exit(0);
+};
+process.once('SIGTERM', stop);
+process.once('SIGINT', stop);
