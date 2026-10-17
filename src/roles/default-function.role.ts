@@ -18,7 +18,7 @@ const appObject = (objectUniversalIdentifier: string) => ({
 export default defineApplicationRole({
   universalIdentifier: '50589f49-6cc1-414e-83d3-ec54751445ce',
   label: 'WhatsApp function role',
-  description: 'Matches People by phone and stores WhatsApp accounts, conversations, and messages.',
+  description: 'Matches People by phone, lets history import create them, and stores WhatsApp conversations.',
   canReadAllObjectRecords: false,
   canUpdateAllObjectRecords: false,
   canSoftDeleteAllObjectRecords: false,
@@ -28,11 +28,12 @@ export default defineApplicationRole({
   canBeAssignedToUsers: false,
   canBeAssignedToApiKeys: false,
   objectPermissions: [
-    // Read only: People are created and renamed with the admin's own permissions.
+    // History import creates and renames People as the admin, which Twenty limits to what both this role
+    // and the admin's own role allow.
     {
       objectUniversalIdentifier: STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS.person.universalIdentifier,
       canReadObjectRecords: true,
-      canUpdateObjectRecords: false,
+      canUpdateObjectRecords: true,
       canSoftDeleteObjectRecords: false,
       canDestroyObjectRecords: false,
     },
