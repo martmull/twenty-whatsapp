@@ -6,8 +6,10 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   generateMessageIDV2,
+  generateWAMessage,
+  makeCacheableSignalKeyStore,
   proto,
-  type AnyMediaMessageContent,
+  type AnyMessageContent,
   type Chat,
   type Contact,
   type WAMessage,
@@ -32,6 +34,12 @@ import {
 // File names must not contain path separators or control characters.
 // eslint-disable-next-line no-control-regex
 const UNSAFE_FILE_NAME = /[/\\\u0000-\u001f]/;
+
+// Ends before Twenty stops waiting for the bridge (120 s), so a slow upload fails cleanly and can be retried.
+const MEDIA_UPLOAD_TIMEOUT_MS = 90_000;
+
+// Baileys reports decryption retries and send failures as warnings; set WHATSAPP_LOG_LEVEL=debug for more.
+const baileysLogger = pino({ level: process.env.WHATSAPP_LOG_LEVEL ?? 'warn', base: { component: 'baileys' } });
 
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
@@ -91,7 +99,7 @@ export class WhatsAppConnection {
   private activeGroupNameLookups = 0;
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
-  private readonly sendingMessageIds = new Set<string>();
+  private sendQueue: Promise<unknown> = Promise.resolve();
   private ackedSinceClaim = 0;
   private syncLease: { id: string; expiresAt: number } | undefined;
 
@@ -577,52 +585,7 @@ export class WhatsAppConnection {
       throw new Error('Invalid send request');
     }
 
-    if (this.sendingRequests.has(requestId)) {
-      return { requestId, state: 'unknown' };
-    }
-
-    this.sendingRequests.add(requestId);
-
-    try {
-      const existing = await this.sends.read(requestId);
-
-      if (existing) {
-        return existing;
-      }
-
-      if (!this.socket || this.status.state !== 'connected') {
-        throw new Error('WhatsApp is disconnected');
-      }
-
-      if (`+${this.status.phoneNumber?.replace(/\D/g, '')}` !== accountPhoneNumber) {
-        throw new Error('WhatsApp account changed');
-      }
-
-      const pending: SendReceipt = { requestId, state: 'unknown' };
-      await this.sends.write(requestId, pending);
-      const messageId = generateMessageIDV2(this.socket.user?.id);
-      // A recipient can request a retry before sendMessage resolves.
-      await this.sentMessages.write(messageId, {
-        encodedMessage: Buffer.from(proto.Message.encode({ conversation: text }).finish()).toString('base64'),
-      });
-      const sent = await this.socket.sendMessage(chatId, { text }, { messageId });
-      if (!sent?.key.id || !sent.message) {
-        throw new Error('WhatsApp did not confirm the outgoing message');
-      }
-      await this.sentMessages.write(sent.key.id, {
-        encodedMessage: Buffer.from(proto.Message.encode(sent.message).finish()).toString('base64'),
-      });
-      const receipt: SendReceipt = {
-        requestId,
-        state: 'sent',
-        providerMessageId: sent.key.id,
-        eventId: messageEventId(chatId, sent.key.id),
-      };
-      await this.sends.write(requestId, receipt);
-      return receipt;
-    } finally {
-      this.sendingRequests.delete(requestId);
-    }
+    return this.send(requestId, chatId, accountPhoneNumber, { text });
   }
 
   async sendMedia(
@@ -651,57 +614,99 @@ export class WhatsAppConnection {
     ) {
       throw new Error('Invalid media send request');
     }
+
+    const content: AnyMessageContent =
+      kind === 'image'
+        ? { image: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
+        : kind === 'video'
+          ? { video: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
+          : { document: bytes, mimetype: mimeType, fileName, ...(caption ? { caption } : {}) };
+
+    return this.send(requestId, chatId, accountPhoneNumber, content);
+  }
+
+  // Sends one message at most once per request ID. Media is uploaded before anything is recorded:
+  // an upload failure means nothing reached WhatsApp, so the same request can simply be retried.
+  // Only a failure while relaying leaves the request "unknown", because the message may have gone out.
+  private async send(
+    requestId: string,
+    chatId: string,
+    accountPhoneNumber: string,
+    content: AnyMessageContent,
+  ): Promise<SendReceipt> {
     if (this.sendingRequests.has(requestId)) {
       return { requestId, state: 'unknown' };
     }
+
     this.sendingRequests.add(requestId);
+
     try {
       const existing = await this.sends.read(requestId);
-      if (existing) return existing;
-      if (!this.socket || this.status.state !== 'connected') throw new Error('WhatsApp is disconnected');
-      if (`+${this.status.phoneNumber?.replace(/\D/g, '')}` !== accountPhoneNumber)
-        throw new Error('WhatsApp account changed');
 
-      await this.sends.write(requestId, { requestId, state: 'unknown' });
-      const messageId = generateMessageIDV2(this.socket.user?.id);
-      const content: AnyMediaMessageContent =
-        kind === 'image'
-          ? { image: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
-          : kind === 'video'
-            ? { video: bytes, mimetype: mimeType, ...(caption ? { caption } : {}) }
-            : { document: bytes, mimetype: mimeType, fileName, ...(caption ? { caption } : {}) };
-      this.sendingMessageIds.add(messageId);
-      let sent: WAMessage | undefined;
-      try {
-        sent = await this.socket.sendMessage(chatId, content, { messageId });
-        if (!sent?.key.id || !sent.message) throw new Error('WhatsApp did not confirm the outgoing attachment');
-        await this.sentMessages.write(sent.key.id, {
-          encodedMessage: Buffer.from(proto.Message.encode(sent.message).finish()).toString('base64'),
-        });
-      } finally {
-        this.sendingMessageIds.delete(messageId);
+      if (existing) {
+        return existing;
       }
-      if (!sent?.key.id) throw new Error('WhatsApp did not confirm the outgoing attachment');
-      const receipt: SendReceipt = {
-        requestId,
-        state: 'sent',
-        providerMessageId: sent.key.id,
-        eventId: messageEventId(chatId, sent.key.id),
-      };
-      await this.sends.write(requestId, receipt);
-      return receipt;
+
+      const socket = this.connectedSocket(accountPhoneNumber);
+      const message = await generateWAMessage(chatId, content, {
+        userJid: socket.user!.id,
+        upload: socket.waUploadToServer,
+        mediaUploadTimeoutMs: MEDIA_UPLOAD_TIMEOUT_MS,
+        messageId: generateMessageIDV2(socket.user!.id),
+        logger: baileysLogger,
+      });
+      const messageId = message.key.id;
+
+      if (!messageId || !message.message) {
+        throw new Error('Could not prepare the outgoing message');
+      }
+
+      // Stored before relaying: a recipient device can ask for a decryption retry immediately.
+      await this.sentMessages.write(messageId, {
+        encodedMessage: Buffer.from(proto.Message.encode(message.message).finish()).toString('base64'),
+      });
+
+      return await this.inSendQueue(async () => {
+        const relaySocket = this.connectedSocket(accountPhoneNumber);
+        await this.sends.write(requestId, { requestId, state: 'unknown' });
+        await relaySocket.relayMessage(chatId, message.message!, { messageId });
+
+        const receipt: SendReceipt = {
+          requestId,
+          state: 'sent',
+          providerMessageId: messageId,
+          eventId: messageEventId(chatId, messageId),
+        };
+        await this.sends.write(requestId, receipt);
+        return receipt;
+      });
     } finally {
       this.sendingRequests.delete(requestId);
     }
   }
 
+  private connectedSocket(accountPhoneNumber: string): WASocket {
+    if (!this.socket?.user?.id || this.status.state !== 'connected') {
+      throw new Error('WhatsApp is disconnected');
+    }
+
+    if (`+${this.status.phoneNumber?.replace(/\D/g, '')}` !== accountPhoneNumber) {
+      throw new Error('WhatsApp account changed');
+    }
+
+    return this.socket;
+  }
+
+  // One relay at a time: concurrent relays would set up and advance the same Signal sessions in parallel.
+  private inSendQueue<TResult>(work: () => Promise<TResult>): Promise<TResult> {
+    const result = this.sendQueue.then(work, work);
+    this.sendQueue = result.catch(() => undefined);
+    return result;
+  }
+
   async getSentMessage(key: proto.IMessageKey): Promise<proto.IMessage | undefined> {
     if (!key.id || key.id.length > 128) {
       return undefined;
-    }
-    // Media is encrypted and uploaded inside sendMessage; wait for its stored payload during an early recipient retry.
-    for (let attempt = 0; this.sendingMessageIds.has(key.id) && attempt < 40; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
     }
     const saved = await this.sentMessages.read(key.id);
     return saved ? proto.Message.decode(Buffer.from(saved.encodedMessage, 'base64')) : undefined;
@@ -733,9 +738,10 @@ export class WhatsAppConnection {
     const generation = ++this.generation;
     const { state, saveCreds } = await createEncryptedAuthState(this.directory, this.encryptionKey);
     const socket = makeWASocket({
-      auth: state,
+      // Signal keys are read for every message; the cache spares decrypting a file each time.
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, baileysLogger) },
       printQRInTerminal: false,
-      logger: pino({ level: 'silent' }),
+      logger: baileysLogger,
       markOnlineOnConnect: false,
       // WhatsApp rejects Baileys' Desktop identity before it can emit a pairing QR.
       browser: Browsers.ubuntu('Chrome'),
