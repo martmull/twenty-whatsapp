@@ -5,7 +5,7 @@ import type { MessageEvent } from './message-event.js';
 
 // Twenty imports selected history in a chain of background jobs, one page per job. This queue holds
 // what is left to import and makes sure only one chain runs: each job must present the current run
-// token, so a duplicate chain (a job retried, or resumed by the cron) stops at its next claim.
+// token, so a duplicate chain (a job retried, or a lost chain replaced) stops at its next claim.
 
 export const MAX_PAGE_MESSAGES = 100;
 export const MAX_PAGE_MEDIA = 5;
@@ -49,6 +49,14 @@ export type HistoryImportProgress = {
 
 type ClaimResult = HistoryImportPage | { stale: true } | { done: true };
 
+type HistoryImportQueueOptions = {
+  now?: () => number;
+  // Called with a new run token when a lost chain is replaced; Twenty must start a job with it.
+  onChainRestarted?: (runToken: string) => void;
+  // A chain is only restarted while WhatsApp is connected, since its jobs could not claim pages.
+  canRun?: () => boolean;
+};
+
 const isAfter = (message: MessageEvent, cursor?: Cursor) =>
   !cursor ||
   message.sentAt > cursor.sentAt ||
@@ -62,15 +70,36 @@ export class HistoryImportQueue {
     | { id: string; taskId: string; chatId: string; expiresAt: number; messages: MessageEvent[]; isLastPage: boolean }
     | undefined;
   private writes: Promise<unknown> = Promise.resolve();
+  private stallTimer: NodeJS.Timeout | undefined;
+  private readonly now: () => number;
+  private readonly onChainRestarted: (runToken: string) => void;
+  private readonly canRun: () => boolean;
 
   constructor(
     directory: string,
     encryptionKey: Buffer,
     // Messages of a chat sorted by sentAt then eventId, as kept in the history cache.
     private readonly readMessages: (chatId: string) => Promise<MessageEvent[] | undefined>,
-    private readonly now: () => number = Date.now,
+    { now = Date.now, onChainRestarted = () => undefined, canRun = () => true }: HistoryImportQueueOptions = {},
   ) {
     this.tasks = new EncryptedJsonStore(directory, encryptionKey);
+    this.now = now;
+    this.onChainRestarted = onChainRestarted;
+    this.canRun = canRun;
+  }
+
+  // Checks again once the chain's next step is overdue, so a lost job never stalls the import.
+  private armStallCheck(expectedInMs: number): void {
+    clearTimeout(this.stallTimer);
+    this.stallTimer = setTimeout(() => void this.recoverStalled(), Math.max(0, expectedInMs) + STALL_GRACE_MS);
+    this.stallTimer.unref();
+  }
+
+  private stopChain(): void {
+    clearTimeout(this.stallTimer);
+    this.stallTimer = undefined;
+    this.runToken = undefined;
+    this.nextRunAt = undefined;
   }
 
   // Store operations are serialized so a claim never reads a task half-way through a completion.
@@ -90,6 +119,7 @@ export class HistoryImportQueue {
     this.runToken = randomUUID();
     this.nextRunAt = this.now();
     this.lease = undefined;
+    this.armStallCheck(0);
     return this.runToken;
   }
 
@@ -159,6 +189,7 @@ export class HistoryImportQueue {
           messages,
           isLastPage,
         };
+        this.armStallCheck(LEASE_MS);
 
         return {
           leaseId,
@@ -177,8 +208,7 @@ export class HistoryImportQueue {
         };
       }
 
-      this.runToken = undefined;
-      this.nextRunAt = undefined;
+      this.stopChain();
       return { done: true as const };
     });
   }
@@ -233,11 +263,26 @@ export class HistoryImportQueue {
     });
   }
 
-  // Starts a new chain when work is queued but the previous chain was lost (job dropped, bridge restart).
-  resume(): Promise<{ runToken?: string }> {
+  // Starts a new chain when work is queued but the previous chain was lost (job dropped, Twenty
+  // unreachable, bridge restarted). Runs from the stall timer and when WhatsApp connects.
+  recoverStalled(): Promise<{ runToken?: string }> {
     return this.serialize(async () => {
-      if (this.isChainAlive() || (await this.claimableTasks()).length === 0) return {};
-      return { runToken: this.startChain() };
+      if (this.isChainAlive()) {
+        const expectedAt = this.lease?.expiresAt ?? this.nextRunAt ?? this.now();
+        this.armStallCheck(expectedAt - this.now());
+        return {};
+      }
+      if ((await this.claimableTasks()).length === 0) {
+        this.stopChain();
+        return {};
+      }
+      if (!this.canRun()) {
+        this.armStallCheck(0);
+        return {};
+      }
+      const runToken = this.startChain();
+      this.onChainRestarted(runToken);
+      return { runToken };
     });
   }
 
@@ -273,10 +318,10 @@ export class HistoryImportQueue {
   private async scheduleNext(nextRunInMs: number): Promise<{ remaining: number }> {
     const remaining = (await this.claimableTasks()).length;
     if (remaining === 0) {
-      this.runToken = undefined;
-      this.nextRunAt = undefined;
+      this.stopChain();
     } else {
       this.nextRunAt = this.now() + nextRunInMs;
+      this.armStallCheck(nextRunInMs);
     }
     return { remaining };
   }

@@ -243,7 +243,7 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
     const { runToken } = await bridgePost<{ runToken?: string }>('/history/imports/queue', { tasks }, 30_000);
 
     if (runToken) {
-      // The chats stay queued on the bridge; the cron restarts the import if this enqueue fails.
+      // The chats stay queued on the bridge, which restarts the import if this enqueue fails.
       await enqueueHistoryImport(runToken, 0).catch((error: unknown) =>
         logger.error('Could not start the history import', {
           error: error instanceof Error ? error.message : String(error),

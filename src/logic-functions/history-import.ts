@@ -154,7 +154,7 @@ export const runHistoryImportStep = async (
   }
 
   if (result.remaining > 0) {
-    // If this fails, the cron resumes the import once the scheduled run is overdue.
+    // If this fails, the bridge replaces the chain once the scheduled run is overdue.
     await enqueue(runToken, result.nextRunInMs).catch((error: unknown) =>
       logger.error('Could not schedule the next history page', {
         error: error instanceof Error ? error.message : String(error),
@@ -163,14 +163,4 @@ export const runHistoryImportStep = async (
   }
 
   return result;
-};
-
-// Restarts an import whose job chain was lost. Called by the cron.
-export const resumeHistoryImport = async (logger: Logger): Promise<void> => {
-  const { runToken } = await bridgePost<{ runToken?: string }>('/history/imports/resume');
-
-  if (runToken) {
-    logger.info('Resuming history import');
-    await enqueueHistoryImport(runToken, 0);
-  }
 };

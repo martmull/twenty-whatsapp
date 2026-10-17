@@ -7,7 +7,7 @@ import test from 'node:test';
 
 import { proto, type Chat, type WAMessage } from '@whiskeysockets/baileys';
 
-import { WhatsAppConnection, type ConnectionStatus } from '../src/connection.js';
+import { WhatsAppConnection, type BridgeSignal, type ConnectionStatus } from '../src/connection.js';
 import { createEncryptedAuthState } from '../src/encrypted-auth-state.js';
 import type { MessageEvent } from '../src/message-event.js';
 
@@ -140,6 +140,39 @@ test('only one importer claims a queued batch at a time', async () => {
 
   assert.deepEqual(await connection.releaseEvents(claimed.leaseId, true), { released: true });
   assert.ok((await connection.claimEvents()).leaseId);
+});
+
+test('a sync that makes progress asks for the next batch at once, one that does not waits', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-signal-'));
+  const signals: BridgeSignal[] = [];
+  const connection = new WhatsAppConnection(directory, randomBytes(32), (signal) => signals.push(signal));
+  const events = (connection as unknown as { events: { write: (key: string, value: MessageEvent) => Promise<void> } })
+    .events;
+
+  try {
+    for (const id of ['a', 'b']) {
+      await events.write(id.repeat(64), {
+        eventId: id.repeat(64),
+        chatId: '15551234567@s.whatsapp.net',
+        providerMessageId: `message-${id}`,
+        direction: 'inbound',
+        text: 'Hello',
+        sentAt: new Date().toISOString(),
+      });
+    }
+
+    const first = await connection.claimEvents();
+    await connection.ackEvents(['a'.repeat(64)]);
+    await connection.releaseEvents(first.leaseId!, true);
+    assert.deepEqual(signals, [{ events: true }]);
+
+    const second = await connection.claimEvents();
+    await connection.releaseEvents(second.leaseId!, true);
+    assert.deepEqual(signals, [{ events: true }], 'no immediate signal without progress');
+  } finally {
+    await connection.disconnect();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('bridge startup resumes only a saved linked device', async () => {

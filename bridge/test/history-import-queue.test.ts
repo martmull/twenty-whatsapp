@@ -24,19 +24,24 @@ const message = (index: number, overrides: Partial<MessageEvent> = {}): MessageE
 
 const withQueue = async (
   messagesByChat: Record<string, MessageEvent[]>,
-  run: (queue: HistoryImportQueue, clock: { now: number }) => Promise<void>,
+  run: (
+    queue: HistoryImportQueue,
+    clock: { now: number },
+    world: { connected: boolean; restartedChains: string[] },
+  ) => Promise<void>,
 ) => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-imports-'));
   const clock = { now: Date.UTC(2026, 9, 16) };
+  const world = { connected: true, restartedChains: [] as string[] };
   try {
     await run(
-      new HistoryImportQueue(
-        directory,
-        randomBytes(32),
-        async (chatId) => messagesByChat[chatId],
-        () => clock.now,
-      ),
+      new HistoryImportQueue(directory, randomBytes(32), async (chatId) => messagesByChat[chatId], {
+        now: () => clock.now,
+        onChainRestarted: (runToken) => world.restartedChains.push(runToken),
+        canRun: () => world.connected,
+      }),
       clock,
+      world,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -109,13 +114,13 @@ test('keeps a single job chain: a second import joins the running chain', async 
       assert.deepEqual(await queue.claim(runToken!), { stale: true }, 'a page is leased to one job at a time');
       assert.deepEqual(await queue.complete(page.leaseId, page.messages[0].eventId, 1, 0), { remaining: 1 });
       assert.equal(asPage(await queue.claim(runToken!)).chatId, OTHER_CHAT_ID);
-      assert.deepEqual(await queue.resume(), {}, 'a live chain is not duplicated');
+      assert.deepEqual(await queue.recoverStalled(), {}, 'a live chain is not duplicated');
     },
   );
 });
 
-test('sets a chat aside after repeated failures and resumes a lost chain', async () => {
-  await withQueue({ [CHAT_ID]: [message(1)] }, async (queue, clock) => {
+test('sets a chat aside after repeated failures and replaces a lost chain once connected', async () => {
+  await withQueue({ [CHAT_ID]: [message(1)] }, async (queue, clock, world) => {
     const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
 
     for (let attempt = 1; attempt <= 4; attempt += 1) {
@@ -124,8 +129,12 @@ test('sets a chat aside after repeated failures and resumes a lost chain', async
     }
 
     clock.now += 10 * 60_000;
-    const { runToken: resumedToken } = await queue.resume();
+    world.connected = false;
+    assert.deepEqual(await queue.recoverStalled(), {}, 'no chain starts while WhatsApp is disconnected');
+    world.connected = true;
+    const { runToken: resumedToken } = await queue.recoverStalled();
     assert.ok(resumedToken);
+    assert.deepEqual(world.restartedChains, [resumedToken], 'Twenty is asked to start the new chain');
     assert.deepEqual(await queue.claim(runToken!), { stale: true }, 'the lost chain cannot come back');
 
     const page = asPage(await queue.claim(resumedToken));

@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { resolve } from 'node:path';
 
-import { WhatsAppConnection } from './connection.js';
+import { WhatsAppConnection, type BridgeSignal } from './connection.js';
 import { isGroupChatId, isSupportedChatId } from './message-event.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
@@ -16,28 +16,51 @@ if (!token || !keyHex || !/^[a-f\d]{64}$/i.test(keyHex)) {
 const log = (message: string, data: Record<string, unknown> = {}) =>
   process.stdout.write(`${JSON.stringify({ time: new Date().toISOString(), message, ...data })}\n`);
 
-// Tells Twenty that events are queued. Calls within one second are merged into one.
+// Sends signals to Twenty's webhook. Signals within one second are merged into one call; a failed
+// call is retried with a growing delay, keeping any signals that arrive meanwhile.
+const WEBHOOK_RETRY_MIN_MS = 30_000;
+const WEBHOOK_RETRY_MAX_MS = 10 * 60_000;
+let pendingSignal: BridgeSignal = {};
 let webhookTimer: NodeJS.Timeout | undefined;
-const notifyTwenty = () => {
-  if (!webhookUrl || webhookTimer) return;
+let webhookRetryDelayMs = WEBHOOK_RETRY_MIN_MS;
 
-  webhookTimer = setTimeout(async () => {
-    webhookTimer = undefined;
-    const body = JSON.stringify({ sentAt: new Date().toISOString() });
-    const signature = createHmac('sha256', token).update(body).digest('hex');
+const mergeSignals = (older: BridgeSignal, newer: BridgeSignal): BridgeSignal => ({
+  ...(older.events || newer.events ? { events: true } : {}),
+  ...(older.names || newer.names ? { names: true } : {}),
+  ...((newer.historyRunToken ?? older.historyRunToken)
+    ? { historyRunToken: newer.historyRunToken ?? older.historyRunToken }
+    : {}),
+});
 
-    try {
-      const response = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-whatsapp-signature': signature },
-        body,
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!response.ok) log('Twenty webhook failed', { status: response.status });
-    } catch (error) {
-      log('Twenty webhook unreachable', { error: String(error) });
-    }
-  }, 1_000);
+const deliverSignal = async () => {
+  webhookTimer = undefined;
+  const signal = pendingSignal;
+  pendingSignal = {};
+  const body = JSON.stringify({ sentAt: new Date().toISOString(), ...signal });
+  const signature = createHmac('sha256', token).update(body).digest('hex');
+
+  try {
+    const response = await fetch(webhookUrl!, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-whatsapp-signature': signature },
+      body,
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    webhookRetryDelayMs = WEBHOOK_RETRY_MIN_MS;
+  } catch (error) {
+    log('Twenty webhook failed, will retry', { error: String(error), retryInMs: webhookRetryDelayMs });
+    pendingSignal = mergeSignals(signal, pendingSignal);
+    clearTimeout(webhookTimer);
+    webhookTimer = setTimeout(deliverSignal, webhookRetryDelayMs);
+    webhookRetryDelayMs = Math.min(webhookRetryDelayMs * 2, WEBHOOK_RETRY_MAX_MS);
+  }
+};
+
+const notifyTwenty = (signal: BridgeSignal) => {
+  if (!webhookUrl) return;
+  pendingSignal = mergeSignals(pendingSignal, signal);
+  if (!webhookTimer) webhookTimer = setTimeout(deliverSignal, 1_000);
 };
 
 const expectedToken = Buffer.from(token);
@@ -202,7 +225,6 @@ const jsonRoutes: Record<string, Route> = {
       body.nextRunInMs as number,
     );
   },
-  'POST /history/imports/resume': () => connection.historyImports.resume(),
   'POST /history/imports/progress': () => connection.historyImports.progress(),
   'POST /history/members': (body) => {
     check(isGroupChatId(body.chatId as string), 'Invalid group ID');

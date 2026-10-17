@@ -516,7 +516,7 @@ export const syncMessages = async (logger: Logger): Promise<{ imported: number; 
   return { imported, ignored };
 };
 
-// Updates conversation names from WhatsApp contact names. Runs from the cron only.
+// Updates conversation names from WhatsApp contact names, when the bridge signals name changes.
 export const syncConversationNames = async (logger: Logger): Promise<void> => {
   const client = applicationClient();
   let after: string | undefined;

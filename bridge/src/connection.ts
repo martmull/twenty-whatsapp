@@ -34,6 +34,16 @@ import {
 // eslint-disable-next-line no-control-regex
 const UNSAFE_FILE_NAME = /[/\\\u0000-\u001f]/;
 
+// What the bridge asks Twenty to do: import queued events, refresh conversation names, or start a
+// history import job chain with this run token.
+export type BridgeSignal = { events?: boolean; names?: boolean; historyRunToken?: string };
+
+// Queued events left untouched are signaled again, backing off while nothing makes progress.
+const EVENTS_RETRY_MIN_MS = 60_000;
+const EVENTS_RETRY_MAX_MS = 15 * 60_000;
+// Name changes arrive in bursts during a history sync; Twenty refreshes names once per burst.
+const NAMES_SIGNAL_DELAY_MS = 60_000;
+
 export type ConnectionStatus = {
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
   qrDataUrl?: string;
@@ -96,12 +106,15 @@ export class WhatsAppConnection {
   private readonly sendingMessageIds = new Set<string>();
   private ackedSinceClaim = 0;
   private syncLease: { id: string; expiresAt: number } | undefined;
+  private eventsRetryTimer: NodeJS.Timeout | undefined;
+  private eventsRetryDelayMs = EVENTS_RETRY_MIN_MS;
+  private namesTimer: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly directory: string,
     private readonly encryptionKey: Buffer,
-    // Called when Twenty should import queued events (see the bridge webhook in server.ts).
-    private readonly onEventsQueued: () => void = () => undefined,
+    // Delivered to Twenty's bridge webhook (see server.ts).
+    private readonly onSignal: (signal: BridgeSignal) => void = () => undefined,
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
@@ -111,10 +124,18 @@ export class WhatsAppConnection {
     this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
     this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
     this.mediaReferences = new EncryptedJsonStore(join(directory, 'media-references'), encryptionKey);
-    this.historyImports = new HistoryImportQueue(join(directory, 'history-imports'), encryptionKey, async (chatId) => {
-      await this.historyWrites;
-      return (await this.historyChats.read(chatId))?.messages;
-    });
+    this.historyImports = new HistoryImportQueue(
+      join(directory, 'history-imports'),
+      encryptionKey,
+      async (chatId) => {
+        await this.historyWrites;
+        return (await this.historyChats.read(chatId))?.messages;
+      },
+      {
+        onChainRestarted: (historyRunToken) => this.onSignal({ historyRunToken }),
+        canRun: () => this.status.state === 'connected',
+      },
+    );
   }
 
   async recordHistory(
@@ -263,6 +284,7 @@ export class WhatsAppConnection {
       }
       if (namesChanged) {
         this.groupMembersCache.clear();
+        this.signalNamesChanged();
       }
     };
 
@@ -533,6 +555,9 @@ export class WhatsAppConnection {
     const leaseId = randomUUID();
     this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000 };
     this.ackedSinceClaim = 0;
+    // A sync is running: it reports back through releaseEvents.
+    clearTimeout(this.eventsRetryTimer);
+    this.eventsRetryTimer = undefined;
     try {
       const events = await this.getEvents();
       if (events.length === 0) {
@@ -552,11 +577,44 @@ export class WhatsAppConnection {
     }
 
     this.syncLease = undefined;
-    // A sync handles a limited batch: ask for another one while it makes progress.
-    if (completed && this.ackedSinceClaim > 0 && (await this.events.list(1)).length > 0) {
-      this.onEventsQueued();
+    if ((await this.events.list(1)).length > 0) {
+      // A sync handles a limited batch: ask for the next one at once while it makes progress,
+      // otherwise retry later with a growing delay (a chat that fails to import, Twenty down).
+      if (completed && this.ackedSinceClaim > 0) {
+        this.signalEvents();
+      } else {
+        this.armEventsRetry();
+      }
     }
     return { released: true };
+  }
+
+  private signalEvents(): void {
+    this.eventsRetryDelayMs = EVENTS_RETRY_MIN_MS;
+    this.onSignal({ events: true });
+    this.armEventsRetry();
+  }
+
+  // Signals again if no sync claims the events in time, e.g. when the job Twenty queued was lost.
+  private armEventsRetry(): void {
+    if (this.eventsRetryTimer) return;
+    this.eventsRetryTimer = setTimeout(async () => {
+      this.eventsRetryTimer = undefined;
+      if (this.status.state !== 'connected' || (await this.events.list(1)).length === 0) return;
+      this.eventsRetryDelayMs = Math.min(this.eventsRetryDelayMs * 2, EVENTS_RETRY_MAX_MS);
+      this.onSignal({ events: true });
+      this.armEventsRetry();
+    }, this.eventsRetryDelayMs);
+    this.eventsRetryTimer.unref();
+  }
+
+  private signalNamesChanged(): void {
+    if (this.namesTimer) return;
+    this.namesTimer = setTimeout(() => {
+      this.namesTimer = undefined;
+      if (this.status.state === 'connected') this.onSignal({ names: true });
+    }, NAMES_SIGNAL_DELAY_MS);
+    this.namesTimer.unref();
   }
 
   async ackEvents(eventIds: string[]): Promise<{ acknowledged: number }> {
@@ -773,7 +831,7 @@ export class WhatsAppConnection {
             await this.phoneNumbers.write(remoteJid, { chatId: event.chatId });
           }
           await this.events.write(event.eventId, event);
-          this.onEventsQueued();
+          this.signalEvents();
         }
       }
     });
@@ -853,7 +911,8 @@ export class WhatsAppConnection {
           state: 'connected',
           phoneNumber: socket.user?.id?.split(':')[0],
         };
-        this.onEventsQueued();
+        if ((await this.events.list(1)).length > 0) this.signalEvents();
+        void this.historyImports.recoverStalled();
         void socket
           .groupFetchAllParticipating()
           .then((groups) => {
@@ -889,6 +948,10 @@ export class WhatsAppConnection {
     this.intentionallyDisconnected = true;
     this.generation += 1;
     clearTimeout(this.reconnectTimer);
+    clearTimeout(this.eventsRetryTimer);
+    clearTimeout(this.namesTimer);
+    this.eventsRetryTimer = undefined;
+    this.namesTimer = undefined;
     const socket = this.socket;
     this.socket = undefined;
     this.groupMembersCache.clear();

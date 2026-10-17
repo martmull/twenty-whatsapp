@@ -1,28 +1,29 @@
 import { defineLogicFunction } from 'twenty-sdk/define';
 
-import { resumeHistoryImport } from 'src/logic-functions/history-import';
+import { MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
 import { syncConversationNames, syncMessages } from 'src/logic-functions/message-data';
 import { createLogger } from 'src/logic-functions/utils/logger';
 
-// Safety net: catches messages the webhook job missed and restarts a history import whose job chain was lost.
-const handler = async () => {
-  const logger = createLogger('whatsapp-message-sync');
-  const result = await syncMessages(logger);
-  await resumeHistoryImport(logger).catch((error) =>
-    logger.warn('Could not resume history import', { error: String(error) }),
-  );
-  await syncConversationNames(logger).catch((error) =>
-    logger.warn('Could not sync conversation names', { error: String(error) }),
-  );
+export type MessageSyncPayload = { events?: boolean; names?: boolean };
 
-  return result;
+// Queued by the bridge webhook. Concurrent runs are safe: the bridge leases each batch to one of them.
+const handler = async (payload: MessageSyncPayload) => {
+  const logger = createLogger('whatsapp-message-sync');
+  const result = payload?.events ? await syncMessages(logger) : undefined;
+
+  if (payload?.names) {
+    await syncConversationNames(logger).catch((error) =>
+      logger.warn('Could not sync conversation names', { error: String(error) }),
+    );
+  }
+
+  return result ?? { imported: 0, ignored: 0 };
 };
 
 export default defineLogicFunction({
-  universalIdentifier: '4353a880-c060-4b74-a96e-9dd03e387618',
+  universalIdentifier: MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER,
   name: 'whatsapp-message-sync',
-  description: 'Import queued WhatsApp messages and refresh conversation names.',
-  timeoutSeconds: 120,
+  description: 'Import queued WhatsApp messages and refresh conversation names when the bridge signals them.',
+  timeoutSeconds: 300,
   handler,
-  cronTriggerSettings: { pattern: '*/5 * * * *' },
 });
