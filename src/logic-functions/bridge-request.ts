@@ -5,6 +5,7 @@ export type BridgeStatus = {
   qrDataUrl?: string;
   qrExpiresAt?: number;
   phoneNumber?: string;
+  twentyAccountId?: string;
 };
 
 export const bridgeFetch = async (path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<Response> => {
@@ -49,3 +50,7 @@ export const bridgePost = async <TResponse>(
 
 export const getBridgeStatus = async (): Promise<BridgeStatus> =>
   (await (await bridgeFetch('/status')).json()) as BridgeStatus;
+
+// Tells the bridge Twenty rate limited a job, so no background job starts before the window passes.
+export const reportRateLimit = (retryAfterMs: number): Promise<unknown> =>
+  bridgePost('/budget/penalty', { retryAfterMs }).catch(() => undefined);

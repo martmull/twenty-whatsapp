@@ -1,18 +1,19 @@
+import type { CoreApiClient } from 'twenty-client-sdk/core';
 import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
-import { enqueueHistoryImport } from 'src/logic-functions/history-import';
+import { enqueueHistoryImport, FIRST_PAGE, type ChainPosition } from 'src/logic-functions/history-import';
 import {
   applicationClient,
   ensureAccount,
-  ensureConversation,
   findConversations,
   findPeopleByPhones,
   personName,
   userClient,
   type Person,
 } from 'src/logic-functions/message-data';
+import { deterministicId, upsertConversations, upsertPeople } from 'src/logic-functions/record-writes';
 import type { Logger } from 'src/logic-functions/utils/logger';
 import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
 import { chatNumber, digits, isChatId, isGroupChatId, isPhoneLikeName } from 'src/logic-functions/utils/validators';
@@ -82,13 +83,10 @@ const listCandidates = async (request: HistoryRequest) => {
   };
 };
 
-// Finds the Person for a direct chat, creating or renaming them as the admin asked.
-const resolvePerson = async (
-  request: ChatSelection,
-  chatId: string,
-  contact: ContactName,
-  matches: Person[],
-): Promise<{ person: Person; createdPerson: boolean }> => {
+type PersonPlan = { person: Person; write?: Record<string, unknown>; createdPerson: boolean };
+
+// Finds the Person for a direct chat and the write that creates or renames them as the admin asked.
+const planPerson = (request: ChatSelection, chatId: string, contact: ContactName, matches: Person[]): PersonPlan => {
   if (matches.length > 1) {
     throw new HttpError(409, 'More than one Person has this phone number');
   }
@@ -114,42 +112,57 @@ const resolvePerson = async (
     if (request.createPerson !== true) throw new HttpError(409, 'This contact is not matched to a Person');
     if (!firstName) throw new HttpError(400, 'Enter a first name for this contact');
 
-    // Created as the admin, so their own permissions apply.
-    const created = await userClient().mutation({
-      createPerson: {
-        __args: {
-          data: {
-            name: { firstName, lastName },
-            phones: {
-              primaryPhoneNumber: `+${chatNumber(chatId)}`,
-              primaryPhoneCountryCode: '',
-              primaryPhoneCallingCode: '',
-              additionalPhones: null,
-            },
-          },
-        },
-        id: true,
-      },
-    });
-    const id = created.createPerson?.id;
-    if (!id) throw new Error('Could not create Person');
+    const phoneNumber = `+${chatNumber(chatId)}`;
+    // Derived from the number, so submitting the same import twice cannot create the Person twice.
+    const id = deterministicId('person', phoneNumber);
 
-    return { person: { id, name: { firstName, lastName } }, createdPerson: true };
+    return {
+      person: { id, name: { firstName, lastName } },
+      createdPerson: true,
+      write: {
+        id,
+        name: { firstName, lastName },
+        phones: {
+          primaryPhoneNumber: phoneNumber,
+          primaryPhoneCountryCode: '',
+          primaryPhoneCallingCode: '',
+          additionalPhones: null,
+        },
+      },
+    };
   }
 
   if (isPhoneLikeName(personName(existing)) && firstName) {
-    await userClient().mutation({
-      updatePerson: { __args: { id: existing.id, data: { name: { firstName, lastName } } }, id: true },
-    });
-    return { person: { ...existing, name: { firstName, lastName } }, createdPerson: false };
+    return {
+      person: { ...existing, name: { firstName, lastName } },
+      createdPerson: false,
+      write: { id: existing.id, name: { firstName, lastName } },
+    };
   }
 
   return { person: existing, createdPerson: false };
 };
 
+type QueueImportDependencies = {
+  client?: CoreApiClient;
+  // Writes People as the admin, so their own permissions apply.
+  adminClient?: CoreApiClient;
+  enqueue?: (runToken: string, delayMs: number, position?: ChainPosition) => Promise<void>;
+};
+
 // Creates the People and conversations of the selected chats, then hands the messages to the
 // background import. Chats that cannot be imported are reported without stopping the others.
-const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, logger: Logger) => {
+// People and conversations are each written in one upsert, whatever the number of chats.
+export const queueImport = async (
+  request: HistoryRequest,
+  accountPhoneNumber: string,
+  logger: Logger,
+  {
+    client = applicationClient(),
+    adminClient = userClient(),
+    enqueue = enqueueHistoryImport,
+  }: QueueImportDependencies = {},
+) => {
   const chats = request.chats;
 
   if (
@@ -168,7 +181,6 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
     throw new HttpError(400, 'Cannot import the linked account as a contact');
   }
 
-  const client = applicationClient();
   const [names, accountId] = await Promise.all([
     bridgePost<(ContactName & { chatId: string })[]>('/history/names', { chatIds }, 30_000),
     ensureAccount(client, `+${accountPhoneNumber}`),
@@ -179,6 +191,7 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
     findConversations(client, accountId, chatIds),
   ]);
   const resolved: { chatId: string; name: string; person?: Person }[] = [];
+  const personWrites: Record<string, unknown>[] = [];
   const failures: { chatId: string; error: string }[] = [];
   let createdPeople = 0;
 
@@ -187,9 +200,10 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
     const contact = contactByChatId.get(chatId) ?? { name: chatNumber(chatId) };
 
     try {
-      const { person, createdPerson } = isGroupChatId(chatId)
-        ? { person: undefined, createdPerson: false }
-        : await resolvePerson(chat, chatId, contact, peopleByPhone.get(chatNumber(chatId)) ?? []);
+      const { person, write, createdPerson } = isGroupChatId(chatId)
+        ? { person: undefined, write: undefined, createdPerson: false }
+        : planPerson(chat, chatId, contact, peopleByPhone.get(chatNumber(chatId)) ?? []);
+      if (write) personWrites.push(write);
       createdPeople += Number(createdPerson);
       resolved.push({
         chatId,
@@ -202,47 +216,48 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
     }
   }
 
-  const missing = resolved.filter(({ chatId }) => !conversations.has(chatId));
-  const createdIdByChatId = new Map<string, string>();
-
-  if (missing.length > 0) {
-    const created = await client.mutation({
-      createWhatsappConversations: {
-        __args: {
-          data: missing.map(({ chatId, name, person }) => ({
-            name,
-            chatId,
-            accountId,
-            ...(person ? { personId: person.id } : {}),
-          })),
-        },
-        id: true,
-        chatId: true,
-      },
-    });
-    for (const { id, chatId } of created.createWhatsappConversations ?? []) {
-      if (id && chatId) createdIdByChatId.set(chatId, id);
-    }
+  if (personWrites.length > 0) {
+    await upsertPeople(adminClient, personWrites);
   }
 
-  const tasks: { chatId: string; conversationId: string; rangeDays: 0 | 30 | 90 }[] = [];
-
-  for (const { chatId, name, person } of resolved) {
+  const conversationWrites = resolved.flatMap(({ chatId, name, person }) => {
     const existing = conversations.get(chatId);
-    // ensureConversation renames an existing conversation still named after its phone number.
-    const conversationId = existing
-      ? (await ensureConversation(client, accountId, chatId, name, person, existing)).id
-      : createdIdByChatId.get(chatId);
+
+    if (!existing) {
+      return [
+        {
+          id: deterministicId('conversation', `${accountId}:${chatId}`),
+          name,
+          chatId,
+          accountId,
+          ...(person ? { personId: person.id } : {}),
+        },
+      ];
+    }
+
+    // A conversation still named after its phone number takes the contact's name.
+    return isPhoneLikeName(existing.name) && name.trim() && !isPhoneLikeName(name)
+      ? [{ id: existing.id, name: name.trim().slice(0, 120) }]
+      : [];
+  });
+  const writtenIdByChatId = new Map(
+    (conversationWrites.length > 0 ? await upsertConversations(client, conversationWrites) : []).map(
+      ({ id, chatId }) => [chatId, id],
+    ),
+  );
+
+  const tasks = resolved.map(({ chatId }) => {
+    const conversationId = conversations.get(chatId)?.id ?? writtenIdByChatId.get(chatId);
     if (!conversationId) throw new Error('Could not create WhatsApp conversation');
-    tasks.push({ chatId, conversationId, rangeDays: request.rangeDays as 0 | 30 | 90 });
-  }
+    return { chatId, conversationId, rangeDays: request.rangeDays as 0 | 30 | 90 };
+  });
 
   if (tasks.length > 0) {
     const { runToken } = await bridgePost<{ runToken?: string }>('/history/imports/queue', { tasks }, 30_000);
 
     if (runToken) {
       // The chats stay queued on the bridge, which restarts the import if this enqueue fails.
-      await enqueueHistoryImport(runToken, 0).catch((error: unknown) =>
+      await enqueue(runToken, 0, FIRST_PAGE).catch((error: unknown) =>
         logger.error('Could not start the history import', {
           error: error instanceof Error ? error.message : String(error),
         }),

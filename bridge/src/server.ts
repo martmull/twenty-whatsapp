@@ -2,7 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { resolve } from 'node:path';
 
-import { WhatsAppConnection, type BridgeSignal } from './connection.js';
+import { ApiBudget, DEFAULT_BACKGROUND_REQUESTS_PER_MINUTE } from './api-budget.js';
+import { MAX_SYNC_EVENTS, WhatsAppConnection, type BridgeSignal } from './connection.js';
 import { isGroupChatId, isSupportedChatId } from './message-event.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
@@ -36,7 +37,13 @@ const deliverSignal = async () => {
   webhookTimer = undefined;
   const signal = pendingSignal;
   pendingSignal = {};
-  const body = JSON.stringify({ sentAt: new Date().toISOString(), ...signal });
+  // Keys are read when the signal leaves, so they name the job that will claim the latest events.
+  const body = JSON.stringify({
+    sentAt: new Date().toISOString(),
+    ...signal,
+    ...(signal.events ? { eventsJobKey: connection.syncJobKey() } : {}),
+    ...(signal.names ? { namesJobKey: connection.namesJobKey() } : {}),
+  });
   const signature = createHmac('sha256', token).update(body).digest('hex');
 
   try {
@@ -63,12 +70,15 @@ const notifyTwenty = (signal: BridgeSignal) => {
   if (!webhookTimer) webhookTimer = setTimeout(deliverSignal, 1_000);
 };
 
+const backgroundRequestsPerMinute =
+  Number(process.env.WHATSAPP_BACKGROUND_REQUESTS_PER_MINUTE) || DEFAULT_BACKGROUND_REQUESTS_PER_MINUTE;
 const expectedToken = Buffer.from(token);
 const connection = new WhatsAppConnection(
   resolve(process.env.WHATSAPP_DATA_DIR ?? './data/session'),
   Buffer.from(keyHex, 'hex'),
   notifyTwenty,
   log,
+  new ApiBudget(backgroundRequestsPerMinute),
 );
 
 const isAuthorized = (header: string | undefined) => {
@@ -92,7 +102,8 @@ const readBuffer = async (request: IncomingMessage, maxBytes: number): Promise<B
 };
 
 const readJson = async (request: IncomingMessage): Promise<Record<string, unknown>> => {
-  const raw = (await readBuffer(request, 16_384)).toString('utf8');
+  // A sync acknowledges up to 200 event IDs (about 14 KB) in one call.
+  const raw = (await readBuffer(request, 65_536)).toString('utf8');
   const value: unknown = raw ? JSON.parse(raw) : {};
 
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -116,8 +127,16 @@ const isPage = (offset: unknown, limit: unknown, maxLimit: number) =>
   (limit as number) >= 1 &&
   (limit as number) <= maxLimit;
 const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d-]{36}$/i.test(value);
-const isEventId = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{64}$/.test(value);
 const isCount = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 10_000;
+const isOptionalCount = (value: unknown) => value === undefined || isCount(value);
+const isImportedByChat = (value: unknown) =>
+  Boolean(value) &&
+  typeof value === 'object' &&
+  !Array.isArray(value) &&
+  Object.keys(value as object).length <= 200 &&
+  Object.entries(value as Record<string, unknown>).every(
+    ([chatId, count]) => isSupportedChatId(chatId) && isCount(count),
+  );
 const isDelay = (value: unknown) =>
   Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24 * 60 * 60_000;
 const requireConnected = () => check(connection.getStatus().state === 'connected', 'WhatsApp is disconnected');
@@ -130,11 +149,29 @@ const jsonRoutes: Record<string, Route> = {
   'POST /disconnect': () => connection.disconnect(),
   'POST /events/claim': () => connection.claimEvents(),
   'POST /events/release': (body) => {
-    check(typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId));
-    return connection.releaseEvents(body.leaseId as string);
+    check(typeof body.leaseId === 'string' && /^[a-f\d-]{36}$/i.test(body.leaseId) && isOptionalCount(body.requests));
+    return connection.releaseEvents(body.leaseId as string, body.requests as number | undefined);
+  },
+  'POST /budget/penalty': (body) => {
+    check(isDelay(body.retryAfterMs));
+    connection.budget.penalize(body.retryAfterMs as number);
+    return { penalized: true };
+  },
+  'POST /budget/spend': (body) => {
+    check(isCount(body.requests));
+    connection.budget.adjust(body.requests as number);
+    return { spent: true };
+  },
+  'POST /account': (body) => {
+    check(typeof body.phoneNumber === 'string' && /^\+\d{7,15}$/.test(body.phoneNumber) && isUuid(body.accountId));
+    return connection.rememberTwentyAccount(body.phoneNumber as string, body.accountId as string);
   },
   'POST /events/ack': (body) => {
-    check(Array.isArray(body.eventIds) && body.eventIds.every((id) => typeof id === 'string'));
+    check(
+      Array.isArray(body.eventIds) &&
+        body.eventIds.length <= MAX_SYNC_EVENTS &&
+        body.eventIds.every((id) => typeof id === 'string'),
+    );
     return connection.ackEvents(body.eventIds as string[]);
   },
   'POST /send': (body) => {
@@ -182,6 +219,14 @@ const jsonRoutes: Record<string, Route> = {
     );
     return connection.getHistoryNames(body.chatIds as string[]);
   },
+  'POST /history/names/changes': () => {
+    requireConnected();
+    return connection.getNameChanges();
+  },
+  'POST /history/names/changes/ack': (body) => {
+    check(Number.isSafeInteger(body.version) && (body.version as number) >= 0);
+    return connection.acknowledgeNameChanges(body.version as number);
+  },
   'POST /history/imports/queue': (body) => {
     requireConnected();
     check(
@@ -199,32 +244,46 @@ const jsonRoutes: Record<string, Route> = {
   },
   'POST /history/imports/claim': (body) => {
     requireConnected();
-    check(isUuid(body.runToken));
-    return connection.historyImports.claim(body.runToken as string);
+    check(
+      isUuid(body.runToken) &&
+        (body.pageSeq === undefined || (Number.isSafeInteger(body.pageSeq) && (body.pageSeq as number) >= 0)),
+    );
+    return connection.historyImports.claim(body.runToken as string, body.pageSeq as number | undefined);
   },
   'POST /history/imports/complete': (body) => {
     check(
       isUuid(body.leaseId) &&
-        (body.lastEventId === undefined || isEventId(body.lastEventId)) &&
-        isCount(body.imported) &&
-        isDelay(body.nextRunInMs),
+        isImportedByChat(body.imported) &&
+        isDelay(body.nextRunInMs) &&
+        isOptionalCount(body.requests),
     );
     return connection.historyImports.complete(
       body.leaseId as string,
-      body.lastEventId as string | undefined,
-      body.imported as number,
+      body.imported as Record<string, number>,
       body.nextRunInMs as number,
+      body.requests as number | undefined,
     );
   },
   'POST /history/imports/release': (body) => {
-    check(isUuid(body.leaseId) && typeof body.failed === 'boolean' && isDelay(body.nextRunInMs));
+    check(
+      isUuid(body.leaseId) &&
+        typeof body.failed === 'boolean' &&
+        isDelay(body.nextRunInMs) &&
+        isOptionalCount(body.requests),
+    );
     return connection.historyImports.release(
       body.leaseId as string,
       body.failed as boolean,
       body.nextRunInMs as number,
+      body.requests as number | undefined,
     );
   },
   'POST /history/imports/progress': () => connection.historyImports.progress(),
+  'POST /media/claim': () => connection.mediaLeases.claim(),
+  'POST /media/release': (body) => {
+    check(isUuid(body.leaseId) && isOptionalCount(body.requests));
+    return connection.mediaLeases.release(body.leaseId as string, body.requests as number | undefined);
+  },
   'POST /address-book/sync': () => {
     requireConnected();
     return connection.syncAddressBook();

@@ -1,181 +1,230 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'node:test';
+import { afterEach, test } from 'node:test';
 
-import {
-  HISTORY_IMPORT_REQUESTS_PER_MINUTE,
-  isRateLimitError,
-  paceDelay,
-  runHistoryImportStep,
-} from '../src/logic-functions/history-import';
+import { historyJobId, runHistoryImportStep, type ChainPosition } from '../src/logic-functions/history-import';
+import { createFakeTwenty, mockBridge } from './fake-twenty';
 
 const RUN_TOKEN = '22222222-2222-4222-8222-222222222222';
 const LEASE_ID = '33333333-3333-4333-8333-333333333333';
 const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
+const OTHER_CONVERSATION_ID = '55555555-5555-4555-8555-555555555555';
 const CHAT_ID = '15551234567@s.whatsapp.net';
+const OTHER_CHAT_ID = '15557654321@s.whatsapp.net';
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
+let restore: () => void = () => undefined;
 
-const events = Array.from({ length: 100 }, (_, index) => ({
+afterEach(() => restore());
+
+const event = (index: number, chatId = CHAT_ID, overrides: Record<string, unknown> = {}) => ({
   eventId: index.toString(16).padStart(64, '0'),
-  chatId: CHAT_ID,
+  chatId,
   providerMessageId: `provider-${index}`,
   direction: index % 2 ? ('outbound' as const) : ('inbound' as const),
   text: `Message ${index}`,
   sentAt: new Date(Date.UTC(2026, 9, 1, 0, index)).toISOString(),
-}));
+  ...overrides,
+});
+const range = (count: number, offset = 0) => Array.from({ length: count }, (_, index) => offset + index);
 
-let bridgeCalls: { path: string; body: Record<string, unknown> }[] = [];
-let bridgeResponses: Record<string, unknown> = {};
-const originalFetch = globalThis.fetch;
-
-beforeEach(() => {
-  process.env.WHATSAPP_BRIDGE_URL = 'http://bridge.test';
-  process.env.WHATSAPP_BRIDGE_TOKEN = 'token';
-  bridgeCalls = [];
-  globalThis.fetch = async (input, init) => {
-    const path = new URL(String(input)).pathname;
-    bridgeCalls.push({ path, body: JSON.parse(String(init?.body ?? '{}')) });
-    return new Response(JSON.stringify(bridgeResponses[path] ?? {}));
-  };
+const page = (overrides: Record<string, unknown> = {}) => ({
+  leaseId: LEASE_ID,
+  pageSeq: 4,
+  chats: [
+    {
+      chatId: CHAT_ID,
+      conversationId: CONVERSATION_ID,
+      messages: range(150).map((index) => event(index)),
+      isLastPage: true,
+    },
+    {
+      chatId: OTHER_CHAT_ID,
+      conversationId: OTHER_CONVERSATION_ID,
+      messages: range(50, 1000).map((index) => event(index, OTHER_CHAT_ID)),
+      isLastPage: false,
+    },
+  ],
+  summaries: [],
+  ...overrides,
 });
 
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
-
-const fakeClient = (onQuery?: () => void) => {
-  const requests: string[] = [];
-  const created: Record<string, unknown>[] = [];
-  const client = {
-    query: async (selection: Record<string, unknown>) => {
-      requests.push('query');
-      onQuery?.();
-      if (selection.whatsappConversations) {
-        return { whatsappConversations: { edges: [{ node: { id: CONVERSATION_ID, lastMessageAt: null } }] } };
-      }
-      return { whatsappMessages: { edges: [] } };
-    },
-    mutation: async (selection: Record<string, { __args: { data: Record<string, unknown>[] } }>) => {
-      requests.push('mutation');
-      if (selection.createWhatsappMessages) {
-        created.push(...selection.createWhatsappMessages.__args.data);
-        return { createWhatsappMessages: selection.createWhatsappMessages.__args.data.map((_, id) => ({ id })) };
-      }
-      return { updateWhatsappConversation: { id: CONVERSATION_ID } };
-    },
-  };
-  return { client, requests, created };
+const bridgeWith = (claim: unknown, step: Record<string, unknown> = { remaining: 1, pageSeq: 5, nextJobKey: '5' }) => {
+  const calls = mockBridge({
+    '/history/imports/claim': () => claim,
+    '/history/imports/complete': () => step,
+    '/history/imports/release': () => step,
+  });
+  restore = calls.restore;
+  return calls.calls;
 };
 
-test('imports a 100-message page in two requests, then schedules the next page at a paced delay', async () => {
-  bridgeResponses = {
-    '/history/imports/claim': {
-      leaseId: LEASE_ID,
-      chatId: CHAT_ID,
-      conversationId: CONVERSATION_ID,
-      messages: events,
-      isLastPage: false,
+const run = async (twenty: ReturnType<typeof createFakeTwenty>, media: unknown[] = []) => {
+  const scheduled: { runToken: string; delayMs: number; position?: ChainPosition }[] = [];
+  const result = await runHistoryImportStep({ runToken: RUN_TOKEN, pageSeq: 4 }, silentLogger, {
+    client: twenty.client,
+    enqueue: async (runToken, delayMs, position) => {
+      scheduled.push({ runToken, delayMs, position });
     },
-    '/history/imports/complete': { remaining: 1 },
-  };
-  const { client, requests, created } = fakeClient();
-  const scheduled: { runToken: string; delayMs: number }[] = [];
-
-  const result = await runHistoryImportStep(RUN_TOKEN, silentLogger, {
-    client: client as never,
-    enqueue: async (runToken, delayMs) => {
-      scheduled.push({ runToken, delayMs });
-    },
+    enqueueMedia: async (items) => media.push(...items),
   });
+  return { result, scheduled };
+};
+
+test('imports a 200-message page of two chats in one request, then queues the next page', async () => {
+  const twenty = createFakeTwenty();
+  const calls = bridgeWith(page());
+
+  const { result, scheduled } = await run(twenty);
 
   assert.equal(result.status, 'imported');
-  assert.deepEqual(requests, ['query', 'mutation']);
-  assert.equal(created.length, 100);
-  const complete = bridgeCalls.find((call) => call.path === '/history/imports/complete');
-  assert.equal(complete?.body.lastEventId, events.at(-1)!.eventId);
-  assert.equal(complete?.body.imported, 100);
+  assert.deepEqual(twenty.requests, ['mutation createWhatsappMessages']);
+  assert.equal(twenty.store.whatsappMessages.length, 200);
+  assert.deepEqual(calls.find((call) => call.path === '/history/imports/claim')?.body, {
+    runToken: RUN_TOKEN,
+    pageSeq: 4,
+  });
+  assert.deepEqual(calls.find((call) => call.path === '/history/imports/complete')?.body.imported, {
+    [CHAT_ID]: 150,
+    [OTHER_CHAT_ID]: 50,
+  });
   assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0].runToken, RUN_TOKEN);
-  // Two record requests plus the enqueue, spread over the per-minute budget.
-  assert.ok(scheduled[0].delayMs <= (3 * 60_000) / HISTORY_IMPORT_REQUESTS_PER_MINUTE);
-  assert.ok(scheduled[0].delayMs > 0);
+  assert.deepEqual(scheduled[0].position, { pageSeq: 5, jobKey: '5' });
+  assert.equal(scheduled[0].delayMs, 0, 'the bridge paces the chain');
+  assert.equal(calls.find((call) => call.path === '/history/imports/complete')?.body.requests, 1);
+  assert.equal(historyJobId(RUN_TOKEN, '5'), `history.${RUN_TOKEN}.5`);
 });
 
-test('writes the conversation summary once, on the last page, and stops the chain', async () => {
-  bridgeResponses = {
-    '/history/imports/claim': {
-      leaseId: LEASE_ID,
-      chatId: CHAT_ID,
-      conversationId: CONVERSATION_ID,
-      messages: events.slice(0, 3),
-      isLastPage: true,
-      summary: { lastMessage: events[2], lastInboundAt: events[2].sentAt },
-    },
-    '/history/imports/complete': { remaining: 0 },
-  };
-  const { client, requests } = fakeClient();
-  let scheduled = 0;
+test('a page imported twice creates nothing the second time', async () => {
+  const twenty = createFakeTwenty();
+  bridgeWith(page());
+  await run(twenty);
 
-  await runHistoryImportStep(RUN_TOKEN, silentLogger, {
-    client: client as never,
-    enqueue: async () => {
-      scheduled += 1;
-    },
-  });
+  const { result } = await run(twenty);
 
-  assert.deepEqual(requests, ['query', 'mutation', 'query', 'mutation']);
-  assert.equal(scheduled, 0);
+  assert.deepEqual(result.status === 'imported' && result.imported, 0);
+  assert.equal(twenty.store.whatsappMessages.length, 200);
 });
 
-test('gives the page back without blaming the chat when Twenty rate limits, and retries a minute later', async () => {
-  bridgeResponses = {
-    '/history/imports/claim': {
-      leaseId: LEASE_ID,
-      chatId: CHAT_ID,
-      conversationId: CONVERSATION_ID,
-      messages: events.slice(0, 3),
-      isLastPage: false,
-    },
-    '/history/imports/release': { remaining: 1, failures: 0 },
-  };
-  const { client } = fakeClient(() => {
-    throw new Error('Too Many Requests: Limit reached (100 tokens per 60000 ms)');
+test('writes the summaries of finished chats in one query and one upsert, never moving them back', async () => {
+  const twenty = createFakeTwenty({
+    whatsappConversations: [
+      { id: CONVERSATION_ID, name: 'A', chatId: CHAT_ID, accountId: 'acc', lastMessageAt: null },
+      {
+        id: OTHER_CONVERSATION_ID,
+        name: 'B',
+        chatId: OTHER_CHAT_ID,
+        accountId: 'acc',
+        lastMessageAt: '2027-01-01T00:00:00.000Z',
+        lastInboundAt: '2027-01-01T00:00:00.000Z',
+      },
+    ],
   });
-  const delays: number[] = [];
+  bridgeWith(
+    page({
+      chats: [],
+      summaries: [
+        {
+          chatId: CHAT_ID,
+          conversationId: CONVERSATION_ID,
+          lastMessage: { sentAt: event(9).sentAt, text: 'Latest' },
+          lastInboundAt: event(8).sentAt,
+        },
+        {
+          chatId: OTHER_CHAT_ID,
+          conversationId: OTHER_CONVERSATION_ID,
+          lastMessage: { sentAt: event(9).sentAt, text: 'Older' },
+        },
+      ],
+    }),
+    { remaining: 0, pageSeq: 5, nextJobKey: '5' },
+  );
 
-  const result = await runHistoryImportStep(RUN_TOKEN, silentLogger, {
-    client: client as never,
-    enqueue: async (_runToken, delayMs) => {
-      delays.push(delayMs);
-    },
-  });
+  const { scheduled } = await run(twenty);
+
+  assert.deepEqual(twenty.requests, ['query whatsappConversations', 'mutation createWhatsappConversations']);
+  const [first, second] = twenty.store.whatsappConversations;
+  assert.equal(first.lastPreview, 'Latest');
+  assert.equal(first.lastInboundAt, event(8).sentAt);
+  assert.equal(second.lastMessageAt, '2027-01-01T00:00:00.000Z');
+  assert.deepEqual(scheduled, [], 'the chain ends with its last page');
+});
+
+test('hands the files of the page to media jobs', async () => {
+  const twenty = createFakeTwenty();
+  const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
+  bridgeWith(
+    page({
+      chats: [
+        {
+          chatId: CHAT_ID,
+          conversationId: CONVERSATION_ID,
+          messages: range(10).map((index) => event(index, CHAT_ID, index < 4 ? { media } : {})),
+          isLastPage: true,
+        },
+      ],
+    }),
+  );
+  const queued: unknown[] = [];
+
+  await run(twenty, queued);
+
+  assert.equal(queued.length, 4);
+  assert.deepEqual(twenty.requests, ['mutation createWhatsappMessages'], 'files cost the page no request');
+});
+
+test('gives the page back without blaming its chats when Twenty rate limits, and waits as asked', async () => {
+  const twenty = createFakeTwenty();
+  twenty.failNextRequest({ errors: [{ extensions: { code: 'RATE_LIMITED', retryAfterMs: 7_000 } }] });
+  const calls = bridgeWith(page(), { remaining: 2, pageSeq: 4, nextJobKey: '4-1' });
+
+  const { result, scheduled } = await run(twenty);
 
   assert.equal(result.status, 'failed');
-  assert.equal(bridgeCalls.find((call) => call.path === '/history/imports/release')?.body.failed, false);
-  assert.deepEqual(delays, [60_000]);
+  assert.deepEqual(calls.find((call) => call.path === '/history/imports/release')?.body, {
+    leaseId: LEASE_ID,
+    failed: false,
+    nextRunInMs: 7_000,
+    requests: 1,
+  });
+  assert.deepEqual(scheduled, [{ runToken: RUN_TOKEN, delayMs: 7_000, position: { pageSeq: 4, jobKey: '4-1' } }]);
 });
 
 test('a superseded chain stops without touching Twenty', async () => {
-  bridgeResponses = { '/history/imports/claim': { stale: true } };
-  const { client, requests } = fakeClient();
-  let scheduled = 0;
+  const twenty = createFakeTwenty();
+  bridgeWith({ stale: true });
 
-  assert.deepEqual(
-    await runHistoryImportStep(RUN_TOKEN, silentLogger, {
-      client: client as never,
-      enqueue: async () => {
-        scheduled += 1;
-      },
-    }),
-    { status: 'idle' },
-  );
-  assert.equal(requests.length, 0);
-  assert.equal(scheduled, 0);
+  const { result, scheduled } = await run(twenty);
+
+  assert.deepEqual(result, { status: 'idle' });
+  assert.deepEqual(twenty.requests, []);
+  assert.deepEqual(scheduled, []);
 });
 
-test('recognizes rate limit errors and paces requests over the per-minute budget', () => {
-  assert.equal(isRateLimitError({ errors: [{ message: 'x', extensions: { code: 'RATE_LIMITED' } }] }), true);
-  assert.equal(isRateLimitError(new Error('Limit reached (100 tokens per 60000 ms)')), true);
-  assert.equal(isRateLimitError(new Error('Could not create WhatsApp messages')), false);
-  assert.equal(paceDelay(HISTORY_IMPORT_REQUESTS_PER_MINUTE, 0), 60_000);
-  assert.equal(paceDelay(1, 60_000), 0);
+test('without a page position from the bridge, queues the next job without a job ID', async () => {
+  const twenty = createFakeTwenty();
+  bridgeWith(page(), { remaining: 1 });
+
+  const { scheduled } = await run(twenty);
+
+  assert.equal(scheduled[0].position, undefined);
+});
+
+test('comes back for the same page when the bridge has no budget for it', async () => {
+  const twenty = createFakeTwenty();
+  bridgeWith({ waitMs: 2_500, pageSeq: 4, nextJobKey: '4-2' });
+
+  const { result, scheduled } = await run(twenty);
+
+  assert.deepEqual(result, { status: 'waiting', waitMs: 2_500 });
+  assert.deepEqual(twenty.requests, []);
+  assert.deepEqual(scheduled, [{ runToken: RUN_TOKEN, delayMs: 2_500, position: { pageSeq: 4, jobKey: '4-2' } }]);
+});
+
+test('reports a rate limit to the bridge, so other background jobs hold off too', async () => {
+  const twenty = createFakeTwenty();
+  twenty.failNextRequest({ errors: [{ extensions: { code: 'RATE_LIMITED', retryAfterMs: 9_000 } }] });
+  const calls = bridgeWith(page(), { remaining: 1, pageSeq: 4, nextJobKey: '4-1' });
+
+  await run(twenty);
+
+  assert.deepEqual(calls.find((call) => call.path === '/budget/penalty')?.body, { retryAfterMs: 9_000 });
 });
