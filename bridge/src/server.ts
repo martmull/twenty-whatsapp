@@ -217,17 +217,31 @@ const jsonRoutes: Record<string, Route> = {
     );
   },
   'POST /history/imports/release': (body) => {
-    check(isUuid(body.leaseId) && typeof body.failed === 'boolean' && isDelay(body.nextRunInMs));
+    check(
+      isUuid(body.leaseId) &&
+        typeof body.failed === 'boolean' &&
+        isDelay(body.nextRunInMs) &&
+        (body.abandon === undefined || typeof body.abandon === 'boolean'),
+    );
     return connection.historyImports.release(
       body.leaseId as string,
       body.failed as boolean,
       body.nextRunInMs as number,
+      body.abandon === true,
     );
   },
   'POST /history/imports/progress': () => connection.historyImports.progress(),
   'POST /address-book/sync': () => {
     requireConnected();
     return connection.syncAddressBook();
+  },
+  'POST /contacts/saved': (body) => {
+    check(
+      Array.isArray(body.ids) &&
+        body.ids.length <= 200 &&
+        body.ids.every((id) => typeof id === 'string' && /^\d{7,15}@(?:s\.whatsapp\.net|lid)$/.test(id)),
+    );
+    return connection.getSavedContacts(body.ids as string[]);
   },
   'POST /history/members': (body) => {
     check(isGroupChatId(body.chatId as string), 'Invalid group ID');

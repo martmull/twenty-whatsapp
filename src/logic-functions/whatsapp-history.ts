@@ -5,13 +5,16 @@ import { canManageConnection } from 'src/logic-functions/can-manage-connection';
 import { enqueueHistoryImport } from 'src/logic-functions/history-import';
 import {
   applicationClient,
+  createPeopleForContacts,
   ensureAccount,
   ensureConversation,
   findConversations,
   findPeopleByPhones,
   personName,
   userClient,
+  type ContactName,
   type Person,
+  type SavedContact,
 } from 'src/logic-functions/message-data';
 import type { Logger } from 'src/logic-functions/utils/logger';
 import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
@@ -45,8 +48,7 @@ type HistoryCandidate = {
   messageCount: number;
   lastMessageAt?: string;
 };
-// Names the bridge knows for a chat: the display name, and first and last names from the phone's address book.
-type ContactName = { name: string; firstName?: string; lastName?: string };
+type GroupMember = { phoneNumber?: string; firstName?: string; lastName?: string; isSavedContact?: boolean };
 
 const listCandidates = async (request: HistoryRequest) => {
   const offset = request.offset ?? 0;
@@ -86,7 +88,7 @@ const listCandidates = async (request: HistoryRequest) => {
 const resolvePerson = async (
   request: ChatSelection,
   chatId: string,
-  contact: ContactName,
+  contact: Omit<ContactName, 'chatId'>,
   matches: Person[],
 ): Promise<{ person: Person; createdPerson: boolean }> => {
   if (matches.length > 1) {
@@ -147,6 +149,34 @@ const resolvePerson = async (
   return { person: existing, createdPerson: false };
 };
 
+// Creates People for group members saved in the phone's address book; other members are left out.
+const createGroupMemberPeople = async (groupChatIds: string[], logger: Logger): Promise<number> => {
+  const contacts: SavedContact[] = [];
+
+  for (const chatId of groupChatIds) {
+    const members = await bridgePost<GroupMember[]>('/history/members', { chatId }, 30_000).catch(() => {
+      logger.warn('Could not read group members', { chatId });
+      return [];
+    });
+    for (const { phoneNumber, firstName, lastName, isSavedContact } of members) {
+      if (isSavedContact && phoneNumber && firstName) {
+        contacts.push({ phoneNumber, firstName, lastName: lastName ?? '' });
+      }
+    }
+  }
+
+  if (contacts.length === 0) {
+    return 0;
+  }
+
+  const peopleByPhone = await findPeopleByPhones(
+    applicationClient(),
+    contacts.map((contact) => digits(contact.phoneNumber)),
+  );
+  // Created as the admin, so their own permissions apply.
+  return createPeopleForContacts(userClient(), contacts, peopleByPhone);
+};
+
 // Creates the People and conversations of the selected chats, then hands the messages to the
 // background import. Chats that cannot be imported are reported without stopping the others.
 const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, logger: Logger) => {
@@ -170,7 +200,7 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
 
   const client = applicationClient();
   const [names, accountId] = await Promise.all([
-    bridgePost<(ContactName & { chatId: string })[]>('/history/names', { chatIds }, 30_000),
+    bridgePost<ContactName[]>('/history/names', { chatIds }, 30_000),
     ensureAccount(client, `+${accountPhoneNumber}`),
   ]);
   const contactByChatId = new Map(names.map(({ chatId, ...contact }) => [chatId, contact]));
@@ -201,6 +231,19 @@ const queueImport = async (request: HistoryRequest, accountPhoneNumber: string, 
       failures.push({ chatId, error: error.message });
     }
   }
+
+  // Groups import without their members when People cannot be created, e.g. without the permission.
+  createdPeople += await createGroupMemberPeople(
+    chats
+      .filter((chat) => isGroupChatId(chat.chatId) && chat.createPerson === true)
+      .map((chat) => chat.chatId as string),
+    logger,
+  ).catch((error: unknown) => {
+    logger.warn('Could not create People for group members', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 0;
+  });
 
   const missing = resolved.filter(({ chatId }) => !conversations.has(chatId));
   const createdIdByChatId = new Map<string, string>();

@@ -186,3 +186,16 @@ test('counts only the messages inside the selected range', async () => {
     );
   });
 });
+
+test('an abandoned chat is set aside at once and the next chat is claimed', async () => {
+  await withQueue({ [CHAT_ID]: [message(1)], [OTHER_CHAT_ID]: [message(2)] }, async (queue) => {
+    const { runToken } = await queue.queue([
+      { chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 },
+      { chatId: OTHER_CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 },
+    ]);
+    const page = asPage(await queue.claim(runToken!));
+
+    assert.deepEqual(await queue.release(page.leaseId, true, 0, true), { remaining: 1, failures: 5 });
+    assert.equal(asPage(await queue.claim(runToken!)).chatId, OTHER_CHAT_ID);
+  });
+});

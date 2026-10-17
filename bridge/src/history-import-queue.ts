@@ -257,15 +257,20 @@ export class HistoryImportQueue {
     });
   }
 
-  // Gives the page back after a failure. A chat that keeps failing is set aside as failed.
-  release(leaseId: string, failed: boolean, nextRunInMs: number): Promise<{ remaining: number; failures: number }> {
+  // Gives the page back after a failure. A chat that keeps failing, or is abandoned, is set aside as failed.
+  release(
+    leaseId: string,
+    failed: boolean,
+    nextRunInMs: number,
+    abandon = false,
+  ): Promise<{ remaining: number; failures: number }> {
     return this.serialize(async () => {
       const lease = this.takeLease(leaseId);
       const task = lease && (await this.tasks.read(lease.chatId));
       let failures = 0;
 
       if (lease && task?.taskId === lease.taskId && failed) {
-        failures = task.failures + 1;
+        failures = abandon ? MAX_FAILURES : task.failures + 1;
         await this.tasks.write(task.chatId, {
           ...task,
           failures,
