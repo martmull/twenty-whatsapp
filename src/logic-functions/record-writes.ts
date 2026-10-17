@@ -70,12 +70,13 @@ export const chunkRecords = <TRecord>(
 };
 
 type Selection = Record<string, unknown>;
+type UpsertMutation = 'createWhatsappMessages' | 'createWhatsappConversations' | 'createPeople';
 
 // One createMany(upsert: true) per chunk. Twenty matches each record on its id or any unique index,
 // inserts the rest, and writes only the fields sent, so callers send the fields they own.
 const upsertRecords = async <TNode>(
   client: CoreApiClient,
-  mutationName: string,
+  mutationName: UpsertMutation,
   records: Record<string, unknown>[],
   selection: Selection,
 ): Promise<TNode[]> => {
@@ -85,7 +86,8 @@ const upsertRecords = async <TNode>(
     const result = await client.mutation({
       [mutationName]: { __args: { data: chunk, upsert: true }, ...selection },
     });
-    const written = result?.[mutationName] as TNode[] | undefined;
+    // The generated client types each mutation's result separately; this reads any of them.
+    const written = (result as unknown as Record<string, unknown> | undefined)?.[mutationName] as TNode[] | undefined;
 
     if (!Array.isArray(written) || written.length !== chunk.length) {
       throw new Error(`Could not write ${mutationName.replace(/^create/, '')}`);
