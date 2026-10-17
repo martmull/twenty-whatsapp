@@ -270,19 +270,7 @@ export const storeMessages = async (
         updateWhatsappMessage: { __args: { id: stored.id, data: { media: [file] } }, id: true },
       });
     } else if (!stored) {
-      toCreate.push({
-        name: event.text.slice(0, 80),
-        conversationId,
-        externalId: event.eventId,
-        direction: event.direction === 'outbound' ? 'OUTBOUND' : 'INBOUND',
-        text: event.text,
-        sentAt: event.sentAt,
-        deliveryState: event.direction === 'outbound' ? 'SENT' : 'RECEIVED',
-        ...(event.media ? { mediaKind: MEDIA_KIND_VALUES[event.media.kind] } : {}),
-        ...(file ? { media: [file] } : {}),
-        ...(event.senderId ? { senderId: event.senderId } : {}),
-        ...(event.senderName ? { senderName: event.senderName } : {}),
-      });
+      toCreate.push({ ...messageRecord(event, conversationId), ...(file ? { media: [file] } : {}) });
     }
     lastProcessedEventId = event.eventId;
   }
@@ -300,33 +288,68 @@ export const storeMessages = async (
   return { imported: toCreate.length, lastProcessedEventId, mediaUploads };
 };
 
-// Moves the conversation's last message and last inbound time forward, never backward.
+// The fields a message import owns. The media file is left out: the media import attaches it.
+export const messageRecord = (event: BridgeMessageEvent, conversationId: string): Record<string, unknown> => ({
+  name: event.text.slice(0, 80),
+  conversationId,
+  externalId: event.eventId,
+  direction: event.direction === 'outbound' ? 'OUTBOUND' : 'INBOUND',
+  text: event.text,
+  sentAt: event.sentAt,
+  deliveryState: event.direction === 'outbound' ? 'SENT' : 'RECEIVED',
+  ...(event.media ? { mediaKind: MEDIA_KIND_VALUES[event.media.kind] } : {}),
+  ...(event.senderId ? { senderId: event.senderId } : {}),
+  ...(event.senderName ? { senderName: event.senderName } : {}),
+});
+
+export type ConversationSummary = {
+  latest?: Pick<BridgeMessageEvent, 'sentAt' | 'text'>;
+  latestInboundAt?: string;
+};
+
+export const summarizeEvents = (events: BridgeMessageEvent[]): ConversationSummary => ({
+  latest: events.length
+    ? events.reduce((current, event) => (event.sentAt > current.sentAt ? event : current))
+    : undefined,
+  latestInboundAt: events
+    .filter((event) => event.direction !== 'outbound')
+    .map((event) => event.sentAt)
+    .sort()
+    .pop(),
+});
+
+// The summary fields to write so the last message and last inbound time move forward, never backward.
+export const summaryPatch = (
+  conversation: Pick<Conversation, 'lastMessageAt' | 'lastInboundAt'> | undefined,
+  { latest, latestInboundAt }: ConversationSummary,
+): Record<string, string> | undefined => {
+  const updateLastMessage = latest && (!conversation?.lastMessageAt || latest.sentAt >= conversation.lastMessageAt);
+  const updateLastInbound =
+    latestInboundAt && (!conversation?.lastInboundAt || latestInboundAt >= conversation.lastInboundAt);
+
+  if (!updateLastMessage && !updateLastInbound) {
+    return undefined;
+  }
+
+  return {
+    ...(updateLastMessage ? { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } : {}),
+    ...(updateLastInbound ? { lastInboundAt: latestInboundAt } : {}),
+  };
+};
+
 export const updateConversationSummary = async (
   client: CoreApiClient,
   conversation: Pick<Conversation, 'id' | 'lastMessageAt' | 'lastInboundAt'>,
   latest: Pick<BridgeMessageEvent, 'sentAt' | 'text'> | undefined,
   latestInboundAt: string | undefined,
 ): Promise<void> => {
-  const updateLastMessage = latest && (!conversation.lastMessageAt || latest.sentAt >= conversation.lastMessageAt);
-  const updateLastInbound =
-    latestInboundAt && (!conversation.lastInboundAt || latestInboundAt >= conversation.lastInboundAt);
+  const patch = summaryPatch(conversation, { latest, latestInboundAt });
 
-  if (!updateLastMessage && !updateLastInbound) {
-    return;
+  if (patch) {
+    await client.mutation({
+      updateWhatsappConversation: { __args: { id: conversation.id, data: patch }, id: true },
+    });
   }
-
-  await client.mutation({
-    updateWhatsappConversation: {
-      __args: {
-        id: conversation.id,
-        data: {
-          ...(updateLastMessage ? { lastMessageAt: latest.sentAt, lastPreview: latest.text.slice(0, 160) } : {}),
-          ...(updateLastInbound ? { lastInboundAt: latestInboundAt } : {}),
-        },
-      },
-      id: true,
-    },
-  });
 };
 
 // Returns the conversation of a chat, creating it (linked to the Person, if any) when needed.
@@ -385,15 +408,8 @@ export const importChatMessages = async (
   const conversation = await ensureConversation(client, accountId, chatId, name, person, existingConversation);
   const { imported } = await storeMessages(client, conversation.id, events);
 
-  if (events.length > 0) {
-    const latest = events.reduce((current, event) => (event.sentAt > current.sentAt ? event : current));
-    const latestInboundAt = events
-      .filter((event) => event.direction !== 'outbound')
-      .map((event) => event.sentAt)
-      .sort()
-      .pop();
-    await updateConversationSummary(client, conversation, latest, latestInboundAt);
-  }
+  const { latest, latestInboundAt } = summarizeEvents(events);
+  await updateConversationSummary(client, conversation, latest, latestInboundAt);
 
   return imported;
 };

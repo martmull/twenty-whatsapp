@@ -11,6 +11,7 @@ import {
   type BridgeMessageEvent,
   type Conversation,
 } from 'src/logic-functions/message-data';
+import { isRateLimitError } from 'src/logic-functions/record-writes';
 import type { Logger } from 'src/logic-functions/utils/logger';
 import { isUuid } from 'src/logic-functions/utils/validators';
 
@@ -36,15 +37,6 @@ export type HistoryImportStepResult =
   | { status: 'idle' }
   | { status: 'imported'; imported: number; remaining: number; nextRunInMs: number }
   | { status: 'failed'; remaining: number; nextRunInMs: number };
-
-export const isRateLimitError = (error: unknown): boolean => {
-  const graphqlErrors = (error as { errors?: { extensions?: { code?: string } }[] } | undefined)?.errors;
-
-  return (
-    (Array.isArray(graphqlErrors) && graphqlErrors.some((item) => item?.extensions?.code === 'RATE_LIMITED')) ||
-    (error instanceof Error && /too many requests|rate limit|limit reached/i.test(error.message))
-  );
-};
 
 // Spreads requests evenly: a job that made N requests waits until N requests' worth of budget has passed.
 export const paceDelay = (requests: number, elapsedMs: number): number =>

@@ -3,10 +3,10 @@ import { afterEach, beforeEach, test } from 'node:test';
 
 import {
   HISTORY_IMPORT_REQUESTS_PER_MINUTE,
-  isRateLimitError,
   paceDelay,
   runHistoryImportStep,
 } from '../src/logic-functions/history-import';
+import { isRateLimitError } from '../src/logic-functions/record-writes';
 
 const RUN_TOKEN = '22222222-2222-4222-8222-222222222222';
 const LEASE_ID = '33333333-3333-4333-8333-333333333333';
