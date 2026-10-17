@@ -37,7 +37,7 @@ type QueueResult = {
   failures: { chatId: string; error: string }[];
 };
 
-type ImportProgress = { chatId: string; imported: number; total: number; state: 'queued' | 'failed' };
+type ImportProgress = { chatId: string; processed: number; total: number; state: 'queued' | 'done' | 'failed' };
 
 type GroupMember = {
   id: string;
@@ -72,7 +72,6 @@ export const WhatsAppHistoryImport = () => {
   const [workingAction, setWorkingAction] = useState<'review' | 'load-more' | 'import' | null>(null);
   const working = workingAction !== null;
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   // Import progress from 0 to 100, undefined when no import is running.
   const [progress, setProgress] = useState<number>();
   const [importRunning, setImportRunning] = useState(false);
@@ -86,25 +85,23 @@ export const WhatsAppHistoryImport = () => {
       try {
         const tasks = await new RestApiClient().post<ImportProgress[]>('/s/whatsapp/history', { action: 'progress' });
         if (cancelled) return;
-        const queued = tasks.filter((task) => task.state === 'queued');
         const failed = tasks.filter((task) => task.state === 'failed').length;
 
-        if (queued.length === 0) {
+        if (!tasks.some((task) => task.state === 'queued')) {
           setProgress(undefined);
           if (importRunning) {
             setImportRunning(false);
-            setNotice(
-              failed > 0
-                ? `${t('Import complete')}. ${failed} ${t('chats could not be imported; select them again to retry.')}`
-                : `${t('Import complete')}.`,
-            );
+            if (failed > 0) {
+              setError(`${failed} ${t('chats could not be imported; select them again to retry.')}`);
+            }
           }
           return;
         }
 
-        const total = queued.reduce((sum, task) => sum + task.total, 0);
-        const imported = queued.reduce((sum, task) => sum + Math.min(task.imported, task.total), 0);
-        setProgress(total > 0 ? (100 * imported) / total : 0);
+        // Covers the whole run: finished chats count as complete, failed ones as settled.
+        const total = tasks.reduce((sum, task) => sum + task.total, 0);
+        const settled = tasks.reduce((sum, task) => sum + (task.state === 'queued' ? task.processed : task.total), 0);
+        setProgress(total > 0 ? (100 * settled) / total : 0);
         setImportRunning(true);
       } catch {
         // The bridge may be restarting; keep checking while an import runs.
@@ -127,7 +124,6 @@ export const WhatsAppHistoryImport = () => {
   ) => {
     setWorkingAction(action);
     setError('');
-    setNotice('');
 
     try {
       const response = (await new RestApiClient().post('/s/whatsapp/history', {
@@ -207,7 +203,6 @@ export const WhatsAppHistoryImport = () => {
   const importSelected = async () => {
     setWorkingAction('import');
     setError('');
-    setNotice('');
 
     try {
       const chosen = items.filter((item) => selected.includes(item.chatId));
@@ -250,14 +245,10 @@ export const WhatsAppHistoryImport = () => {
         );
       }
       if (result.queued > 0) {
-        setNotice(
-          `${result.queued} ${t('chats queued')}, ${result.createdPeople} ${t('new People')}. ${t('Messages are imported in the background; you can leave this page.')}`,
-        );
-        setProgress(0);
+        setProgress((previous) => previous ?? 0);
         setImportRunning(true);
       }
     } catch {
-      setNotice('');
       setError(t('Could not queue the import. Check the bridge and retry; duplicate messages will be skipped.'));
     } finally {
       setWorkingAction(null);
@@ -640,7 +631,8 @@ export const WhatsAppHistoryImport = () => {
           style={{
             background: themeCssVariables.background.tertiary,
             borderRadius: themeCssVariables.border.radius.sm,
-            height: 6,
+            height: 4,
+            maxWidth: 240,
             overflow: 'hidden',
           }}
         >
@@ -653,11 +645,6 @@ export const WhatsAppHistoryImport = () => {
             }}
           />
         </div>
-      )}
-      {notice && (
-        <p role="status" style={{ ...styles.muted, margin: 0 }}>
-          {notice}
-        </p>
       )}
       {error && <Callout variant="error" title={t('History import unavailable')} description={error} />}
     </section>

@@ -70,7 +70,9 @@ test('imports a chat page by page, cutting pages after a few media messages', as
     assert.equal(first.isLastPage, false);
     assert.equal(first.summary, undefined);
     assert.deepEqual(await queue.complete(first.leaseId, first.messages.at(-1)!.eventId, 5, 1_000), { remaining: 1 });
-    assert.deepEqual(await queue.progress(), [{ chatId: CHAT_ID, imported: 5, total: 30, state: 'queued' }]);
+    assert.deepEqual(await queue.progress(), [
+      { chatId: CHAT_ID, imported: 5, processed: 5, total: 30, state: 'queued' },
+    ]);
 
     const second = asPage(await queue.claim(runToken));
     assert.equal(second.messages[0].eventId, messages[MAX_PAGE_MEDIA].eventId);
@@ -80,8 +82,32 @@ test('imports a chat page by page, cutting pages after a few media messages', as
     assert.deepEqual(await queue.complete(second.leaseId, second.messages.at(-1)!.eventId, 25, 1_000), {
       remaining: 0,
     });
-    assert.deepEqual(await queue.progress(), []);
+    assert.deepEqual(await queue.progress(), [
+      { chatId: CHAT_ID, imported: 30, processed: 30, total: 30, state: 'done' },
+    ]);
     assert.deepEqual(await queue.claim(runToken), { stale: true });
+  });
+});
+
+test('progress counts messages already in Twenty and starts over with the next run', async () => {
+  const messages = Array.from({ length: 4 }, (_, index) => message(index));
+
+  await withQueue({ [CHAT_ID]: messages, [OTHER_CHAT_ID]: [message(9, { chatId: OTHER_CHAT_ID })] }, async (queue) => {
+    const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
+    const page = asPage(await queue.claim(runToken!));
+    await queue.complete(page.leaseId, messages[1].eventId, 0, 0);
+    assert.deepEqual(await queue.progress(), [
+      { chatId: CHAT_ID, imported: 0, processed: 2, total: 4, state: 'queued' },
+    ]);
+
+    const last = asPage(await queue.claim(runToken!));
+    await queue.complete(last.leaseId, messages[3].eventId, 0, 0);
+    await queue.queue([{ chatId: OTHER_CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
+    assert.deepEqual(
+      (await queue.progress()).map((task) => task.chatId),
+      [OTHER_CHAT_ID],
+      'the finished run is cleared',
+    );
   });
 });
 
@@ -139,7 +165,9 @@ test('sets a chat aside after repeated failures and replaces a lost chain once c
 
     const page = asPage(await queue.claim(resumedToken));
     assert.deepEqual(await queue.release(page.leaseId, true, 0), { remaining: 0, failures: 5 });
-    assert.deepEqual(await queue.progress(), [{ chatId: CHAT_ID, imported: 0, total: 1, state: 'failed' }]);
+    assert.deepEqual(await queue.progress(), [
+      { chatId: CHAT_ID, imported: 0, processed: 0, total: 1, state: 'failed' },
+    ]);
   });
 });
 
@@ -149,7 +177,9 @@ test('counts only the messages inside the selected range', async () => {
 
   await withQueue({ [CHAT_ID]: [old, recent] }, async (queue) => {
     const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 30 }]);
-    assert.deepEqual(await queue.progress(), [{ chatId: CHAT_ID, imported: 0, total: 1, state: 'queued' }]);
+    assert.deepEqual(await queue.progress(), [
+      { chatId: CHAT_ID, imported: 0, processed: 0, total: 1, state: 'queued' },
+    ]);
     assert.deepEqual(
       asPage(await queue.claim(runToken!)).messages.map((item) => item.eventId),
       [recent.eventId],

@@ -13,7 +13,9 @@ const LEASE_MS = 6 * 60_000;
 // A chain that missed its scheduled run by this much is considered lost and can be resumed.
 const STALL_GRACE_MS = 3 * 60_000;
 const MAX_FAILURES = 5;
-const FAILED_TASK_RETENTION_MS = 24 * 60 * 60_000;
+// Finished and failed chats stay listed so progress covers the whole run, then are cleared by the
+// next run or after this long.
+const FINISHED_TASK_RETENTION_MS = 24 * 60 * 60_000;
 
 type Cursor = { sentAt: string; eventId: string };
 
@@ -24,9 +26,12 @@ export type HistoryImportTask = {
   since: string;
   cursor?: Cursor;
   imported: number;
+  // Messages handled so far, imported or already in Twenty: what the progress bar shows.
+  processed: number;
   total: number;
   failures: number;
   queuedAt: string;
+  doneAt?: string;
   failedAt?: string;
 };
 
@@ -43,8 +48,9 @@ export type HistoryImportPage = {
 export type HistoryImportProgress = {
   chatId: string;
   imported: number;
+  processed: number;
   total: number;
-  state: 'queued' | 'failed';
+  state: 'queued' | 'done' | 'failed';
 };
 
 type ClaimResult = HistoryImportPage | { stale: true } | { done: true };
@@ -125,7 +131,7 @@ export class HistoryImportQueue {
 
   private async claimableTasks(): Promise<HistoryImportTask[]> {
     return (await this.tasks.list())
-      .filter((task) => !task.failedAt)
+      .filter((task) => !task.failedAt && !task.doneAt)
       .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt) || left.chatId.localeCompare(right.chatId));
   }
 
@@ -136,6 +142,13 @@ export class HistoryImportQueue {
     return this.serialize(async () => {
       const queuedAt = new Date(this.now()).toISOString();
 
+      // A new run starts from an empty progress bar; an import queued during a run joins it.
+      if (!this.isChainAlive()) {
+        for (const task of await this.tasks.list()) {
+          if (task.doneAt || task.failedAt) await this.tasks.delete(task.chatId);
+        }
+      }
+
       for (const { chatId, conversationId, rangeDays } of tasks) {
         const since = new Date(rangeDays ? this.now() - rangeDays * 86_400_000 : 0).toISOString();
         const messages = (await this.readMessages(chatId)) ?? [];
@@ -145,6 +158,7 @@ export class HistoryImportQueue {
           conversationId,
           since,
           imported: 0,
+          processed: 0,
           total: messages.filter((message) => message.sentAt >= since).length,
           failures: 0,
           queuedAt,
@@ -166,7 +180,7 @@ export class HistoryImportQueue {
           (message) => message.sentAt >= task.since && isAfter(message, task.cursor),
         );
         if (remaining.length === 0) {
-          await this.tasks.delete(task.chatId);
+          await this.markDone(task, task.processed);
           continue;
         }
 
@@ -227,13 +241,13 @@ export class HistoryImportQueue {
       if (lease && task?.taskId === lease.taskId) {
         const index = lease.messages.findIndex((message) => message.eventId === lastEventId);
         const last = lease.messages[index];
+        const progressed = { ...task, imported: task.imported + imported, processed: task.processed + index + 1 };
         if (last && lease.isLastPage && index === lease.messages.length - 1) {
-          await this.tasks.delete(task.chatId);
+          await this.markDone(progressed, progressed.processed);
         } else if (last) {
           await this.tasks.write(task.chatId, {
-            ...task,
+            ...progressed,
             cursor: { sentAt: last.sentAt, eventId: last.eventId },
-            imported: task.imported + imported,
             failures: 0,
           });
         }
@@ -288,23 +302,36 @@ export class HistoryImportQueue {
 
   progress(): Promise<HistoryImportProgress[]> {
     return this.serialize(async () => {
-      const cutoff = new Date(this.now() - FAILED_TASK_RETENTION_MS).toISOString();
+      const cutoff = new Date(this.now() - FINISHED_TASK_RETENTION_MS).toISOString();
       const progress: HistoryImportProgress[] = [];
 
       for (const task of await this.tasks.list()) {
-        if (task.failedAt && task.failedAt < cutoff) {
+        const finishedAt = task.failedAt ?? task.doneAt;
+        if (finishedAt && finishedAt < cutoff) {
           await this.tasks.delete(task.chatId);
           continue;
         }
         progress.push({
           chatId: task.chatId,
           imported: task.imported,
+          processed: Math.min(task.processed ?? 0, task.total),
           total: task.total,
-          state: task.failedAt ? 'failed' : 'queued',
+          state: task.failedAt ? 'failed' : task.doneAt ? 'done' : 'queued',
         });
       }
 
       return progress;
+    });
+  }
+
+  // Messages that arrived after the chat was queued can push processed past the initial total.
+  private async markDone(task: HistoryImportTask, processed: number): Promise<void> {
+    const total = Math.max(task.total, processed);
+    await this.tasks.write(task.chatId, {
+      ...task,
+      processed: total,
+      total,
+      doneAt: new Date(this.now()).toISOString(),
     });
   }
 
