@@ -9,11 +9,32 @@ if (!token) {
   throw new Error('Bridge token is missing');
 }
 
-const response = await fetch(`http://127.0.0.1:${port}/address-book/sync`, {
-  method: 'POST',
-  headers: { authorization: `Bearer ${token}` },
-  signal: AbortSignal.timeout(120_000),
-});
+const request = (path, method = 'GET') =>
+  fetch(`http://127.0.0.1:${port}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(120_000),
+  });
+
+// Right after a restart the bridge is still reconnecting to WhatsApp.
+for (let attempt = 0; ; attempt += 1) {
+  const status = await request('/status')
+    .then((statusResponse) => statusResponse.json())
+    .catch(() => ({ state: 'unreachable' }));
+  if (status.state === 'connected') break;
+  if (status.qrDataUrl || attempt >= 60) {
+    console.error(
+      status.qrDataUrl
+        ? 'WhatsApp logged this device out; link it again from the WhatsApp settings in Twenty.'
+        : `WhatsApp is not connected after 60 seconds (state: ${status.state}).`,
+    );
+    process.exit(1);
+  }
+  if (attempt === 0) console.log('Waiting for WhatsApp to connect…');
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+}
+
+const response = await request('/address-book/sync', 'POST');
 const report = await response.json();
 
 if (!response.ok) {
