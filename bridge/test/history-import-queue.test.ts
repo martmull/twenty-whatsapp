@@ -96,6 +96,7 @@ test('packs several chats into 200-message pages, then writes their summaries to
       remaining: 2,
       pageSeq: 1,
       nextJobKey: '1',
+      nextRunInMs: 1_000,
     });
 
     const rest = asPage(await queue.claim(runToken, 1));
@@ -143,6 +144,7 @@ test('a retried job gets its page back, and a job for an earlier page stops', as
       remaining: 1,
       pageSeq: 1,
       nextJobKey: '1',
+      nextRunInMs: 1_000,
     });
     assert.deepEqual(await queue.claim(runToken!, 0), { stale: true }, 'a retry of a finished page stops');
     assert.equal(asPage(await queue.claim(runToken!, 1)).chats[0].messages.length, 50);
@@ -158,6 +160,7 @@ test('a retry of a released page gets its own job key', async () => {
       remaining: 1,
       pageSeq: 0,
       nextJobKey: '0-1',
+      nextRunInMs: 60_000,
       failures: 0,
     });
     assert.equal(asPage(await queue.claim(runToken!, 0)).chats[0].messages.length, 3);
@@ -262,5 +265,28 @@ test('when the API budget is spent, tells the job to come back for the same page
     const page = asPage(await queue.claim(runToken!, 0));
     await queue.complete(page.leaseId, {}, 0, 3);
     assert.ok('waitMs' in (await queue.claim(runToken!, 1)), 'requests beyond the estimate are charged');
+  });
+});
+
+test('cancelling drops the chats still queued and stops the chain', async () => {
+  await withQueue({ [CHAT_ID]: messages(250), [OTHER_CHAT_ID]: messages(3, OTHER_CHAT_ID, 900) }, async (queue) => {
+    const { runToken } = await queueBoth(queue);
+    const page = asPage(await queue.claim(runToken!, 0));
+
+    assert.deepEqual(await queue.cancel(), { cancelled: 2, runToken });
+    assert.deepEqual(await queue.claim(runToken!, 0), { stale: true }, 'queued jobs of the chain stop');
+    assert.equal((await queue.complete(page.leaseId, {}, 0)).remaining, 0, 'a page in flight changes nothing');
+    assert.deepEqual(await queue.progress(), []);
+    assert.deepEqual(await queue.recoverStalled(), {}, 'no chain is started again');
+  });
+});
+
+test('spaces pages at least a second apart, counted from when the job started', async () => {
+  await withQueue({ [CHAT_ID]: messages(450) }, async (queue) => {
+    const { runToken } = await queue.queue([{ chatId: CHAT_ID, conversationId: CONVERSATION_ID, rangeDays: 0 }]);
+    const first = asPage(await queue.claim(runToken!, 0));
+    assert.equal((await queue.complete(first.leaseId, {}, 0, 1, 300)).nextRunInMs, 700);
+    const second = asPage(await queue.claim(runToken!, 1));
+    assert.equal((await queue.complete(second.leaseId, {}, 0, 1, 5_000)).nextRunInMs, 0);
   });
 });

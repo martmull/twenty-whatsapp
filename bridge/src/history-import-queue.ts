@@ -20,7 +20,7 @@ export const SUMMARY_FLUSH_SIZE = 20;
 const MAX_SUMMARIES_PER_PAGE = 100;
 const LEASE_MS = 6 * 60_000;
 // A chain that missed its scheduled run by this much is considered lost and can be resumed.
-const STALL_GRACE_MS = 3 * 60_000;
+const STALL_GRACE_MS = 60_000;
 const MAX_FAILURES = 5;
 // Finished and failed chats stay listed so progress covers the whole run, then are cleared by the
 // next run or after this long.
@@ -75,7 +75,7 @@ export type HistoryImportProgress = {
 };
 
 // What Twenty needs to queue the next job: the page it should claim and the key naming the job.
-export type ChainStep = { remaining: number; pageSeq: number; nextJobKey: string };
+export type ChainStep = { remaining: number; pageSeq: number; nextJobKey: string; nextRunInMs: number };
 
 // The API budget is spent: the job queues itself for the same page after waitMs.
 type ClaimWait = { waitMs: number; pageSeq: number; nextJobKey: string };
@@ -84,6 +84,9 @@ type ClaimResult = HistoryImportPage | ClaimWait | { stale: true } | { done: tru
 
 // A page costs one messages upsert, and a summary flush one query and one upsert.
 const PAGE_COST = 1;
+// Each page is one queued job; this spacing keeps the chain well under Twenty's limit on jobs per
+// minute even when pages finish instantly.
+const MIN_PAGE_MS = 1_000;
 const SUMMARY_FLUSH_COST = 2;
 
 type Lease = {
@@ -102,7 +105,7 @@ type HistoryImportQueueOptions = {
   onChainRestarted?: (runToken: string) => void;
   // A chain is only restarted while WhatsApp is connected, since its jobs could not claim pages.
   canRun?: () => boolean;
-  budget?: Pick<ApiBudget, 'take' | 'adjust'>;
+  budget?: Pick<ApiBudget, 'take' | 'adjust' | 'waitMs'>;
 };
 
 const isAfter = (message: MessageEvent, cursor?: Cursor) =>
@@ -123,7 +126,7 @@ export class HistoryImportQueue {
   private readonly now: () => number;
   private readonly onChainRestarted: (runToken: string) => void;
   private readonly canRun: () => boolean;
-  private readonly budget: Pick<ApiBudget, 'take' | 'adjust'> | undefined;
+  private readonly budget: Pick<ApiBudget, 'take' | 'adjust' | 'waitMs'> | undefined;
 
   constructor(
     directory: string,
@@ -340,12 +343,14 @@ export class HistoryImportQueue {
   }
 
   // Records the page as imported. `importedByChat` counts the messages Twenty created, per chat.
-  // `requests` is what the job actually spent, correcting the claim's estimate.
+  // `requests` is what the job actually spent, correcting the claim's estimate; `elapsedMs` is how
+  // long it ran, so the next page keeps its spacing from this one's start.
   complete(
     leaseId: string,
     importedByChat: Record<string, number>,
     nextRunInMs: number,
     requests?: number,
+    elapsedMs = 0,
   ): Promise<ChainStep> {
     return this.serialize(async () => {
       const lease = this.takeLease(leaseId);
@@ -380,7 +385,9 @@ export class HistoryImportQueue {
         this.pageAttempt = 0;
       }
 
-      return this.scheduleNext(nextRunInMs);
+      return this.scheduleNext(
+        Math.max(nextRunInMs, MIN_PAGE_MS - elapsedMs, this.budget?.waitMs(PAGE_COST, 'background') ?? 0),
+      );
     });
   }
 
@@ -412,6 +419,22 @@ export class HistoryImportQueue {
       }
 
       return { ...(await this.scheduleNext(nextRunInMs)), failures };
+    });
+  }
+
+  // Drops the chats still queued and ends the chain, so its jobs stop at their next claim. Finished
+  // chats stay, with any summary still to be written.
+  cancel(): Promise<{ cancelled: number; runToken?: string }> {
+    return this.serialize(async () => {
+      const runToken = this.runToken;
+      let cancelled = 0;
+      for (const task of await this.claimableTasks()) {
+        await this.tasks.delete(task.chatId);
+        cancelled += 1;
+      }
+      this.lease = undefined;
+      this.stopChain();
+      return { cancelled, ...(runToken ? { runToken } : {}) };
     });
   }
 
@@ -498,6 +521,6 @@ export class HistoryImportQueue {
       this.nextRunAt = this.now() + nextRunInMs;
       this.armStallCheck(nextRunInMs);
     }
-    return { remaining, pageSeq: this.pageSeq, nextJobKey: this.nextJobKey() };
+    return { remaining, pageSeq: this.pageSeq, nextJobKey: this.nextJobKey(), nextRunInMs: Math.max(0, nextRunInMs) };
   }
 }

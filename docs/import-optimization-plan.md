@@ -73,10 +73,10 @@ This plan covers four paths: the live sync (`whatsapp-message-sync`), the histor
 
 **Media (files), new `whatsapp-media-import` job**
 
-- Fan out after each message write: one job per group of up to 5 media, `jobId = media.<sha256(sorted eventIds) first 40 hex>`, so history and live sync never upload the same file twice. All groups go in one `enqueueJobs` call (≤ 200 jobs).
-- The bridge limits concurrent media leases (default 3), protecting its bandwidth and the worker's memory.
-- Each job downloads, PUTs and completes the uploads (0 API budget), then makes **one messages upsert** `{ id, media: [file] }` for the group.
-- `retryLimit: 3` for transient errors. Expired media is final: the message keeps `mediaKind` with no file, as today.
+- After each message write, the files still missing go to the bridge's **media queue**, keyed by event ID, so history and live sync never queue the same file twice.
+- At most 3 chained media jobs drain it (`jobId = media.<chain>.<step>`), 5 files per step. A first version fanned out one job per 5 files; on a media-heavy import that ran into Twenty's **500 queued jobs per minute** per installation, stalling the history chain.
+- Each step downloads, PUTs and completes the uploads (0 API budget), then makes **one messages upsert** `{ id, media: [file] }`. The bridge spaces steps at least 2 s apart per chain and no sooner than the API budget allows, so each step costs exactly one queued job.
+- A rate-limited attach keeps its lease and retries with the files already uploaded. Another failure gives the files back; a file that fails three times is dropped. Expired media is final: the message keeps `mediaKind` with no file, as today.
 
 ### 3.3 Budget and retry rules
 

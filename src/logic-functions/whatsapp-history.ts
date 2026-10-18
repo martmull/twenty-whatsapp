@@ -4,6 +4,7 @@ import { defineLogicFunction } from 'twenty-sdk/define';
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
 import { enqueueHistoryImport, FIRST_PAGE, type ChainPosition } from 'src/logic-functions/history-import';
+import { cancelHistoryJobs } from 'src/logic-functions/import-cancellation';
 import {
   applicationClient,
   ensureAccount,
@@ -28,7 +29,7 @@ type ChatSelection = {
 };
 
 type HistoryRequest = {
-  action?: 'list' | 'import' | 'progress';
+  action?: 'list' | 'import' | 'progress' | 'cancel';
   rangeDays?: number;
   kind?: 'all' | 'direct' | 'group';
   offset?: number;
@@ -36,6 +37,8 @@ type HistoryRequest = {
 };
 
 const MAX_CHATS_PER_IMPORT = 50;
+// History pages changed format in bridge API version 2.
+const REQUIRED_BRIDGE_API_VERSION = 2;
 
 type HistoryCandidate = {
   chatId: string;
@@ -269,6 +272,27 @@ export const queueImport = async (
   return { queued: tasks.length, createdPeople, failures };
 };
 
+// Stops the running import: the bridge drops the chats and files still queued, and the chain's job
+// IDs are recorded so jobs Twenty already queued stop as soon as they start.
+const cancelImport = async (logger: Logger) => {
+  const result = await bridgePost<{ cancelled: number; runToken?: string; media?: { cancelled: number } }>(
+    '/history/imports/cancel',
+    {},
+    10_000,
+  ).catch(() => {
+    throw new HttpError(502, 'WhatsApp bridge is unavailable');
+  });
+
+  if (result.runToken) {
+    await cancelHistoryJobs(result.runToken).catch((error: unknown) =>
+      logger.warn('Could not record the cancelled history jobs', { error: String(error) }),
+    );
+  }
+
+  logger.info('Cancelled history import', { chats: result.cancelled, files: result.media?.cancelled ?? 0 });
+  return { cancelled: result.cancelled };
+};
+
 const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) => {
   requireUser(event);
 
@@ -285,6 +309,10 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     });
   }
 
+  if (request.action === 'cancel') {
+    return cancelImport(logger);
+  }
+
   if (!RANGE_DAYS.includes(request.rangeDays ?? 0)) {
     throw new HttpError(400, 'Invalid history range');
   }
@@ -293,6 +321,10 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
 
   if (status.state !== 'connected' || !status.phoneNumber) {
     throw new HttpError(409, 'WhatsApp is disconnected');
+  }
+
+  if ((status.apiVersion ?? 1) < REQUIRED_BRIDGE_API_VERSION) {
+    throw new HttpError(426, 'Update and restart the WhatsApp bridge to import history');
   }
 
   if (request.action === 'list') {

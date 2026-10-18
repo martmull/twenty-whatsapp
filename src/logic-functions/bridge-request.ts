@@ -1,6 +1,7 @@
 import { HttpError } from 'src/logic-functions/utils/route';
 
 export type BridgeStatus = {
+  apiVersion?: number;
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
   qrDataUrl?: string;
   qrExpiresAt?: number;

@@ -3,7 +3,9 @@ import { enqueueJobs } from 'twenty-sdk/logic-function';
 
 import { HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
 import { bridgePost, reportRateLimit } from 'src/logic-functions/bridge-request';
-import { enqueueMediaImports } from 'src/logic-functions/media-import';
+import { isHistoryJobCancelled } from 'src/logic-functions/import-cancellation';
+import { enqueueWithRetry } from 'src/logic-functions/job-chain';
+import { queueMedia } from 'src/logic-functions/media-import';
 import {
   applicationClient,
   isValidBridgeEvent,
@@ -13,7 +15,7 @@ import {
   type BridgeMessageEvent,
   type Conversation,
 } from 'src/logic-functions/message-data';
-import { attachMedia, pendingMedia, type MediaItem } from 'src/logic-functions/message-media';
+import { pendingMedia, type MediaItem } from 'src/logic-functions/message-media';
 import {
   countingClient,
   MAX_UPSERT_RECORDS,
@@ -29,7 +31,6 @@ import { isUuid } from 'src/logic-functions/utils/validators';
 const RETRY_DELAY_MS = 30_000;
 // Platform retries of a page are safe: the bridge hands the same page back and writes are upserts.
 const HISTORY_JOB_RETRY_LIMIT = 2;
-const INLINE_MEDIA_TIME_BUDGET_MS = 120_000;
 
 type PageChat = { chatId: string; conversationId: string; messages: BridgeMessageEvent[]; isLastPage: boolean };
 type PageSummary = {
@@ -39,7 +40,7 @@ type PageSummary = {
   lastInboundAt?: string;
 };
 type HistoryImportPage = { leaseId: string; pageSeq: number; chats: PageChat[]; summaries: PageSummary[] };
-type ChainStep = { remaining: number; pageSeq?: number; nextJobKey?: string };
+type ChainStep = { remaining: number; pageSeq?: number; nextJobKey?: string; nextRunInMs?: number };
 type ClaimWait = { waitMs: number; pageSeq: number; nextJobKey: string };
 
 export type HistoryImportPayload = { runToken?: unknown; pageSeq?: unknown };
@@ -139,7 +140,8 @@ const importPage = async (client: CoreApiClient, page: HistoryImportPage): Promi
 type HistoryImportDependencies = {
   client?: CoreApiClient;
   enqueue?: EnqueueHistory;
-  enqueueMedia?: (items: MediaItem[]) => Promise<unknown>;
+  queueFiles?: (items: MediaItem[]) => Promise<unknown>;
+  isCancelled?: (jobId: string) => Promise<boolean>;
 };
 
 // Imports one page of queued history, then schedules the next job while work remains.
@@ -149,13 +151,19 @@ export const runHistoryImportStep = async (
   {
     client = applicationClient(),
     enqueue = enqueueHistoryImport,
-    enqueueMedia = enqueueMediaImports,
+    queueFiles = (items) => queueMedia(items, 'history'),
+    isCancelled = isHistoryJobCancelled,
   }: HistoryImportDependencies = {},
 ): Promise<HistoryImportStepResult> => {
   const { runToken } = payload ?? {};
   const pageSeq = Number.isSafeInteger(payload?.pageSeq) ? (payload.pageSeq as number) : undefined;
 
   if (!isUuid(runToken)) {
+    return { status: 'idle' };
+  }
+
+  if (await isCancelled(historyJobId(runToken, `${pageSeq ?? 0}`))) {
+    logger.info('History import was cancelled');
     return { status: 'idle' };
   }
 
@@ -166,7 +174,10 @@ export const runHistoryImportStep = async (
   );
 
   if ('waitMs' in claimed) {
-    await enqueue(runToken, claimed.waitMs, { pageSeq: claimed.pageSeq, jobKey: claimed.nextJobKey });
+    await enqueueWithRetry(
+      () => enqueue(runToken, claimed.waitMs, { pageSeq: claimed.pageSeq, jobKey: claimed.nextJobKey }),
+      logger,
+    );
     return { status: 'waiting', waitMs: claimed.waitMs };
   }
 
@@ -175,7 +186,17 @@ export const runHistoryImportStep = async (
     return { status: 'idle' };
   }
 
+  if (!Array.isArray(claimed.chats)) {
+    // A bridge from before pages held several chats: importing from it would fail on every page.
+    logger.error('The WhatsApp bridge is older than this app: update and restart it to import history');
+    await bridgePost('/history/imports/release', { leaseId: claimed.leaseId, failed: false, nextRunInMs: 0 }).catch(
+      () => undefined,
+    );
+    return { status: 'idle' };
+  }
+
   const page = claimed;
+  const startedAt = Date.now();
   const counter = { requests: 0 };
   const countedClient = countingClient(client, counter);
   let step: ChainStep;
@@ -184,22 +205,18 @@ export const runHistoryImportStep = async (
   try {
     const imported = await importPage(countedClient, page);
 
-    if (imported.media.length > 0) {
-      // Files upload in their own jobs, so the chain never waits behind them.
-      await enqueueMedia(imported.media).catch(async (error: unknown) => {
-        logger.warn('Could not queue media imports, importing them now', { error: String(error) });
-        await attachMedia(countedClient, imported.media, Date.now() + INLINE_MEDIA_TIME_BUDGET_MS);
-      });
-    }
+    // Files wait in the bridge's media queue, so the chain never waits behind them.
+    await queueFiles(imported.media);
 
-    // The next page follows at once; the bridge makes it wait if the budget is spent.
-    const nextRunInMs = 0;
     step = await bridgePost<ChainStep>('/history/imports/complete', {
       leaseId: page.leaseId,
       imported: imported.importedByChat,
-      nextRunInMs,
+      nextRunInMs: 0,
       requests: counter.requests,
+      elapsedMs: Date.now() - startedAt,
     });
+    // The bridge spaces the pages to fit Twenty's job and API limits.
+    const nextRunInMs = step.nextRunInMs ?? 0;
 
     logger.info('Imported history page', {
       chats: page.chats.length,
@@ -229,14 +246,10 @@ export const runHistoryImportStep = async (
   }
 
   if (result.remaining > 0) {
-    // If this fails, the bridge replaces the chain once the scheduled run is overdue.
+    // If this keeps failing, the bridge replaces the chain once the scheduled run is overdue.
     const position =
       step.pageSeq !== undefined && step.nextJobKey ? { pageSeq: step.pageSeq, jobKey: step.nextJobKey } : undefined;
-    await enqueue(runToken, result.nextRunInMs, position).catch((error: unknown) =>
-      logger.error('Could not schedule the next history page', {
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
+    await enqueueWithRetry(() => enqueue(runToken, result.nextRunInMs, position), logger);
   }
 
   return result;

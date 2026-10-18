@@ -149,7 +149,7 @@ test('when Twenty rate limits, acknowledges nothing and waits as long as Twenty 
   assert.equal(released[0].completed, false);
 });
 
-test('imports a whole batch with media, handing the files to media jobs', async () => {
+test('imports a whole batch with media, handing the files to the bridge media queue', async () => {
   const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: [person(1)] });
   const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
   const events = range(30).map((index) => event(index, chatId(1), index % 3 ? {} : { media }));
@@ -158,7 +158,7 @@ test('imports a whole batch with media, handing the files to media jobs', async 
 
   const result = await syncMessages(silentLogger, {
     client: twenty.client,
-    enqueueMedia: async (items) => queued.push(...items),
+    queueFiles: async (items) => queued.push(...items),
   });
 
   assert.equal(result.imported, 30, 'media no longer cuts the batch short');
@@ -195,4 +195,21 @@ test('reports the requests a batch made, so the bridge can correct its estimate'
   await syncMessages(silentLogger, { client: twenty.client });
 
   assert.equal(released[0].requests, twenty.requests.length);
+});
+
+test('keeps the events queued when their files cannot be handed to the media queue', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: [person(1)] });
+  const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
+  const { acknowledged } = bridgeWith([event(1, chatId(1), { media })]);
+
+  await assert.rejects(
+    syncMessages(silentLogger, {
+      client: twenty.client,
+      queueFiles: async () => {
+        throw new Error('WhatsApp bridge is unavailable');
+      },
+    }),
+  );
+
+  assert.deepEqual(acknowledged, []);
 });

@@ -24,7 +24,7 @@ import { ApiBudget } from './api-budget.js';
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { HistoryImportQueue } from './history-import-queue.js';
-import { MediaLeases } from './media-leases.js';
+import { MediaQueue } from './media-queue.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
 import {
   isDirectChatId,
@@ -48,14 +48,19 @@ const baileysLogger = pino({ level: process.env.WHATSAPP_LOG_LEVEL ?? 'warn', ba
 
 // What the bridge asks Twenty to do: import queued events, refresh conversation names, or start a
 // history import job chain with this run token.
-export type BridgeSignal = { events?: boolean; names?: boolean; historyRunToken?: string };
+export type BridgeSignal = { events?: boolean; names?: boolean; historyRunToken?: string; mediaRunTokens?: string[] };
 
 // Name changes arrive in bursts during a history sync; Twenty refreshes names once per burst.
 const NAMES_SIGNAL_DELAY_MS = 60_000;
 // Beyond this many changed chats, Twenty compares every conversation instead of a list.
 const MAX_TRACKED_NAME_CHANGES = 1_000;
 
+// Raised when the app and bridge stop understanding each other; the app refuses to import history
+// from an older bridge instead of stalling on it.
+export const BRIDGE_API_VERSION = 2;
+
 export type ConnectionStatus = {
+  apiVersion?: number;
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
   qrDataUrl?: string;
   qrExpiresAt?: number;
@@ -126,7 +131,7 @@ export class WhatsAppConnection {
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
   readonly historyImports: HistoryImportQueue;
-  readonly mediaLeases: MediaLeases;
+  readonly mediaQueue: MediaQueue;
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
   private readonly pendingGroupNameLookups = new Set<string>();
   private readonly groupNameLookupQueue: string[] = [];
@@ -182,7 +187,11 @@ export class WhatsAppConnection {
         budget,
       },
     );
-    this.mediaLeases = new MediaLeases(undefined, undefined, budget);
+    this.mediaQueue = new MediaQueue(join(directory, 'media-queue'), encryptionKey, {
+      budget,
+      onChainsRestarted: (mediaRunTokens) => this.onSignal({ mediaRunTokens }),
+      canRun: () => this.status.state === 'connected',
+    });
   }
 
   async recordHistory(
@@ -982,13 +991,17 @@ export class WhatsAppConnection {
 
   getStatus(): ConnectionStatus {
     if (this.status.qrExpiresAt && this.status.qrExpiresAt < Date.now()) {
-      return { state: 'pairing' };
+      return { state: 'pairing', apiVersion: BRIDGE_API_VERSION };
     }
 
     const phoneNumber = this.status.phoneNumber ? `+${this.status.phoneNumber.replace(/\D/g, '')}` : undefined;
-    return phoneNumber && this.twentyAccount?.phoneNumber === phoneNumber
-      ? { ...this.status, twentyAccountId: this.twentyAccount.accountId }
-      : this.status;
+    return {
+      ...this.status,
+      apiVersion: BRIDGE_API_VERSION,
+      ...(phoneNumber && this.twentyAccount?.phoneNumber === phoneNumber
+        ? { twentyAccountId: this.twentyAccount.accountId }
+        : {}),
+    };
   }
 
   async resume(): Promise<void> {
@@ -1133,6 +1146,7 @@ export class WhatsAppConnection {
         };
         if ((await this.events.list(1)).length > 0) this.signalEvents();
         void this.historyImports.recoverStalled();
+        void this.mediaQueue.recoverStalled();
         this.scheduleAddressBookSync(0);
         void socket
           .groupFetchAllParticipating()

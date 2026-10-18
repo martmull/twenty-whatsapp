@@ -57,14 +57,19 @@ const bridgeWith = (claim: unknown, step: Record<string, unknown> = { remaining:
   return calls.calls;
 };
 
-const run = async (twenty: ReturnType<typeof createFakeTwenty>, media: unknown[] = []) => {
+const run = async (
+  twenty: ReturnType<typeof createFakeTwenty>,
+  media: unknown[] = [],
+  isCancelled = async (_jobId: string) => false,
+) => {
   const scheduled: { runToken: string; delayMs: number; position?: ChainPosition }[] = [];
   const result = await runHistoryImportStep({ runToken: RUN_TOKEN, pageSeq: 4 }, silentLogger, {
     client: twenty.client,
     enqueue: async (runToken, delayMs, position) => {
       scheduled.push({ runToken, delayMs, position });
     },
-    enqueueMedia: async (items) => media.push(...items),
+    queueFiles: async (items) => media.push(...items),
+    isCancelled,
   });
   return { result, scheduled };
 };
@@ -148,7 +153,7 @@ test('writes the summaries of finished chats in one query and one upsert, never 
   assert.deepEqual(scheduled, [], 'the chain ends with its last page');
 });
 
-test('hands the files of the page to media jobs', async () => {
+test('hands the files of the page to the bridge media queue', async () => {
   const twenty = createFakeTwenty();
   const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
   bridgeWith(
@@ -227,4 +232,50 @@ test('reports a rate limit to the bridge, so other background jobs hold off too'
   await run(twenty);
 
   assert.deepEqual(calls.find((call) => call.path === '/budget/penalty')?.body, { retryAfterMs: 9_000 });
+});
+
+test('a job of a cancelled import stops before claiming anything', async () => {
+  const twenty = createFakeTwenty();
+  const calls = bridgeWith(page());
+  const checked: string[] = [];
+
+  const { result, scheduled } = await run(twenty, [], async (jobId) => {
+    checked.push(jobId);
+    return true;
+  });
+
+  assert.deepEqual(result, { status: 'idle' });
+  assert.deepEqual(checked, [historyJobId(RUN_TOKEN, '4')]);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(scheduled, []);
+});
+
+test('stops, with a clear error, on a page from a bridge older than the app', async () => {
+  const twenty = createFakeTwenty();
+  const calls = bridgeWith({ leaseId: LEASE_ID, chatId: CHAT_ID, conversationId: CONVERSATION_ID, messages: [] });
+
+  const { result, scheduled } = await run(twenty);
+
+  assert.deepEqual(result, { status: 'idle' });
+  assert.deepEqual(twenty.requests, []);
+  assert.equal(calls.find((call) => call.path === '/history/imports/release')?.body.failed, false);
+  assert.deepEqual(scheduled, []);
+});
+
+test('retries queueing the next page before leaving it to the bridge', async () => {
+  const twenty = createFakeTwenty();
+  bridgeWith(page());
+  let attempts = 0;
+
+  await runHistoryImportStep({ runToken: RUN_TOKEN, pageSeq: 4 }, silentLogger, {
+    client: twenty.client,
+    queueFiles: async () => undefined,
+    isCancelled: async () => false,
+    enqueue: async () => {
+      attempts += 1;
+      if (attempts < 2) throw new Error('Application job enqueue limit reached');
+    },
+  });
+
+  assert.equal(attempts, 2);
 });

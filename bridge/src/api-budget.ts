@@ -61,6 +61,17 @@ export class ApiBudget {
     return { granted: false, waitMs: Math.ceil(servedAt - now) };
   }
 
+  // How long until `take` would grant this cost, without taking it: lets a job schedule its next step
+  // for when the budget allows it instead of being turned away and queued again.
+  waitMs(requestedCost: number, priority: BudgetPriority): number {
+    const now = this.refill();
+    const cost = Math.min(Math.max(0, requestedCost), this.perMinute);
+    const floor = priority === 'live' ? -this.perMinute * LIVE_DEBT_SHARE : this.perMinute * LIVE_RESERVE_SHARE;
+    const refilledAt = now + Math.max(0, floor + cost - this.tokens) * this.msPerToken;
+    const readyAt = Math.max(this.blockedUntil, refilledAt, priority === 'background' ? this.queuedUntil : 0);
+    return Math.ceil(Math.max(0, readyAt - now));
+  }
+
   // Corrects a claim's estimate with the requests the job made; the difference may leave a debt.
   adjust(extraRequests: number): void {
     this.refill();

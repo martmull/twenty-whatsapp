@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 import { ApiBudget, DEFAULT_BACKGROUND_REQUESTS_PER_MINUTE } from './api-budget.js';
 import { MAX_SYNC_EVENTS, WhatsAppConnection, type BridgeSignal } from './connection.js';
+import type { MediaSource } from './media-queue.js';
 import { isGroupChatId, isSupportedChatId } from './message-event.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
@@ -30,6 +31,9 @@ const mergeSignals = (older: BridgeSignal, newer: BridgeSignal): BridgeSignal =>
   ...(older.names || newer.names ? { names: true } : {}),
   ...((newer.historyRunToken ?? older.historyRunToken)
     ? { historyRunToken: newer.historyRunToken ?? older.historyRunToken }
+    : {}),
+  ...(older.mediaRunTokens || newer.mediaRunTokens
+    ? { mediaRunTokens: [...new Set([...(older.mediaRunTokens ?? []), ...(newer.mediaRunTokens ?? [])])] }
     : {}),
 });
 
@@ -102,8 +106,8 @@ const readBuffer = async (request: IncomingMessage, maxBytes: number): Promise<B
 };
 
 const readJson = async (request: IncomingMessage): Promise<Record<string, unknown>> => {
-  // A sync acknowledges up to 200 event IDs (about 14 KB) in one call.
-  const raw = (await readBuffer(request, 65_536)).toString('utf8');
+  // A sync queues the files of up to 200 messages in one call, with names of up to 255 characters.
+  const raw = (await readBuffer(request, 262_144)).toString('utf8');
   const value: unknown = raw ? JSON.parse(raw) : {};
 
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -129,6 +133,14 @@ const isPage = (offset: unknown, limit: unknown, maxLimit: number) =>
 const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d-]{36}$/i.test(value);
 const isCount = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 10_000;
 const isOptionalCount = (value: unknown) => value === undefined || isCount(value);
+const isSequence = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+const isEventId = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{64}$/.test(value);
+const isMediaItem = (item: Record<string, unknown>) =>
+  isUuid(item?.messageId) &&
+  isEventId(item.eventId) &&
+  typeof item.fileName === 'string' &&
+  item.fileName.length > 0 &&
+  item.fileName.length <= 255;
 const isImportedByChat = (value: unknown) =>
   Boolean(value) &&
   typeof value === 'object' &&
@@ -244,10 +256,7 @@ const jsonRoutes: Record<string, Route> = {
   },
   'POST /history/imports/claim': (body) => {
     requireConnected();
-    check(
-      isUuid(body.runToken) &&
-        (body.pageSeq === undefined || (Number.isSafeInteger(body.pageSeq) && (body.pageSeq as number) >= 0)),
-    );
+    check(isUuid(body.runToken) && (body.pageSeq === undefined || isSequence(body.pageSeq)));
     return connection.historyImports.claim(body.runToken as string, body.pageSeq as number | undefined);
   },
   'POST /history/imports/complete': (body) => {
@@ -255,13 +264,15 @@ const jsonRoutes: Record<string, Route> = {
       isUuid(body.leaseId) &&
         isImportedByChat(body.imported) &&
         isDelay(body.nextRunInMs) &&
-        isOptionalCount(body.requests),
+        isOptionalCount(body.requests) &&
+        (body.elapsedMs === undefined || isDelay(body.elapsedMs)),
     );
     return connection.historyImports.complete(
       body.leaseId as string,
       body.imported as Record<string, number>,
       body.nextRunInMs as number,
       body.requests as number | undefined,
+      body.elapsedMs as number | undefined,
     );
   },
   'POST /history/imports/release': (body) => {
@@ -279,11 +290,57 @@ const jsonRoutes: Record<string, Route> = {
     );
   },
   'POST /history/imports/progress': () => connection.historyImports.progress(),
-  'POST /media/claim': () => connection.mediaLeases.claim(),
-  'POST /media/release': (body) => {
-    check(isUuid(body.leaseId) && isOptionalCount(body.requests));
-    return connection.mediaLeases.release(body.leaseId as string, body.requests as number | undefined);
+  'POST /media/queue': (body) => {
+    check(
+      Array.isArray(body.items) &&
+        body.items.length <= MAX_SYNC_EVENTS &&
+        body.items.every(isMediaItem) &&
+        (body.source === 'live' || body.source === 'history'),
+    );
+    return connection.mediaQueue.queue(
+      (body.items as { messageId: string; eventId: string; fileName: string }[]).map(
+        ({ messageId, eventId, fileName }) => ({ messageId, eventId, fileName, source: body.source as MediaSource }),
+      ),
+    );
   },
+  'POST /media/claim': (body) => {
+    check(isUuid(body.runToken) && (body.seq === undefined || isSequence(body.seq)));
+    return connection.mediaQueue.claim(body.runToken as string, body.seq as number | undefined);
+  },
+  'POST /media/complete': (body) => {
+    check(
+      isUuid(body.leaseId) &&
+        Array.isArray(body.processed) &&
+        body.processed.length <= 200 &&
+        body.processed.every(isEventId) &&
+        isOptionalCount(body.requests) &&
+        (body.elapsedMs === undefined || isDelay(body.elapsedMs)),
+    );
+    return connection.mediaQueue.complete(
+      body.leaseId as string,
+      body.processed as string[],
+      body.requests as number | undefined,
+      body.elapsedMs as number | undefined,
+    );
+  },
+  'POST /media/release': (body) => {
+    check(
+      isUuid(body.leaseId) &&
+        typeof body.failed === 'boolean' &&
+        isDelay(body.nextRunInMs) &&
+        isOptionalCount(body.requests),
+    );
+    return connection.mediaQueue.release(
+      body.leaseId as string,
+      body.failed as boolean,
+      body.nextRunInMs as number,
+      body.requests as number | undefined,
+    );
+  },
+  'POST /history/imports/cancel': async () => ({
+    ...(await connection.historyImports.cancel()),
+    media: await connection.mediaQueue.cancel('history'),
+  }),
   'POST /address-book/sync': () => {
     requireConnected();
     return connection.syncAddressBook();

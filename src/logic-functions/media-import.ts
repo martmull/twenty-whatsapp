@@ -1,91 +1,71 @@
-import { createHash } from 'node:crypto';
-
 import type { CoreApiClient } from 'twenty-client-sdk/core';
 import { enqueueJobs } from 'twenty-sdk/logic-function';
 
 import { MEDIA_IMPORT_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
 import { bridgePost, reportRateLimit } from 'src/logic-functions/bridge-request';
+import { enqueueWithRetry } from 'src/logic-functions/job-chain';
 import { applicationClient } from 'src/logic-functions/message-data';
 import { uploadMedia, type MediaItem, type MediaWrite } from 'src/logic-functions/message-media';
 import { countingClient, rateLimitRetryAfterMs, upsertMessages } from 'src/logic-functions/record-writes';
 import type { Logger } from 'src/logic-functions/utils/logger';
 import { isEventId, isUuid } from 'src/logic-functions/utils/validators';
 
-export const MEDIA_ITEMS_PER_JOB = 5;
-const MAX_JOBS_PER_ENQUEUE = 200;
-// Platform retries for a transient failure; their backoff starts at one second.
-const MEDIA_JOB_RETRY_LIMIT = 3;
 // Leaves room within the job timeout for the last upload and the attach request.
 const UPLOAD_TIME_BUDGET_MS = 200_000;
-const BRIDGE_RETRY_MIN_DELAY_MS = 30_000;
-const BRIDGE_RETRY_MAX_DELAY_MS = 15 * 60_000;
-// Times the bridge may be unreachable before the files are given up on. Waiting for a free slot or
-// for budget does not count.
-const MAX_BRIDGE_FAILURES = 8;
+const FAILURE_RETRY_DELAY_MS = 30_000;
 
-export type MediaImportPayload = {
-  items?: MediaItem[];
-  // Files uploaded by an earlier attempt whose attach request failed: only the attach is retried.
-  uploaded?: MediaWrite[];
-  // Names each retry's job; failures counts the retries caused by an unreachable bridge.
-  attempt?: number;
-  failures?: number;
-};
+export type MediaSource = 'live' | 'history';
 
-type EnqueueMedia = (payload: MediaImportPayload, delayMs: number, jobId: string) => Promise<void>;
+// A file uploaded by an earlier attempt whose attach request failed: only the attach is retried.
+type UploadedFile = { eventId: string; write: MediaWrite };
 
-// The same files always get the same job ID, so history and live sync never queue them twice.
-export const mediaJobId = ({ items = [], uploaded = [], attempt = 0 }: MediaImportPayload): string => {
-  const key = createHash('sha256')
-    .update([...items.map((item) => item.eventId), ...uploaded.map((write) => write.id)].sort().join(','))
-    .digest('hex')
-    .slice(0, 40);
-  return attempt > 0 ? `media.${key}.${attempt}` : `media.${key}`;
-};
+// `retries` counts the rate-limited attempts of one step, so each retry job gets its own ID.
+export type MediaImportPayload = { runToken?: unknown; seq?: unknown; uploaded?: UploadedFile[]; retries?: number };
+
+type ChainStep = { remaining: number; seq?: number; nextJobKey?: string; nextRunInMs?: number };
+type MediaClaim =
+  | { leaseId: string; seq: number; items: MediaItem[] }
+  | { waitMs: number; seq: number; nextJobKey: string }
+  | { stale: true }
+  | { done: true };
+
+type EnqueueMedia = (payload: MediaImportPayload, delayMs: number, jobId?: string) => Promise<void>;
+
+export const mediaJobId = (runToken: string, jobKey: string) => `media.${runToken}.${jobKey}`;
 
 const enqueueMediaJob: EnqueueMedia = async (payload, delayMs, jobId) => {
   await enqueueJobs({
     logicFunctionUniversalIdentifier: MEDIA_IMPORT_JOB_UNIVERSAL_IDENTIFIER,
-    jobs: [{ payload, jobId }],
+    jobs: [{ payload, ...(jobId ? { jobId } : {}) }],
     delayMs,
-    retryLimit: MEDIA_JOB_RETRY_LIMIT,
   });
 };
 
-// A few files per job, each job named after its files.
-export const mediaImportJobs = (items: MediaItem[]) => {
-  const jobs: { payload: MediaImportPayload; jobId: string }[] = [];
-  for (let index = 0; index < items.length; index += MEDIA_ITEMS_PER_JOB) {
-    const group = items.slice(index, index + MEDIA_ITEMS_PER_JOB);
-    jobs.push({ payload: { items: group }, jobId: mediaJobId({ items: group }) });
-  }
-  return jobs;
+export const startMediaChains = async (runTokens: string[]): Promise<void> => {
+  if (runTokens.length === 0) return;
+  await enqueueJobs({
+    logicFunctionUniversalIdentifier: MEDIA_IMPORT_JOB_UNIVERSAL_IDENTIFIER,
+    jobs: runTokens.map((runToken) => ({ payload: { runToken, seq: 0 }, jobId: mediaJobId(runToken, '0') })),
+  });
 };
 
-// Queues the files of imported messages in as few enqueue calls as possible.
-export const enqueueMediaImports = async (items: MediaItem[]): Promise<number> => {
-  const jobs = mediaImportJobs(items);
-
-  for (let index = 0; index < jobs.length; index += MAX_JOBS_PER_ENQUEUE) {
-    await enqueueJobs({
-      logicFunctionUniversalIdentifier: MEDIA_IMPORT_JOB_UNIVERSAL_IDENTIFIER,
-      jobs: jobs.slice(index, index + MAX_JOBS_PER_ENQUEUE),
-      retryLimit: MEDIA_JOB_RETRY_LIMIT,
-    });
-  }
-
-  return jobs.length;
+// Hands the files of written messages to the bridge's media queue, which starts the media job chains
+// it needs. Never more than a few jobs, whatever the number of files.
+export const queueMedia = async (
+  items: MediaItem[],
+  source: MediaSource,
+  start: (runTokens: string[]) => Promise<void> = startMediaChains,
+): Promise<void> => {
+  if (items.length === 0) return;
+  const { runTokens = [] } = await bridgePost<{ runTokens?: string[] }>('/media/queue', { items, source });
+  await start(runTokens.filter(isUuid));
 };
 
-const isMediaItem = (item: MediaItem) =>
-  isUuid(item?.messageId) &&
-  isEventId(item.eventId) &&
-  typeof item.fileName === 'string' &&
-  item.fileName.length > 0 &&
-  item.fileName.length <= 255;
-
-const isMediaWrite = (write: MediaWrite) =>
-  isUuid(write?.id) && Array.isArray(write.media) && write.media.every((file) => isUuid(file?.fileId));
+const isUploadedFile = (file: UploadedFile) =>
+  isEventId(file?.eventId) &&
+  isUuid(file.write?.id) &&
+  Array.isArray(file.write.media) &&
+  file.write.media.every((media) => isUuid(media?.fileId));
 
 type MediaImportDependencies = {
   client?: CoreApiClient;
@@ -94,12 +74,14 @@ type MediaImportDependencies = {
 };
 
 export type MediaImportResult =
-  | { status: 'imported'; attached: number; requeued: number }
-  | { status: 'requeued'; delayMs: number }
-  | { status: 'dropped' };
+  | { status: 'idle' }
+  | { status: 'waiting'; delayMs: number }
+  | { status: 'imported'; attached: number; remaining: number }
+  | { status: 'failed'; delayMs: number };
 
-// Imports one group of files while holding one of the bridge's media leases, which limit how many
-// downloads run at once. Throws on unexpected errors so the platform retries the job.
+// One step of a media chain: claims a few files from the bridge, uploads them, attaches them in one
+// upsert, then queues the chain's next step while files remain. Never throws: a failure gives the
+// files back and queues the next step, so the chain survives it.
 export const runMediaImport = async (
   payload: MediaImportPayload,
   logger: Logger,
@@ -109,61 +91,100 @@ export const runMediaImport = async (
     upload = uploadMedia,
   }: MediaImportDependencies = {},
 ): Promise<MediaImportResult> => {
+  const runToken = payload?.runToken;
+  const seq = Number.isSafeInteger(payload?.seq) ? (payload.seq as number) : undefined;
+  if (!isUuid(runToken)) return { status: 'idle' };
+
+  const next = (step: ChainStep, delayMs: number, extra: Partial<MediaImportPayload> = {}) =>
+    step.remaining > 0 && step.seq !== undefined && step.nextJobKey
+      ? enqueueWithRetry(
+          () =>
+            enqueue({ runToken, seq: step.seq, ...extra }, delayMs, mediaJobId(runToken, step.nextJobKey as string)),
+          logger,
+        )
+      : Promise.resolve();
+
+  const claim = await bridgePost<MediaClaim>('/media/claim', {
+    runToken,
+    ...(seq !== undefined ? { seq } : {}),
+  }).catch((error: unknown) => {
+    // The bridge replaces this chain once it is reachable again.
+    logger.warn('Could not reach the bridge for media', { error: String(error) });
+    return undefined;
+  });
+
+  if (!claim || 'stale' in claim || 'done' in claim) return { status: 'idle' };
+
+  if ('waitMs' in claim) {
+    await next({ remaining: 1, seq: claim.seq, nextJobKey: claim.nextJobKey }, claim.waitMs, {
+      uploaded: payload.uploaded,
+    });
+    return { status: 'waiting', delayMs: claim.waitMs };
+  }
+
+  const startedAt = Date.now();
   const counter = { requests: 0 };
   const client = countingClient(baseClient, counter);
-  const items = (payload?.items ?? []).filter(isMediaItem);
-  const uploaded = (payload?.uploaded ?? []).filter(isMediaWrite);
-  const attempt = payload?.attempt ?? 0;
-  const failures = payload?.failures ?? 0;
-  const requeue = async (delayMs: number, next: MediaImportPayload = { items, uploaded }, failed = false) => {
-    if (failed && failures + 1 >= MAX_BRIDGE_FAILURES) {
-      logger.warn('Giving up on media files', { count: items.length + uploaded.length });
-      return { status: 'dropped' as const };
-    }
-    const retry = { ...next, attempt: attempt + 1, failures: failed ? failures + 1 : failures };
-    await enqueue(retry, delayMs, mediaJobId(retry));
-    return { status: 'requeued' as const, delayMs };
-  };
-
-  if (items.length === 0 && uploaded.length === 0) {
-    return { status: 'imported', attached: 0, requeued: 0 };
-  }
-
-  const claim = await bridgePost<{ leaseId?: string; waitMs?: number }>('/media/claim').catch(() => undefined);
-
-  if (!claim) {
-    return requeue(Math.min(BRIDGE_RETRY_MIN_DELAY_MS * 2 ** failures, BRIDGE_RETRY_MAX_DELAY_MS), undefined, true);
-  }
-  if (!claim.leaseId) {
-    return requeue(claim.waitMs ?? BRIDGE_RETRY_MIN_DELAY_MS);
-  }
-
-  let writes: MediaWrite[] = uploaded;
-  // Until the uploads report progress, every file is still to do.
-  let rest: MediaItem[] = items;
+  const uploaded = (payload.uploaded ?? []).filter(isUploadedFile);
+  const uploadedIds = new Set(uploaded.map((file) => file.eventId));
+  const files: UploadedFile[] = [...uploaded];
 
   try {
-    const result = await upload(items, Date.now() + UPLOAD_TIME_BUDGET_MS);
-    writes = [...uploaded, ...result.writes];
-    rest = items.slice(result.processed);
-
-    if (writes.length > 0) {
-      await upsertMessages(client, writes);
+    const toUpload = claim.items.filter((item) => !uploadedIds.has(item.eventId));
+    const result = await upload(toUpload, Date.now() + UPLOAD_TIME_BUDGET_MS);
+    const processed = toUpload.slice(0, result.processed);
+    const writeById = new Map(result.writes.map((write) => [write.id, write]));
+    for (const item of processed) {
+      const write = writeById.get(item.messageId);
+      if (write) files.push({ eventId: item.eventId, write });
     }
+
+    if (files.length > 0) {
+      await upsertMessages(
+        client,
+        files.map((file) => file.write),
+      );
+    }
+
+    // Processed files include those WhatsApp no longer serves: the message keeps its kind, no file.
+    const step = await bridgePost<ChainStep>('/media/complete', {
+      leaseId: claim.leaseId,
+      processed: [...new Set([...uploaded.map((file) => file.eventId), ...processed.map((item) => item.eventId)])],
+      requests: counter.requests,
+      elapsedMs: Date.now() - startedAt,
+    });
+    // The bridge spaces the steps to fit Twenty's job and API limits.
+    await next(step, step.nextRunInMs ?? 0);
+    logger.info('Imported media', { attached: files.length, remaining: step.remaining });
+    return { status: 'imported', attached: files.length, remaining: step.remaining };
   } catch (error) {
     const retryAfterMs = rateLimitRetryAfterMs(error);
-    if (retryAfterMs === undefined) throw error;
-    logger.warn('Twenty rate limited the media attach', { retryAfterMs });
-    await reportRateLimit(retryAfterMs);
-    return requeue(retryAfterMs, { items: rest, uploaded: writes });
-  } finally {
-    await bridgePost('/media/release', { leaseId: claim.leaseId, requests: counter.requests }).catch(() => undefined);
-  }
 
-  if (rest.length > 0) {
-    await enqueue({ items: rest }, 0, mediaJobId({ items: rest }));
-  }
+    if (retryAfterMs !== undefined) {
+      // The lease is kept: the retry gets the same files back and only attaches what was uploaded.
+      logger.warn('Twenty rate limited the media attach', { retryAfterMs });
+      await reportRateLimit(retryAfterMs);
+      const retries = (payload.retries ?? 0) + 1;
+      await enqueueWithRetry(
+        () =>
+          enqueue(
+            { runToken, seq: claim.seq, uploaded: files, retries },
+            retryAfterMs,
+            mediaJobId(runToken, `${claim.seq}-r${retries}`),
+          ),
+        logger,
+      );
+      return { status: 'failed', delayMs: retryAfterMs };
+    }
 
-  logger.info('Imported media', { attached: writes.length, requeued: rest.length });
-  return { status: 'imported', attached: writes.length, requeued: rest.length };
+    logger.warn('Could not import media', { error: error instanceof Error ? error.message : String(error) });
+    const step = await bridgePost<ChainStep>('/media/release', {
+      leaseId: claim.leaseId,
+      failed: true,
+      nextRunInMs: FAILURE_RETRY_DELAY_MS,
+      requests: counter.requests,
+    }).catch(() => undefined);
+    if (step) await next(step, FAILURE_RETRY_DELAY_MS);
+    return { status: 'failed', delayMs: FAILURE_RETRY_DELAY_MS };
+  }
 };

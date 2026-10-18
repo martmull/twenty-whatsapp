@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
-import { mediaImportJobs, mediaJobId, runMediaImport } from '../src/logic-functions/media-import';
+import { mediaJobId, queueMedia, runMediaImport } from '../src/logic-functions/media-import';
 import { createFakeTwenty, mockBridge } from './fake-twenty';
 
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
+const RUN_TOKEN = '66666666-6666-4666-8666-666666666666';
 const LEASE_ID = '55555555-5555-4555-8555-555555555555';
 let restore: () => void = () => undefined;
 
@@ -15,146 +16,148 @@ const item = (index: number) => ({
   eventId: index.toString(16).padStart(64, '0'),
   fileName: `photo-${index}.jpg`,
 });
+type Item = ReturnType<typeof item>;
 const fileId = (index: number) => `11111111-1111-4111-8111-${String(index).padStart(12, '0')}`;
 const range = (count: number) => Array.from({ length: count }, (_, index) => index + 1);
-
-const bridgeWith = (claim: Record<string, unknown> = { leaseId: LEASE_ID }) => {
-  const released: unknown[] = [];
-  const bridge = mockBridge({
-    '/media/claim': () => claim,
-    '/media/release': (body) => released.push(body.leaseId),
-  });
-  restore = bridge.restore;
-  return { released };
-};
-
 const messages = (count: number) =>
   range(count).map((index) => ({ id: item(index).messageId, externalId: item(index).eventId, mediaKind: 'IMAGE' }));
 
-test('groups files five per job, with the same job ID for the same files in any order', () => {
-  const items = range(12).map(item);
-  const jobs = mediaImportJobs(items);
-
-  assert.deepEqual(
-    jobs.map((job) => job.payload.items?.length),
-    [5, 5, 2],
-  );
-  assert.equal(jobs[0].jobId, mediaJobId({ items: [...items.slice(0, 5)].reverse() }));
-  assert.match(jobs[0].jobId, /^media\.[a-f\d]{40}$/);
-  assert.notEqual(jobs[0].jobId, jobs[1].jobId);
-});
-
-test('uploads a group of files and attaches them in one request, skipping expired media', async () => {
-  const twenty = createFakeTwenty({ whatsappMessages: messages(5) });
-  const { released } = bridgeWith();
-
-  const result = await runMediaImport({ items: range(5).map(item) }, silentLogger, {
-    client: twenty.client,
-    upload: async (items) => ({
+// Uploads every file but the ones listed as expired on WhatsApp.
+const uploader =
+  (expired: number[] = [], uploads: string[] = []) =>
+  async (items: Item[]) => {
+    uploads.push(...items.map((entry) => entry.eventId));
+    return {
       writes: items
-        .slice(1)
+        .filter((entry) => !expired.some((index) => item(index).eventId === entry.eventId))
         .map((entry, index) => ({ id: entry.messageId, media: [{ fileId: fileId(index), label: entry.fileName }] })),
       processed: items.length,
-    }),
-  });
-
-  assert.deepEqual(result, { status: 'imported', attached: 4, requeued: 0 });
-  assert.deepEqual(twenty.requests, ['mutation createWhatsappMessages']);
-  assert.equal(twenty.store.whatsappMessages.filter((message) => message.media).length, 4);
-  assert.deepEqual(released, [LEASE_ID]);
-});
-
-test('waits for a free media slot without touching Twenty', async () => {
-  const twenty = createFakeTwenty();
-  bridgeWith({ waitMs: 10_000 });
-  const queued: { payload: unknown; delayMs: number; jobId: string }[] = [];
-  const payload = { items: [item(1)] };
-
-  const result = await runMediaImport(payload, silentLogger, {
-    client: twenty.client,
-    enqueue: async (next, delayMs, jobId) => {
-      queued.push({ payload: next, delayMs, jobId });
-    },
-  });
-
-  assert.deepEqual(result, { status: 'requeued', delayMs: 10_000 });
-  assert.deepEqual(twenty.requests, []);
-  assert.equal(queued[0].jobId, `${mediaJobId(payload)}.1`);
-});
-
-test('after a rate limit, retries only the attach with the files already uploaded', async () => {
-  const twenty = createFakeTwenty({ whatsappMessages: messages(2) });
-  twenty.failNextRequest({ errors: [{ extensions: { code: 'RATE_LIMITED', retryAfterMs: 3_000 } }] });
-  const { released } = bridgeWith();
-  const queued: { payload: { items?: unknown[]; uploaded?: unknown[]; attempt?: number }; delayMs: number }[] = [];
-  let uploads = 0;
-  const dependencies = {
-    client: twenty.client,
-    enqueue: async (payload: (typeof queued)[number]['payload'], delayMs: number) => {
-      queued.push({ payload, delayMs });
-    },
-    upload: async (items: ReturnType<typeof item>[]) => {
-      uploads += items.length;
-      return {
-        writes: items.map((entry, index) => ({ id: entry.messageId, media: [{ fileId: fileId(index), label: 'a' }] })),
-        processed: items.length,
-      };
-    },
+    };
   };
 
-  const result = await runMediaImport({ items: [item(1), item(2)] }, silentLogger, dependencies);
+const bridgeWith = (claim: unknown, step: Record<string, unknown> = { remaining: 3, seq: 2, nextJobKey: '2' }) => {
+  const bridge = mockBridge({
+    '/media/claim': () => claim,
+    '/media/complete': () => step,
+    '/media/release': () => step,
+    '/budget/penalty': () => ({ penalized: true }),
+  });
+  restore = bridge.restore;
+  return bridge.calls;
+};
 
-  assert.deepEqual(result, { status: 'requeued', delayMs: 3_000 });
-  assert.deepEqual(released, [LEASE_ID]);
-  assert.deepEqual(queued[0].payload.items, []);
-  assert.equal(queued[0].payload.uploaded?.length, 2);
+const run = async (
+  twenty: ReturnType<typeof createFakeTwenty>,
+  payload: Record<string, unknown>,
+  upload = uploader(),
+) => {
+  const queued: { payload: Record<string, unknown>; delayMs: number; jobId?: string }[] = [];
+  const result = await runMediaImport(payload as never, silentLogger, {
+    client: twenty.client,
+    enqueue: async (next, delayMs, jobId) => {
+      queued.push({ payload: next as Record<string, unknown>, delayMs, jobId });
+    },
+    upload: upload as never,
+  });
+  return { result, queued };
+};
 
-  await runMediaImport(queued[0].payload as never, silentLogger, dependencies);
-  assert.equal(uploads, 2, 'files are not uploaded twice');
+test('hands files to the bridge queue and starts only the chains it asks for', async () => {
+  const started: string[][] = [];
+  const bridge = mockBridge({
+    '/media/queue': (body) => ({ queued: (body.items as unknown[]).length, runTokens: [RUN_TOKEN] }),
+  });
+  restore = bridge.restore;
+
+  await queueMedia(range(40).map(item), 'history', async (tokens) => {
+    started.push(tokens);
+  });
+
+  assert.equal(bridge.calls.length, 1);
+  assert.equal(bridge.calls[0].body.source, 'history');
+  assert.deepEqual(started, [[RUN_TOKEN]], 'one job to start, not one per file');
+});
+
+test('uploads the claimed files, attaches them in one request, then queues the chain’s next step', async () => {
+  const twenty = createFakeTwenty({ whatsappMessages: messages(5) });
+  const calls = bridgeWith({ leaseId: LEASE_ID, seq: 1, items: range(5).map(item) });
+
+  const { result, queued } = await run(twenty, { runToken: RUN_TOKEN, seq: 1 }, uploader([3]));
+
+  assert.deepEqual(result, { status: 'imported', attached: 4, remaining: 3 });
+  assert.deepEqual(twenty.requests, ['mutation createWhatsappMessages']);
+  assert.equal(twenty.store.whatsappMessages.filter((message) => message.media).length, 4);
+  const complete = calls.find((call) => call.path === '/media/complete')?.body;
+  assert.equal((complete?.processed as string[]).length, 5, 'an expired file is done with too');
+  assert.deepEqual(queued, [
+    { payload: { runToken: RUN_TOKEN, seq: 2 }, delayMs: 0, jobId: mediaJobId(RUN_TOKEN, '2') },
+  ]);
+});
+
+test('ends the chain when no files remain', async () => {
+  const twenty = createFakeTwenty({ whatsappMessages: messages(1) });
+  bridgeWith({ leaseId: LEASE_ID, seq: 1, items: [item(1)] }, { remaining: 0 });
+
+  const { queued } = await run(twenty, { runToken: RUN_TOKEN, seq: 1 });
+
+  assert.deepEqual(queued, []);
+});
+
+test('comes back later when the bridge has no budget, without touching Twenty', async () => {
+  const twenty = createFakeTwenty();
+  bridgeWith({ waitMs: 4_000, seq: 1, nextJobKey: '1-1' });
+
+  const { result, queued } = await run(twenty, { runToken: RUN_TOKEN, seq: 1 });
+
+  assert.deepEqual(result, { status: 'waiting', delayMs: 4_000 });
+  assert.deepEqual(twenty.requests, []);
+  assert.equal(queued[0].jobId, mediaJobId(RUN_TOKEN, '1-1'));
+});
+
+test('after a rate limit, keeps its files and only attaches them on the retry', async () => {
+  const twenty = createFakeTwenty({ whatsappMessages: messages(2) });
+  twenty.failNextRequest({ errors: [{ extensions: { code: 'RATE_LIMITED', retryAfterMs: 3_000 } }] });
+  const calls = bridgeWith({ leaseId: LEASE_ID, seq: 1, items: [item(1), item(2)] });
+  const uploads: string[] = [];
+
+  const first = await run(twenty, { runToken: RUN_TOKEN, seq: 1 }, uploader([], uploads));
+
+  assert.deepEqual(first.result, { status: 'failed', delayMs: 3_000 });
+  assert.equal(
+    calls.some((call) => call.path === '/media/release'),
+    false,
+    'the lease is kept for the retry',
+  );
+  assert.deepEqual(calls.find((call) => call.path === '/budget/penalty')?.body, { retryAfterMs: 3_000 });
+  const retry = first.queued[0];
+  assert.equal(retry.jobId, mediaJobId(RUN_TOKEN, '1-r1'));
+
+  await run(twenty, retry.payload, uploader([], uploads));
+  assert.equal(uploads.length, 2, 'files are not uploaded twice');
   assert.equal(twenty.store.whatsappMessages.filter((message) => message.media).length, 2);
 });
 
-test('queues the files it had no time for as a new job', async () => {
-  const twenty = createFakeTwenty({ whatsappMessages: messages(5) });
-  bridgeWith();
-  const queued: { payload: { items?: unknown[] }; jobId: string }[] = [];
+test('gives the files back after a failure and keeps the chain going', async () => {
+  const twenty = createFakeTwenty({ whatsappMessages: messages(1) });
+  twenty.rejectRecords(() => true);
+  const calls = bridgeWith(
+    { leaseId: LEASE_ID, seq: 1, items: [item(1)] },
+    { remaining: 1, seq: 1, nextJobKey: '1-1' },
+  );
 
-  const result = await runMediaImport({ items: range(5).map(item) }, silentLogger, {
-    client: twenty.client,
-    enqueue: async (payload, _delayMs, jobId) => {
-      queued.push({ payload, jobId });
-    },
-    upload: async (items) => ({
-      writes: items.slice(0, 2).map((entry) => ({ id: entry.messageId, media: [{ fileId: fileId(1), label: 'a' }] })),
-      processed: 2,
-    }),
-  });
+  const { result, queued } = await run(twenty, { runToken: RUN_TOKEN, seq: 1 });
 
-  assert.deepEqual(result, { status: 'imported', attached: 2, requeued: 3 });
-  assert.equal(queued[0].payload.items?.length, 3);
-  assert.equal(queued[0].jobId, mediaJobId({ items: range(5).map(item).slice(2) }));
+  assert.deepEqual(result, { status: 'failed', delayMs: 30_000 });
+  assert.equal(calls.find((call) => call.path === '/media/release')?.body.failed, true);
+  assert.equal(queued[0].jobId, mediaJobId(RUN_TOKEN, '1-1'));
 });
 
-test('gives up only after the bridge stayed unreachable, not after waiting for a slot', async () => {
-  const queued: { payload: { attempt?: number; failures?: number } }[] = [];
-  const enqueue = async (payload: { attempt?: number; failures?: number }) => {
-    queued.push({ payload });
-  };
+test('a superseded chain stops without touching Twenty', async () => {
   const twenty = createFakeTwenty();
+  bridgeWith({ stale: true });
 
-  bridgeWith({ waitMs: 5_000 });
-  await runMediaImport({ items: [item(1)], attempt: 20, failures: 7 }, silentLogger, {
-    client: twenty.client,
-    enqueue,
-  });
-  assert.deepEqual(queued[0].payload, { items: [item(1)], uploaded: [], attempt: 21, failures: 7 });
+  const { result, queued } = await run(twenty, { runToken: RUN_TOKEN, seq: 1 });
 
-  restore();
-  const bridge = mockBridge({});
-  restore = bridge.restore;
-  const result = await runMediaImport({ items: [item(1)], attempt: 21, failures: 7 }, silentLogger, {
-    client: twenty.client,
-    enqueue,
-  });
-  assert.deepEqual(result, { status: 'dropped' });
+  assert.deepEqual(result, { status: 'idle' });
+  assert.deepEqual(queued, []);
 });

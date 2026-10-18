@@ -4,13 +4,12 @@ import { Readable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import { type ReadableStream as NodeReadableStream } from 'node:stream/web';
 
-import type { CoreApiClient } from 'twenty-client-sdk/core';
 import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 
 import { MESSAGE_MEDIA_FIELD_ID } from 'src/constants/universal-identifiers';
 import { bridgeFetch } from 'src/logic-functions/bridge-request';
 import type { BridgeMessageEvent } from 'src/logic-functions/message-data';
-import { upsertMessages, type UpsertedMessage } from 'src/logic-functions/record-writes';
+import type { UpsertedMessage } from 'src/logic-functions/record-writes';
 import { isEventId } from 'src/logic-functions/utils/validators';
 
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
@@ -131,21 +130,6 @@ export const uploadMedia = async (
   }
 
   return { writes, processed };
-};
-
-// Uploads the files, then attaches them all with one upsert.
-export const attachMedia = async (
-  client: CoreApiClient,
-  items: MediaItem[],
-  deadline = Number.POSITIVE_INFINITY,
-): Promise<{ attached: number; processed: number }> => {
-  const { writes, processed } = await uploadMedia(items, deadline);
-
-  if (writes.length > 0) {
-    await upsertMessages(client, writes);
-  }
-
-  return { attached: writes.length, processed };
 };
 
 // Files of the written messages that do not have one yet.

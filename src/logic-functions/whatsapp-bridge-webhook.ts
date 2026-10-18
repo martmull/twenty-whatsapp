@@ -5,6 +5,7 @@ import { enqueueJobs } from 'twenty-sdk/logic-function';
 
 import { MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
 import { enqueueHistoryImport, FIRST_PAGE } from 'src/logic-functions/history-import';
+import { startMediaChains } from 'src/logic-functions/media-import';
 import { HttpError, route } from 'src/logic-functions/utils/route';
 import { isUuid } from 'src/logic-functions/utils/validators';
 
@@ -15,6 +16,7 @@ type BridgeSignal = {
   events?: boolean;
   names?: boolean;
   historyRunToken?: string;
+  mediaRunTokens?: string[];
   eventsJobKey?: string;
   namesJobKey?: string;
 };
@@ -60,7 +62,15 @@ const handler = route<BridgeSignal>('whatsapp-bridge-webhook', async (event, log
     await enqueueHistoryImport(historyRunToken, 0, FIRST_PAGE);
   }
 
-  logger.info('Handled bridge signal', { events, names: Boolean(names), history: isUuid(historyRunToken) });
+  const mediaRunTokens = Array.isArray(event.body?.mediaRunTokens) ? event.body.mediaRunTokens.filter(isUuid) : [];
+  await startMediaChains(mediaRunTokens.slice(0, 10));
+
+  logger.info('Handled bridge signal', {
+    events,
+    names: Boolean(names),
+    history: isUuid(historyRunToken),
+    mediaChains: mediaRunTokens.length,
+  });
   return { queued: true };
 });
 
