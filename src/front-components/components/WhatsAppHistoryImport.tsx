@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RestApiClient } from 'twenty-client-sdk/rest';
+import { RestApiClient, RestApiClientError } from 'twenty-client-sdk/rest';
 import { t } from 'twenty-sdk/front-component';
 import { Callout } from 'twenty-ui/components';
 import { IconHistory } from 'twenty-ui/icon';
@@ -59,6 +59,7 @@ export const WhatsAppHistoryImport = () => {
   const [rangeDays, setRangeDays] = useState<RangeDays>(30);
   const [createPeople, setCreatePeople] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   // From 0 to 100 while an import runs.
   const [progress, setProgress] = useState<number>();
   const [importRunning, setImportRunning] = useState(false);
@@ -134,10 +135,32 @@ export const WhatsAppHistoryImport = () => {
         setProgress((previous) => previous ?? 0);
         setImportRunning(true);
       }
-    } catch {
-      setError(t('Could not reach the WhatsApp bridge. Check that it is running and retry.'));
+    } catch (requestError) {
+      // 426: the bridge runs an older version than the app.
+      setError(
+        requestError instanceof RestApiClientError && requestError.status === 426
+          ? t(
+              'The WhatsApp bridge that is running is older than this app. Restart it with npm run restart in the bridge folder, then import again.',
+            )
+          : t('Could not reach the WhatsApp bridge. Check that it is running and retry.'),
+      );
     } finally {
       setStarting(false);
+    }
+  };
+
+  const cancelImport = async () => {
+    setCancelling(true);
+    setError('');
+
+    try {
+      await historyRequest({ action: 'cancel' });
+      setImportRunning(false);
+      setProgress(undefined);
+    } catch {
+      setError(t('Could not cancel the import. Check that the WhatsApp bridge is running and retry.'));
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -194,7 +217,7 @@ export const WhatsAppHistoryImport = () => {
         />
         <span>{t('Create People from WhatsApp contact info')}</span>
       </label>
-      <div>
+      <div style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
         <Button
           type="button"
           variant="solid"
@@ -206,6 +229,19 @@ export const WhatsAppHistoryImport = () => {
         >
           {t('Import')}
         </Button>
+        {importRunning && !starting && (
+          <Button
+            type="button"
+            variant="outline"
+            color="neutral"
+            size="sm"
+            loading={cancelling}
+            disabled={cancelling}
+            onClick={() => void cancelImport()}
+          >
+            {t('Cancel import')}
+          </Button>
+        )}
       </div>
       {progress !== undefined && (
         <div

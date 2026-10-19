@@ -4,13 +4,26 @@ import { defineLogicFunction } from 'twenty-sdk/define';
 import { enqueueJobs } from 'twenty-sdk/logic-function';
 
 import { MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
-import { enqueueHistoryImport } from 'src/logic-functions/history-import';
+import { enqueueHistoryImport, FIRST_PAGE } from 'src/logic-functions/history-import';
+import { startMediaChains } from 'src/logic-functions/media-import';
 import { HttpError, route } from 'src/logic-functions/utils/route';
 import { isUuid } from 'src/logic-functions/utils/validators';
 
 const MAX_CLOCK_SKEW_MS = 5 * 60_000;
 
-type BridgeSignal = { sentAt?: string; events?: boolean; names?: boolean; historyRunToken?: string };
+type BridgeSignal = {
+  sentAt?: string;
+  events?: boolean;
+  names?: boolean;
+  historyRunToken?: string;
+  mediaRunTokens?: string[];
+  eventsJobKey?: string;
+  namesJobKey?: string;
+};
+
+const JOB_KEY = /^[\w.-]{1,100}$/;
+const jobId = (prefix: string, key: unknown) =>
+  typeof key === 'string' && JOB_KEY.test(key) ? { jobId: `${prefix}.${key}` } : {};
 
 // The bridge's only way to start work in Twenty: there is no cron. The bridge retries a signal that
 // fails or is not acted on, and replaces a lost history import chain. The body is HMAC-signed.
@@ -35,18 +48,29 @@ const handler = route<BridgeSignal>('whatsapp-bridge-webhook', async (event, log
   // A bridge from before signals carried flags only ever meant "events are queued".
   const events = event.body?.events ?? (!names && !historyRunToken);
 
-  if (events || names) {
-    await enqueueJobs({
-      logicFunctionUniversalIdentifier: MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER,
-      jobs: [{ payload: { events: Boolean(events), names: Boolean(names) } }],
-    });
+  // Named after the bridge's keys, so repeated signals for the same pending work queue one job.
+  const jobs = [
+    ...(events ? [{ payload: { events: true }, ...jobId('sync', event.body?.eventsJobKey) }] : []),
+    ...(names ? [{ payload: { names: true }, ...jobId('names', event.body?.namesJobKey) }] : []),
+  ];
+
+  if (jobs.length > 0) {
+    await enqueueJobs({ logicFunctionUniversalIdentifier: MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER, jobs });
   }
 
   if (isUuid(historyRunToken)) {
-    await enqueueHistoryImport(historyRunToken, 0);
+    await enqueueHistoryImport(historyRunToken, 0, FIRST_PAGE);
   }
 
-  logger.info('Handled bridge signal', { events, names: Boolean(names), history: isUuid(historyRunToken) });
+  const mediaRunTokens = Array.isArray(event.body?.mediaRunTokens) ? event.body.mediaRunTokens.filter(isUuid) : [];
+  await startMediaChains(mediaRunTokens.slice(0, 10));
+
+  logger.info('Handled bridge signal', {
+    events,
+    names: Boolean(names),
+    history: isUuid(historyRunToken),
+    mediaChains: mediaRunTokens.length,
+  });
   return { queued: true };
 });
 

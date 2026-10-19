@@ -1,11 +1,20 @@
 import { HttpError } from 'src/logic-functions/utils/route';
 
 export type BridgeStatus = {
+  apiVersion?: number;
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
   qrDataUrl?: string;
   qrExpiresAt?: number;
   phoneNumber?: string;
+  twentyAccountId?: string;
 };
+
+// History pages and the media queue need bridge API version 2. A bridge process started before an
+// update keeps answering with the old code until it is restarted.
+export const REQUIRED_BRIDGE_API_VERSION = 2;
+
+export const isBridgeOutdated = (status: Pick<BridgeStatus, 'apiVersion'>) =>
+  (status.apiVersion ?? 1) < REQUIRED_BRIDGE_API_VERSION;
 
 export const bridgeFetch = async (path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<Response> => {
   const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;
@@ -49,3 +58,7 @@ export const bridgePost = async <TResponse>(
 
 export const getBridgeStatus = async (): Promise<BridgeStatus> =>
   (await (await bridgeFetch('/status')).json()) as BridgeStatus;
+
+// Tells the bridge Twenty rate limited a job, so no background job starts before the window passes.
+export const reportRateLimit = (retryAfterMs: number): Promise<unknown> =>
+  bridgePost('/budget/penalty', { retryAfterMs }).catch(() => undefined);
