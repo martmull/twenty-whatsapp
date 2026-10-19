@@ -18,6 +18,7 @@ type ConnectionStatus = {
   qrDataUrl?: string;
   qrExpiresAt?: number;
   phoneNumber?: string;
+  bridgeOutdated?: boolean;
 };
 
 const parseStatus = (value: unknown): ConnectionStatus => {
@@ -41,6 +42,7 @@ const parseStatus = (value: unknown): ConnectionStatus => {
         : undefined,
     qrExpiresAt: typeof record.qrExpiresAt === 'number' ? record.qrExpiresAt : undefined,
     phoneNumber: typeof record.phoneNumber === 'string' ? record.phoneNumber : undefined,
+    bridgeOutdated: record.bridgeOutdated === true,
   };
 };
 
@@ -163,6 +165,15 @@ const WhatsAppSettings = () => {
           </Button>
         </div>
         {error && <Callout variant="error" title={t('Connection unavailable')} description={error} />}
+        {status?.bridgeOutdated && (
+          <Callout
+            variant="warning"
+            title={t('Bridge needs a restart')}
+            description={t(
+              'The WhatsApp bridge that is running is older than this app. Restart it with npm run restart in the bridge folder. Until then, history import is off and new messages are imported without their files.',
+            )}
+          />
+        )}
         {status?.state === 'connected' && (
           <div style={{ display: 'grid', gap: themeCssVariables.spacing[3] }}>
             <span>

@@ -9,6 +9,13 @@ export type BridgeStatus = {
   twentyAccountId?: string;
 };
 
+// History pages and the media queue need bridge API version 2. A bridge process started before an
+// update keeps answering with the old code until it is restarted.
+export const REQUIRED_BRIDGE_API_VERSION = 2;
+
+export const isBridgeOutdated = (status: Pick<BridgeStatus, 'apiVersion'>) =>
+  (status.apiVersion ?? 1) < REQUIRED_BRIDGE_API_VERSION;
+
 export const bridgeFetch = async (path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<Response> => {
   const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;
   const bridgeToken = process.env.WHATSAPP_BRIDGE_TOKEN;

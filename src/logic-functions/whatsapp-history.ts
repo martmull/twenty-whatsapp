@@ -1,7 +1,7 @@
 import type { CoreApiClient } from 'twenty-client-sdk/core';
 import { defineLogicFunction } from 'twenty-sdk/define';
 
-import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
+import { bridgePost, getBridgeStatus, isBridgeOutdated } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
 import { enqueueHistoryImport, FIRST_PAGE, type ChainPosition } from 'src/logic-functions/history-import';
 import { cancelHistoryJobs } from 'src/logic-functions/import-cancellation';
@@ -37,8 +37,6 @@ type HistoryRequest = {
 };
 
 const MAX_CHATS_PER_IMPORT = 50;
-// History pages changed format in bridge API version 2.
-const REQUIRED_BRIDGE_API_VERSION = 2;
 
 type HistoryCandidate = {
   chatId: string;
@@ -323,8 +321,8 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     throw new HttpError(409, 'WhatsApp is disconnected');
   }
 
-  if ((status.apiVersion ?? 1) < REQUIRED_BRIDGE_API_VERSION) {
-    throw new HttpError(426, 'Update and restart the WhatsApp bridge to import history');
+  if (isBridgeOutdated(status)) {
+    throw new HttpError(426, 'The running WhatsApp bridge is older than the app: restart it to load the update');
   }
 
   if (request.action === 'list') {

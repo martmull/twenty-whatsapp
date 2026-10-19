@@ -139,7 +139,9 @@ export const WhatsAppHistoryImport = () => {
       // 426: the bridge runs an older version than the app.
       setError(
         requestError instanceof RestApiClientError && requestError.status === 426
-          ? t('Update and restart the WhatsApp bridge, then import again.')
+          ? t(
+              'The WhatsApp bridge that is running is older than this app. Restart it with npm run restart in the bridge folder, then import again.',
+            )
           : t('Could not reach the WhatsApp bridge. Check that it is running and retry.'),
       );
     } finally {

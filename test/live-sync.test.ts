@@ -37,7 +37,7 @@ const bridgeWith = (events: Event[], status: Record<string, unknown> = { twentyA
   const released: Record<string, unknown>[] = [];
   const remembered: Record<string, unknown>[] = [];
   const bridge = mockBridge({
-    '/status': () => ({ state: 'connected', phoneNumber: '15550000000', ...status }),
+    '/status': () => ({ state: 'connected', apiVersion: 2, phoneNumber: '15550000000', ...status }),
     '/events/claim': () => ({ leaseId: '33333333-3333-4333-8333-333333333333', events, jobKey: 'boot.2' }),
     '/events/ack': (body) => acknowledged.push(body.eventIds as string[]),
     '/events/release': (body) => {
@@ -212,4 +212,25 @@ test('keeps the events queued when their files cannot be handed to the media que
   );
 
   assert.deepEqual(acknowledged, []);
+});
+
+test('with a bridge older than the app, still imports the messages, without their files', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: [person(1)] });
+  const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
+  const { acknowledged } = bridgeWith([event(1, chatId(1), { media })], {
+    twentyAccountId: ACCOUNT.id,
+    apiVersion: undefined,
+  });
+  let queued = 0;
+
+  const result = await syncMessages(silentLogger, {
+    client: twenty.client,
+    queueFiles: async () => {
+      queued += 1;
+    },
+  });
+
+  assert.equal(result.imported, 1);
+  assert.equal(queued, 0);
+  assert.equal(acknowledged[0].length, 1);
 });

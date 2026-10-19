@@ -1,6 +1,6 @@
 import type { CoreApiClient } from 'twenty-client-sdk/core';
 
-import { bridgePost, getBridgeStatus, reportRateLimit } from 'src/logic-functions/bridge-request';
+import { bridgePost, getBridgeStatus, isBridgeOutdated, reportRateLimit } from 'src/logic-functions/bridge-request';
 import {
   applicationClient,
   ensureAccount,
@@ -258,7 +258,13 @@ export const syncMessages = async (
 
     // Files wait in the bridge's media queue, so text never waits behind them. Events are
     // acknowledged only once their files are queued: otherwise the replay finds the files missing.
-    await queueFiles(media);
+    // A bridge without the queue still gets its messages imported, without their files.
+    if (isBridgeOutdated(status)) {
+      if (media.length > 0)
+        logger.warn('Skipping files: the WhatsApp bridge is older than the app', { count: media.length });
+    } else {
+      await queueFiles(media);
+    }
     acknowledge.push(...writtenEventIds);
     completed = true;
   } catch (error) {
