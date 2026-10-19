@@ -39,3 +39,4 @@ export const READ_STATE_NAME_FIELD_ID = 'f4a537ae-210d-4b2d-b0b7-e3f989ba4145';
 // Logic functions run only as background jobs (enqueueJobs targets them by identifier).
 export const HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER = 'a4263ad0-7172-4490-9297-8431fb3966ac';
 export const MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER = '4353a880-c060-4b74-a96e-9dd03e387618';
+export const MEDIA_IMPORT_JOB_UNIVERSAL_IDENTIFIER = '0b9c7e4d-3f21-4a8e-9d56-7c1e2b4a9f03';

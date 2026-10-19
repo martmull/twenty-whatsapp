@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'node:test';
+import { afterEach, test } from 'node:test';
 
-import { syncMessages } from '../src/logic-functions/message-data';
+import { syncMessages } from '../src/logic-functions/live-sync';
+import { deterministicId } from '../src/logic-functions/record-writes';
+import { createFakeTwenty, mockBridge } from './fake-twenty';
 
-const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
-const GROUP_CONVERSATION_ID = '22222222-2222-4222-8222-222222222222';
+const ACCOUNT = { id: 'acc', phoneNumber: '+15559999999', state: 'CONNECTED' };
 const SAVED_CHAT_ID = '15551234567@s.whatsapp.net';
 const UNKNOWN_CHAT_ID = '15550000000@s.whatsapp.net';
 const GROUP_ID = '120363123456789012@g.us';
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
+let restore: () => void = () => undefined;
+
+afterEach(() => restore());
 
 const event = (chatId: string, index: number, sender?: { senderId: string; senderName: string }) => ({
   eventId: index.toString(16).padStart(64, '0'),
@@ -20,122 +24,89 @@ const event = (chatId: string, index: number, sender?: { senderId: string; sende
   ...sender,
 });
 
-let bridgeCalls: { path: string; body: Record<string, unknown> }[] = [];
-const originalFetch = globalThis.fetch;
-
-beforeEach(() => {
-  process.env.WHATSAPP_BRIDGE_URL = 'http://bridge.test';
-  process.env.WHATSAPP_BRIDGE_TOKEN = 'token';
-  bridgeCalls = [];
-  const responses: Record<string, unknown> = {
-    '/status': { state: 'connected', phoneNumber: '15559999999' },
-    '/events/claim': {
-      leaseId: 'lease',
+const bridgeWith = (savedContacts: (body: Record<string, unknown>) => unknown) => {
+  const acknowledged: string[][] = [];
+  const bridge = mockBridge({
+    '/status': () => ({ state: 'connected', apiVersion: 2, phoneNumber: '15559999999', twentyAccountId: ACCOUNT.id }),
+    '/events/claim': () => ({
+      leaseId: '33333333-3333-4333-8333-333333333333',
       events: [
         event(SAVED_CHAT_ID, 1),
         event(UNKNOWN_CHAT_ID, 2),
         event(GROUP_ID, 3, { senderId: '777777777@lid', senderName: 'Sam' }),
         event(GROUP_ID, 4, { senderId: '15558888888@s.whatsapp.net', senderName: 'Stranger' }),
       ],
-    },
-    '/contacts/saved': [{ id: '777777777@lid', phoneNumber: '+15557777777', firstName: 'Sam', lastName: 'Lee' }],
-    '/history/names': [
+    }),
+    '/contacts/saved': savedContacts,
+    '/history/names': () => [
       { chatId: SAVED_CHAT_ID, name: 'Alex Martin', firstName: 'Alex', lastName: 'Martin' },
       { chatId: UNKNOWN_CHAT_ID, name: '+15550000000' },
       { chatId: GROUP_ID, name: 'Project team' },
     ],
-    '/events/release': { remaining: false },
-  };
-  globalThis.fetch = async (input, init) => {
-    const path = new URL(String(input)).pathname;
-    bridgeCalls.push({ path, body: JSON.parse(String(init?.body ?? '{}')) });
-    return new Response(JSON.stringify(responses[path] ?? {}));
-  };
-});
-
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
-
-type Selection = Record<string, { __args?: { data?: unknown; id?: string } }>;
-
-const fakeClient = () => {
-  const mutations: { name: string; args: { data?: unknown; id?: string } }[] = [];
-  let personCount = 0;
-  const client = {
-    query: async (selection: Selection) => {
-      if (selection.whatsappAccounts) {
-        return { whatsappAccounts: { edges: [{ node: { id: ACCOUNT_ID, state: 'CONNECTED' } }] } };
-      }
-      if (selection.whatsappConversations) {
-        return {
-          whatsappConversations: {
-            edges: [
-              {
-                node: {
-                  id: GROUP_CONVERSATION_ID,
-                  name: '120363123456789012',
-                  chatId: GROUP_ID,
-                  accountId: ACCOUNT_ID,
-                },
-              },
-            ],
-          },
-        };
-      }
-      if (selection.people) return { people: { edges: [] } };
-      return { whatsappMessages: { edges: [] } };
-    },
-    mutation: async (selection: Selection) => {
-      const [name, { __args = {} }] = Object.entries(selection)[0];
-      mutations.push({ name, args: __args });
-      if (name === 'createPeople') {
-        const data = __args.data as { name: object; phones: { primaryPhoneNumber: string } }[];
-        return {
-          createPeople: data.map((person) => ({ id: `person-${(personCount += 1)}`, ...person })),
-        };
-      }
-      if (name === 'createWhatsappMessages') {
-        return { createWhatsappMessages: (__args.data as unknown[]).map((_, index) => ({ id: `message-${index}` })) };
-      }
-      return { [name]: { id: 'conversation-new' } };
-    },
-  };
-  return { client, mutations };
+    '/events/ack': (body) => acknowledged.push(body.eventIds as string[]),
+    '/events/release': () => ({ released: true, remaining: false }),
+  });
+  restore = bridge.restore;
+  return { calls: bridge.calls, acknowledged };
 };
 
-test('creates People for saved contacts only, and names conversations after them', async () => {
-  const { client, mutations } = fakeClient();
+const groupConversation = { id: 'group-conversation', name: '120363123456789012', chatId: GROUP_ID, accountId: 'acc' };
 
-  const result = await syncMessages(silentLogger, client as never);
-
-  const createdPeople = mutations
-    .filter((mutation) => mutation.name === 'createPeople')
-    .flatMap((mutation) => mutation.args.data as { name: object; phones: { primaryPhoneNumber: string } }[]);
-  assert.deepEqual(createdPeople.map((person) => [person.name, person.phones.primaryPhoneNumber]).sort(), [
-    [{ firstName: 'Alex', lastName: 'Martin' }, '+15551234567'],
-    [{ firstName: 'Sam', lastName: 'Lee' }, '+15557777777'],
+test('creates People for saved contacts only, in one upsert, and names conversations after them', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: [{ ...groupConversation }] });
+  const { calls, acknowledged } = bridgeWith(() => [
+    { id: '777777777@lid', phoneNumber: '+15557777777', firstName: 'Sam', lastName: 'Lee' },
   ]);
 
-  const createdConversation = mutations.find((mutation) => mutation.name === 'createWhatsappConversation');
-  assert.deepEqual(createdConversation?.args.data, {
-    name: 'Alex Martin',
-    chatId: SAVED_CHAT_ID,
-    accountId: ACCOUNT_ID,
-    personId: 'person-1',
-  });
+  const result = await syncMessages(silentLogger, { client: twenty.client, queueFiles: async () => undefined });
 
-  const renamed = mutations.find(
-    (mutation) =>
-      mutation.name === 'updateWhatsappConversation' &&
-      mutation.args.id === GROUP_CONVERSATION_ID &&
-      (mutation.args.data as { name?: string }).name,
+  assert.deepEqual(twenty.requests, [
+    'query people',
+    'query whatsappConversations',
+    'mutation createPeople',
+    'mutation createWhatsappConversations',
+    'mutation createWhatsappMessages',
+  ]);
+  assert.deepEqual(
+    twenty.store.people.map((person) => [
+      person.id,
+      person.name,
+      (person.phones as { primaryPhoneNumber: string }).primaryPhoneNumber,
+    ]),
+    [
+      [deterministicId('person', '+15551234567'), { firstName: 'Alex', lastName: 'Martin' }, '+15551234567'],
+      [deterministicId('person', '+15557777777'), { firstName: 'Sam', lastName: 'Lee' }, '+15557777777'],
+    ],
   );
-  assert.equal((renamed?.args.data as { name: string }).name, 'Project team');
+  const direct = twenty.store.whatsappConversations.find((conversation) => conversation.chatId === SAVED_CHAT_ID);
+  assert.equal(direct?.name, 'Alex Martin');
+  assert.equal(direct?.personId, deterministicId('person', '+15551234567'));
+  const group = twenty.store.whatsappConversations.find((conversation) => conversation.chatId === GROUP_ID);
+  assert.equal(group?.name, 'Project team');
+  assert.equal(
+    twenty.store.whatsappConversations.some((conversation) => conversation.chatId === UNKNOWN_CHAT_ID),
+    false,
+  );
 
   assert.equal(result.imported, 3);
   assert.equal(result.ignored, 1);
-  assert.equal(result.acknowledged, 4);
-  const lookedUp = bridgeCalls.find((call) => call.path === '/contacts/saved');
+  assert.equal(acknowledged.flat().length, 4);
+  const lookedUp = calls.find((call) => call.path === '/contacts/saved');
   assert.deepEqual(lookedUp?.body.ids, ['777777777@lid', '15558888888@s.whatsapp.net']);
+});
+
+test('keeps a saved contact queued when their Person cannot be created, and imports the rest', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: [{ ...groupConversation }] });
+  twenty.rejectRecords(
+    (record) => (record.phones as { primaryPhoneNumber?: string } | undefined)?.primaryPhoneNumber === '+15551234567',
+  );
+  const { acknowledged } = bridgeWith(() => {
+    throw new Error('bridge without saved contacts');
+  });
+
+  const result = await syncMessages(silentLogger, { client: twenty.client, queueFiles: async () => undefined });
+
+  assert.equal(acknowledged.flat().includes(event(SAVED_CHAT_ID, 1).eventId), false);
+  assert.equal(result.imported, 2, 'group messages still land without their senders as People');
+  assert.equal(twenty.store.people.length, 0);
 });

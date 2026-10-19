@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -20,9 +20,11 @@ import { pino } from 'pino';
 import { toDataURL } from 'qrcode';
 
 import { fetchAddressBook, type AddressBookEntry, type AddressBookReport } from './address-book.js';
+import { ApiBudget } from './api-budget.js';
 import { createEncryptedAuthState } from './encrypted-auth-state.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { HistoryImportQueue } from './history-import-queue.js';
+import { MediaQueue } from './media-queue.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
 import {
   isDirectChatId,
@@ -46,17 +48,35 @@ const baileysLogger = pino({ level: process.env.WHATSAPP_LOG_LEVEL ?? 'warn', ba
 
 // What the bridge asks Twenty to do: import queued events, refresh conversation names, or start a
 // history import job chain with this run token.
-export type BridgeSignal = { events?: boolean; names?: boolean; historyRunToken?: string };
+export type BridgeSignal = { events?: boolean; names?: boolean; historyRunToken?: string; mediaRunTokens?: string[] };
 
 // Name changes arrive in bursts during a history sync; Twenty refreshes names once per burst.
 const NAMES_SIGNAL_DELAY_MS = 60_000;
+// Beyond this many changed chats, Twenty compares every conversation instead of a list.
+const MAX_TRACKED_NAME_CHANGES = 1_000;
+
+// Raised when the app and bridge stop understanding each other; the app refuses to import history
+// from an older bridge instead of stalling on it.
+export const BRIDGE_API_VERSION = 2;
 
 export type ConnectionStatus = {
+  apiVersion?: number;
   state: 'disconnected' | 'pairing' | 'connected' | 'reconnecting';
   qrDataUrl?: string;
   qrExpiresAt?: number;
   phoneNumber?: string;
+  // The WhatsApp account record in Twenty, once Twenty has reported it, so a sync need not look it up.
+  twentyAccountId?: string;
 };
+
+// Twenty imports at most this many queued events per sync job.
+export const MAX_SYNC_EVENTS = 200;
+// A sync batch makes one People query, one conversations query and two upserts, plus the account
+// lookup until Twenty's account ID is remembered.
+const SYNC_BATCH_COST = 4;
+const ACCOUNT_LOOKUP_COST = 2;
+// If the sync job told to wait never comes back, the bridge signals again this long after.
+const SYNC_RESIGNAL_GRACE_MS = 30_000;
 
 export type SendReceipt = {
   requestId: string;
@@ -115,15 +135,30 @@ export class WhatsAppConnection {
   private readonly historyState: EncryptedJsonStore<{ receivedAt: string }>;
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
   readonly historyImports: HistoryImportQueue;
+  readonly mediaQueue: MediaQueue;
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
   private readonly groupSubjectLookups = new Map<string, Promise<string | undefined>>();
-  private readonly groupSubjectQueue: (() => void)[] = [];
-  private activeGroupSubjectLookups = 0;
+  private readonly groupMetadataQueue: (() => void)[] = [];
+  private activeGroupMetadataRequests = 0;
   private historyWrites: Promise<void> = Promise.resolve();
   private readonly sendingRequests = new Set<string>();
   private sendQueue: Promise<unknown> = Promise.resolve();
-  private syncLease: { id: string; expiresAt: number } | undefined;
+  private syncLease: { id: string; expiresAt: number; cost: number } | undefined;
+  // A sync job told to wait for budget is due back then; others end instead of waiting too.
+  private syncRetryAt = 0;
+  private lastSyncClaimAt = 0;
+  // Twenty names its sync and names jobs after these keys, so signals sent before a job claims its
+  // batch fold into that one job. The boot ID keeps keys from repeating after a restart.
+  private readonly bootId = randomBytes(4).toString('hex');
+  private syncGeneration = 0;
+  private readonly twentyAccounts: EncryptedJsonStore<{ phoneNumber: string; accountId: string }>;
+  private twentyAccount: { phoneNumber: string; accountId: string } | undefined;
   private namesTimer: NodeJS.Timeout | undefined;
+  // Chats whose name changed since Twenty last refreshed names, with the change sequence. Lost on
+  // restart, so the first refresh after a start covers every conversation.
+  private readonly changedNames = new Map<string, number>();
+  private namesSequence = 0;
+  private fullNamesRefreshUntil: number | undefined = 0;
 
   constructor(
     private readonly directory: string,
@@ -131,6 +166,7 @@ export class WhatsAppConnection {
     // Delivered to Twenty's bridge webhook (see server.ts).
     private readonly onSignal: (signal: BridgeSignal) => void = () => undefined,
     private readonly log: (message: string, data?: Record<string, unknown>) => void = () => undefined,
+    readonly budget: ApiBudget = new ApiBudget(),
   ) {
     this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
     this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
@@ -141,6 +177,7 @@ export class WhatsAppConnection {
     this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
     this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
     this.mediaReferences = new EncryptedJsonStore(join(directory, 'media-references'), encryptionKey);
+    this.twentyAccounts = new EncryptedJsonStore(join(directory, 'twenty-account'), encryptionKey);
     this.historyImports = new HistoryImportQueue(
       join(directory, 'history-imports'),
       encryptionKey,
@@ -151,8 +188,14 @@ export class WhatsAppConnection {
       {
         onChainRestarted: (historyRunToken) => this.onSignal({ historyRunToken }),
         canRun: () => this.status.state === 'connected',
+        budget,
       },
     );
+    this.mediaQueue = new MediaQueue(join(directory, 'media-queue'), encryptionKey, {
+      budget,
+      onChainsRestarted: (mediaRunTokens) => this.onSignal({ mediaRunTokens }),
+      canRun: () => this.status.state === 'connected',
+    });
   }
 
   async recordHistory(
@@ -163,6 +206,7 @@ export class WhatsAppConnection {
   ): Promise<void> {
     const write = async () => {
       let namesChanged = false;
+      const namesSequence = this.namesSequence;
       for (const contact of contacts) {
         if (
           contact.lid &&
@@ -287,6 +331,7 @@ export class WhatsAppConnection {
         const name = candidate.name ?? existing?.name;
         if (name && name !== existing?.name) {
           namesChanged = true;
+          this.recordNameChange(chatId);
         }
         await this.historyChats.write(chatId, {
           chatId,
@@ -306,6 +351,8 @@ export class WhatsAppConnection {
       }
       if (namesChanged) {
         this.groupMembersCache.clear();
+      }
+      if (this.namesSequence !== namesSequence) {
         this.signalNamesChanged();
       }
     };
@@ -316,6 +363,7 @@ export class WhatsAppConnection {
 
   async recordAddressBook(entries: AddressBookEntry[]): Promise<void> {
     const write = async () => {
+      const namesSequence = this.namesSequence;
       for (const { ids, fullName, firstName, lastName } of entries) {
         const lid = ids.find((id) => id.endsWith('@lid'));
         const phoneId = ids.find(isDirectChatId) ?? (lid ? (await this.phoneNumbers.read(lid))?.chatId : undefined);
@@ -323,11 +371,17 @@ export class WhatsAppConnection {
           await this.phoneNumbers.write(lid, { chatId: phoneId });
         }
         for (const id of new Set([...ids, ...(phoneId ? [phoneId] : [])])) {
+          if ((await this.addressBook.read(id))?.fullName !== fullName && isDirectChatId(id)) {
+            this.recordNameChange(id);
+          }
           await this.addressBook.write(id, { fullName, firstName, lastName });
           await this.contactNames.write(id, { name: fullName });
         }
       }
       this.groupMembersCache.clear();
+      if (this.namesSequence !== namesSequence) {
+        this.signalNamesChanged();
+      }
     };
 
     this.historyWrites = this.historyWrites.then(write, write);
@@ -403,6 +457,43 @@ export class WhatsAppConnection {
     return names.flat();
   }
 
+  private recordNameChange(chatId: string): void {
+    if (!isSupportedChatId(chatId)) return;
+    this.namesSequence += 1;
+    if (this.changedNames.size >= MAX_TRACKED_NAME_CHANGES) {
+      this.changedNames.clear();
+      this.fullNamesRefreshUntil = this.namesSequence;
+      return;
+    }
+    this.changedNames.set(chatId, this.namesSequence);
+  }
+
+  // Names changed since Twenty's last refresh. `full` asks Twenty to compare every conversation, after
+  // a bridge start or when too many changed to list. Acknowledging the version clears what was read.
+  async getNameChanges(): Promise<{
+    version: number;
+    full: boolean;
+    names: { chatId: string; name: string }[];
+  }> {
+    const version = this.namesSequence;
+    const full = this.fullNamesRefreshUntil !== undefined;
+    const names = full
+      ? []
+      : (await this.getHistoryNames([...this.changedNames.keys()])).map(({ chatId, name }) => ({ chatId, name }));
+
+    return { version, full, names };
+  }
+
+  acknowledgeNameChanges(version: number): { acknowledged: boolean } {
+    for (const [chatId, sequence] of this.changedNames) {
+      if (sequence <= version) this.changedNames.delete(chatId);
+    }
+    if (this.fullNamesRefreshUntil !== undefined && this.fullNamesRefreshUntil <= version) {
+      this.fullNamesRefreshUntil = undefined;
+    }
+    return { acknowledged: true };
+  }
+
   // Phone-number and LID identities of people saved in the phone's address book; others are left out.
   async getSavedContacts(ids: string[]): Promise<SavedContactInfo[]> {
     await this.historyWrites;
@@ -428,7 +519,6 @@ export class WhatsAppConnection {
     return contacts;
   }
 
-  // Queued three at a time: WhatsApp rate-limits group metadata requests.
   private lookupGroupSubject(chatId: string): Promise<string | undefined> {
     const pending = this.groupSubjectLookups.get(chatId);
     const socket = this.socket;
@@ -437,11 +527,7 @@ export class WhatsAppConnection {
     }
 
     const generation = this.generation;
-    const lookup = new Promise<void>((start) => {
-      this.groupSubjectQueue.push(start);
-      this.drainGroupSubjectLookups();
-    })
-      .then(() => socket.groupMetadata(chatId))
+    const lookup = this.queuedGroupMetadata(socket, chatId)
       .then(async (metadata) => {
         const subject = metadata.subject?.trim().slice(0, 120);
         if (!subject || generation !== this.generation) {
@@ -451,19 +537,28 @@ export class WhatsAppConnection {
         return subject;
       })
       .catch(() => undefined)
-      .finally(() => {
-        this.groupSubjectLookups.delete(chatId);
-        this.activeGroupSubjectLookups -= 1;
-        this.drainGroupSubjectLookups();
-      });
+      .finally(() => this.groupSubjectLookups.delete(chatId));
     this.groupSubjectLookups.set(chatId, lookup);
     return lookup;
   }
 
-  private drainGroupSubjectLookups(): void {
-    while (this.activeGroupSubjectLookups < 3 && this.groupSubjectQueue.length > 0) {
-      this.activeGroupSubjectLookups += 1;
-      this.groupSubjectQueue.shift()!();
+  // Three at a time: WhatsApp rate-limits group metadata requests.
+  private queuedGroupMetadata(socket: WASocket, chatId: string): ReturnType<WASocket['groupMetadata']> {
+    return new Promise<void>((start) => {
+      this.groupMetadataQueue.push(start);
+      this.drainGroupMetadataQueue();
+    })
+      .then(() => socket.groupMetadata(chatId))
+      .finally(() => {
+        this.activeGroupMetadataRequests -= 1;
+        this.drainGroupMetadataQueue();
+      });
+  }
+
+  private drainGroupMetadataQueue(): void {
+    while (this.activeGroupMetadataRequests < 3 && this.groupMetadataQueue.length > 0) {
+      this.activeGroupMetadataRequests += 1;
+      this.groupMetadataQueue.shift()!();
     }
   }
 
@@ -623,7 +718,7 @@ export class WhatsAppConnection {
     }
 
     await this.historyWrites;
-    const metadata = await this.socket.groupMetadata(chatId);
+    const metadata = await this.queuedGroupMetadata(this.socket, chatId);
     if (metadata.subject?.trim()) {
       await this.recordHistory([{ id: chatId, name: metadata.subject }], []);
     }
@@ -686,37 +781,85 @@ export class WhatsAppConnection {
   // Oldest first, so Twenty imports messages in the order they were received.
   async getEvents(): Promise<MessageEvent[]> {
     const events = await this.events.list();
-    return events.sort((left, right) => left.sentAt.localeCompare(right.sentAt)).slice(0, 100);
+    return events.sort((left, right) => left.sentAt.localeCompare(right.sentAt)).slice(0, MAX_SYNC_EVENTS);
   }
 
-  async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[] }> {
+  // The key Twenty gives the next sync job. Every claim moves it on before reading the queue, so an
+  // event queued after a job read its batch is signaled under a new key and gets its own job.
+  syncJobKey(): string {
+    return `${this.bootId}.${this.syncGeneration}`;
+  }
+
+  namesJobKey(): string {
+    return `${this.bootId}.${this.namesSequence}`;
+  }
+
+  // `waitMs` tells the job to come back once the API budget allows the batch.
+  async claimEvents(): Promise<{ leaseId?: string; events: MessageEvent[]; jobKey: string; waitMs?: number }> {
+    this.syncGeneration += 1;
+    this.lastSyncClaimAt = Date.now();
+    const jobKey = this.syncJobKey();
+
     if (this.syncLease && this.syncLease.expiresAt > Date.now()) {
-      return { events: [] };
+      return { events: [], jobKey };
     }
 
     const leaseId = randomUUID();
-    this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000 };
+    const cost = SYNC_BATCH_COST + (this.twentyAccount ? 0 : ACCOUNT_LOOKUP_COST);
+    this.syncLease = { id: leaseId, expiresAt: Date.now() + 180_000, cost };
     try {
       const events = await this.getEvents();
-      if (events.length === 0) {
+      const decision = events.length > 0 ? this.budget.take(cost, 'live') : undefined;
+      if (!decision?.granted) {
         if (this.syncLease?.id === leaseId) this.syncLease = undefined;
-        return { events };
       }
-      return { leaseId, events };
+      if (!decision) {
+        return { events, jobKey };
+      }
+      if (!decision.granted) {
+        return { events: [], jobKey, ...this.scheduleSyncRetry(decision.waitMs) };
+      }
+      return { leaseId, events, jobKey };
     } catch (error) {
       if (this.syncLease?.id === leaseId) this.syncLease = undefined;
       throw error;
     }
   }
 
+  // One job waits for the budget at a time; one that never comes back is replaced by a new signal.
+  private scheduleSyncRetry(waitMs: number): { waitMs?: number } {
+    const now = Date.now();
+    if (this.syncRetryAt > now) {
+      return {};
+    }
+    this.syncRetryAt = now + waitMs;
+    setTimeout(() => {
+      if (this.lastSyncClaimAt <= now) this.signalEvents();
+    }, waitMs + SYNC_RESIGNAL_GRACE_MS).unref();
+    return { waitMs };
+  }
+
   // Tells the sync whether events remain: the Twenty job then queues itself for the next batch.
-  async releaseEvents(leaseId: string): Promise<{ released: boolean; remaining?: boolean }> {
+  async releaseEvents(
+    leaseId: string,
+    requests?: number,
+  ): Promise<{ released: boolean; remaining?: boolean; jobKey: string }> {
     if (this.syncLease?.id !== leaseId) {
-      return { released: false };
+      return { released: false, jobKey: this.syncJobKey() };
     }
 
+    if (requests !== undefined) this.budget.adjust(requests - this.syncLease.cost);
     this.syncLease = undefined;
-    return { released: true, remaining: (await this.events.list(1)).length > 0 };
+    return { released: true, remaining: (await this.events.list(1)).length > 0, jobKey: this.syncJobKey() };
+  }
+
+  async rememberTwentyAccount(phoneNumber: string, accountId: string): Promise<{ remembered: boolean }> {
+    if (`+${this.status.phoneNumber?.replace(/\D/g, '')}` !== phoneNumber) {
+      return { remembered: false };
+    }
+    this.twentyAccount = { phoneNumber, accountId };
+    await this.twentyAccounts.write('current', this.twentyAccount);
+    return { remembered: true };
   }
 
   private signalEvents(): void {
@@ -884,13 +1027,21 @@ export class WhatsAppConnection {
 
   getStatus(): ConnectionStatus {
     if (this.status.qrExpiresAt && this.status.qrExpiresAt < Date.now()) {
-      return { state: 'pairing' };
+      return { state: 'pairing', apiVersion: BRIDGE_API_VERSION };
     }
 
-    return this.status;
+    const phoneNumber = this.status.phoneNumber ? `+${this.status.phoneNumber.replace(/\D/g, '')}` : undefined;
+    return {
+      ...this.status,
+      apiVersion: BRIDGE_API_VERSION,
+      ...(phoneNumber && this.twentyAccount?.phoneNumber === phoneNumber
+        ? { twentyAccountId: this.twentyAccount.accountId }
+        : {}),
+    };
   }
 
   async resume(): Promise<void> {
+    this.twentyAccount = (await this.twentyAccounts.read('current')) ?? undefined;
     const { state } = await createEncryptedAuthState(this.directory, this.encryptionKey);
 
     if (state.creds.me?.id) {
@@ -1031,6 +1182,7 @@ export class WhatsAppConnection {
         };
         if ((await this.events.list(1)).length > 0) this.signalEvents();
         void this.historyImports.recoverStalled();
+        void this.mediaQueue.recoverStalled();
         this.scheduleAddressBookSync(0);
         void socket
           .groupFetchAllParticipating()
@@ -1081,6 +1233,9 @@ export class WhatsAppConnection {
     clearTimeout(this.reconnectTimer);
     clearTimeout(this.namesTimer);
     this.namesTimer = undefined;
+    this.changedNames.clear();
+    this.fullNamesRefreshUntil = this.namesSequence;
+    this.twentyAccount = undefined;
     clearTimeout(this.addressBookTimer);
     const socket = this.socket;
     this.socket = undefined;

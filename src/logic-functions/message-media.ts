@@ -8,14 +8,11 @@ import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 
 import { MESSAGE_MEDIA_FIELD_ID } from 'src/constants/universal-identifiers';
 import { bridgeFetch } from 'src/logic-functions/bridge-request';
+import type { BridgeMessageEvent } from 'src/logic-functions/message-data';
+import type { UpsertedMessage } from 'src/logic-functions/record-writes';
 import { isEventId } from 'src/logic-functions/utils/validators';
 
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
-
-type MediaEvent = {
-  eventId: string;
-  media?: { kind: 'image' | 'video' | 'audio'; mimeType: string; fileName: string; sizeBytes?: number };
-};
 
 const putMedia = async (
   body: ReadableStream<Uint8Array>,
@@ -56,13 +53,16 @@ const putMedia = async (
   await Promise.all([uploadPromise, responseDrain]);
 };
 
-export const importMessageMedia = async (event: MediaEvent): Promise<{ fileId: string; label: string } | undefined> => {
-  if (!event.media || !isEventId(event.eventId)) {
+export const importMessageMedia = async (
+  eventId: string,
+  fileName: string,
+): Promise<{ fileId: string; label: string } | undefined> => {
+  if (!isEventId(eventId) || !fileName) {
     return undefined;
   }
 
   // Media can expire on WhatsApp's side; the message is still imported without it.
-  const response = await bridgeFetch(`/media/${event.eventId}`, {}, 55_000).catch(() => undefined);
+  const response = await bridgeFetch(`/media/${eventId}`, {}, 55_000).catch(() => undefined);
   if (!response) {
     return undefined;
   }
@@ -78,7 +78,7 @@ export const importMessageMedia = async (event: MediaEvent): Promise<{ fileId: s
     .mutation({
       createFileUpload: {
         __args: {
-          filename: event.media.fileName,
+          filename: fileName,
           size: sizeBytes,
           fileFolder: 'FilesField',
           fieldMetadataUniversalIdentifier: MESSAGE_MEDIA_FIELD_ID,
@@ -106,5 +106,40 @@ export const importMessageMedia = async (event: MediaEvent): Promise<{ fileId: s
     throw new Error('Could not complete WhatsApp media upload');
   }
 
-  return { fileId: completed.completeFileUpload.id, label: event.media.fileName };
+  return { fileId: completed.completeFileUpload.id, label: fileName };
+};
+
+export type MediaItem = { messageId: string; eventId: string; fileName: string };
+export type MediaWrite = { id: string; media: { fileId: string; label: string }[] };
+
+// Uploads each file; uploads cost no API budget. Stops starting uploads after the deadline and
+// reports how many items it went through, so the caller can retry the rest.
+export const uploadMedia = async (
+  items: MediaItem[],
+  deadline = Number.POSITIVE_INFINITY,
+  importFile = importMessageMedia,
+): Promise<{ writes: MediaWrite[]; processed: number }> => {
+  const writes: MediaWrite[] = [];
+  let processed = 0;
+
+  for (const item of items) {
+    if (processed > 0 && Date.now() > deadline) break;
+    const file = await importFile(item.eventId, item.fileName);
+    processed += 1;
+    if (file) writes.push({ id: item.messageId, media: [file] });
+  }
+
+  return { writes, processed };
+};
+
+// Files of the written messages that do not have one yet.
+export const pendingMedia = (written: UpsertedMessage[], events: BridgeMessageEvent[]): MediaItem[] => {
+  const eventById = new Map(events.map((event) => [event.eventId, event]));
+
+  return written.flatMap((message) => {
+    const fileName = eventById.get(message.externalId)?.media?.fileName;
+    return message.mediaKind && !message.media?.length && fileName
+      ? [{ messageId: message.id, eventId: message.externalId, fileName }]
+      : [];
+  });
 };

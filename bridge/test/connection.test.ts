@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { proto, type Chat, type WAMessage } from '@whiskeysockets/baileys';
 
+import { ApiBudget } from '../src/api-budget.js';
 import { WhatsAppConnection, type BridgeSignal, type ConnectionStatus } from '../src/connection.js';
 import { createEncryptedAuthState } from '../src/encrypted-auth-state.js';
 import type { MessageEvent } from '../src/message-event.js';
@@ -185,10 +186,50 @@ test('only one importer claims a queued batch at a time', async () => {
   const claimed = await connection.claimEvents();
   assert.equal(claimed.events.length, 1);
   assert.ok(claimed.leaseId);
-  assert.deepEqual(await connection.claimEvents(), { events: [] });
+  const second = await connection.claimEvents();
+  assert.deepEqual(second.events, []);
+  assert.equal(second.leaseId, undefined);
 
-  assert.deepEqual(await connection.releaseEvents(claimed.leaseId), { released: true, remaining: false });
+  const released = await connection.releaseEvents(claimed.leaseId);
+  assert.equal(released.released, true);
+  assert.equal(released.remaining, false);
   assert.ok((await connection.claimEvents()).leaseId);
+});
+
+test('every claim moves the sync job key on, so a later signal gets its own job', async () => {
+  const connection = new WhatsAppConnection(join(tmpdir(), 'twenty-whatsapp-key-test'), randomBytes(32));
+  const before = connection.syncJobKey();
+  const claimed = await connection.claimEvents();
+
+  assert.notEqual(claimed.jobKey, before);
+  assert.equal(connection.syncJobKey(), claimed.jobKey, 'signals sent now name the next job');
+  assert.match(claimed.jobKey, /^[a-f\d]{8}\.\d+$/);
+  assert.notEqual(
+    new WhatsAppConnection(join(tmpdir(), 'twenty-whatsapp-key-test'), randomBytes(32)).syncJobKey(),
+    before,
+    'a restarted bridge does not reuse the keys of jobs Twenty still remembers',
+  );
+});
+
+test('remembers the Twenty account of the linked number until it disconnects', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-account-'));
+  const encryptionKey = randomBytes(32);
+  const accountId = '44444444-4444-4444-8444-444444444444';
+
+  try {
+    const connection = new WhatsAppConnection(directory, encryptionKey);
+    connectFakeSocket(connection);
+    assert.deepEqual(await connection.rememberTwentyAccount('+15550000000', accountId), { remembered: false });
+    assert.deepEqual(await connection.rememberTwentyAccount(ACCOUNT_PHONE, accountId), { remembered: true });
+    assert.equal(connection.getStatus().twentyAccountId, accountId);
+
+    const restarted = new RecordingConnection(directory, encryptionKey);
+    await restarted.resume();
+    connectFakeSocket(restarted);
+    assert.equal(restarted.getStatus().twentyAccountId, accountId);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('releasing a batch reports remaining events to the sync instead of signaling Twenty again', async () => {
@@ -212,11 +253,11 @@ test('releasing a batch reports remaining events to the sync instead of signalin
 
     const first = await connection.claimEvents();
     await connection.ackEvents(['a'.repeat(64)]);
-    assert.deepEqual(await connection.releaseEvents(first.leaseId!), { released: true, remaining: true });
+    assert.equal((await connection.releaseEvents(first.leaseId!)).remaining, true);
 
     const second = await connection.claimEvents();
     await connection.ackEvents(['b'.repeat(64)]);
-    assert.deepEqual(await connection.releaseEvents(second.leaseId!), { released: true, remaining: false });
+    assert.equal((await connection.releaseEvents(second.leaseId!)).remaining, false);
     assert.deepEqual(signals, [], 'the Twenty job queues itself; the bridge does not signal again');
   } finally {
     await connection.disconnect();
@@ -711,6 +752,65 @@ test('stopping the bridge keeps the linked device for the next start', async () 
     await connection.close();
 
     assert.deepEqual(calls, ['end']);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('lists the chats renamed since the last refresh, and asks for a full refresh after a start', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-names-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const rename = (name: string) => connection.recordHistory([], [], false, [{ id: CHAT_ID, name } as Chat]);
+
+  try {
+    const start = await connection.getNameChanges();
+    assert.equal(start.full, true, 'changes made before this start were not tracked');
+    connection.acknowledgeNameChanges(start.version);
+
+    await rename('Alice');
+    const first = await connection.getNameChanges();
+    assert.deepEqual(first.names, [{ chatId: CHAT_ID, name: 'Alice' }]);
+    assert.equal(first.full, false);
+
+    await rename('Alice Martin');
+    connection.acknowledgeNameChanges(first.version);
+    assert.deepEqual(
+      (await connection.getNameChanges()).names,
+      [{ chatId: CHAT_ID, name: 'Alice Martin' }],
+      'a change after the refresh read its list stays listed',
+    );
+
+    connection.acknowledgeNameChanges((await connection.getNameChanges()).version);
+    assert.deepEqual(await connection.getNameChanges(), { version: 2, full: false, names: [] });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a sync batch waits for the API budget, and only one sync job waits at a time', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-budget-'));
+  const budget = new ApiBudget(10);
+  const connection = new WhatsAppConnection(directory, randomBytes(32), undefined, undefined, budget);
+  const events = (connection as unknown as { events: { write: (key: string, value: MessageEvent) => Promise<void> } })
+    .events;
+
+  try {
+    await events.write('a'.repeat(64), {
+      eventId: 'a'.repeat(64),
+      chatId: CHAT_ID,
+      providerMessageId: 'message-a',
+      direction: 'inbound',
+      text: 'Hello',
+      sentAt: new Date().toISOString(),
+    });
+    budget.adjust(20);
+
+    const first = await connection.claimEvents();
+    assert.equal(first.leaseId, undefined);
+    assert.ok(first.waitMs && first.waitMs > 0, 'the job is told when to come back');
+    const second = await connection.claimEvents();
+    assert.equal(second.waitMs, undefined, 'a second job ends: the first one will come back');
+    assert.equal(second.leaseId, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

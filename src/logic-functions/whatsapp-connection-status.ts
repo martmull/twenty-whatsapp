@@ -1,6 +1,6 @@
 import { defineLogicFunction } from 'twenty-sdk/define';
 
-import { getBridgeStatus } from 'src/logic-functions/bridge-request';
+import { getBridgeStatus, isBridgeOutdated } from 'src/logic-functions/bridge-request';
 import { canManageConnection } from 'src/logic-functions/can-manage-connection';
 import { requireUser, route } from 'src/logic-functions/utils/route';
 
@@ -9,8 +9,12 @@ const handler = route('whatsapp-connection-status', async (event) => {
 
   const [status, canManage] = await Promise.all([getBridgeStatus(), canManageConnection()]);
 
+  const bridgeOutdated = isBridgeOutdated(status);
+
   // Only admins may see the pairing QR code: whoever scans it links their WhatsApp account.
-  return canManage ? { ...status, canManage } : { state: status.state, phoneNumber: status.phoneNumber, canManage };
+  return canManage
+    ? { ...status, canManage, bridgeOutdated }
+    : { state: status.state, phoneNumber: status.phoneNumber, canManage, bridgeOutdated };
 });
 
 export default defineLogicFunction({

@@ -1,20 +1,13 @@
 import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
-import { runHistoryImportStep } from 'src/logic-functions/history-import';
+import { runHistoryImportStep, type HistoryImportPayload } from 'src/logic-functions/history-import';
 import { createLogger } from 'src/logic-functions/utils/logger';
 
-// Never throws: a platform retry would start a second chain. Failures are retried by the next job.
-const handler = async (payload: { runToken?: unknown }) => {
-  const logger = createLogger('whatsapp-history-import-job');
-
-  try {
-    return await runHistoryImportStep(payload?.runToken, logger);
-  } catch (error) {
-    logger.error('History import step failed', { error: error instanceof Error ? error.message : String(error) });
-    return { status: 'error' as const };
-  }
-};
+// An unexpected error is thrown so the platform retries the job: the bridge hands the same page
+// back to the retry, and a retry of a page already imported stops at its claim.
+const handler = async (payload: HistoryImportPayload) =>
+  runHistoryImportStep(payload, createLogger('whatsapp-history-import-job'));
 
 export default defineLogicFunction({
   universalIdentifier: HISTORY_IMPORT_JOB_UNIVERSAL_IDENTIFIER,
