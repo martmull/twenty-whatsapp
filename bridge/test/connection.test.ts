@@ -367,21 +367,111 @@ test('contact name changes replace saved names', async () => {
   }
 });
 
-test('numeric group titles resolve in the background', async () => {
+test('numeric group titles are replaced by the group subject before they are returned', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-group-name-'));
   const connection = new WhatsAppConnection(directory, randomBytes(32));
-  const chatId = '120363123456789012@g.us';
+  const groupIds = Array.from({ length: 8 }, (_, index) => `12036312345678901${index}@g.us`);
+  let active = 0;
+  let maxActive = 0;
+  let metadataCalls = 0;
 
   try {
-    await connection.recordHistory([], [], false, [{ id: chatId, name: chatId.split('@')[0] }]);
+    await connection.recordHistory(
+      [],
+      [],
+      false,
+      groupIds.map((id) => ({ id, name: id.split('@')[0] })),
+    );
     Object.defineProperty(connection, 'socket', {
-      value: { groupMetadata: async () => ({ subject: 'Family group' }) },
+      value: {
+        groupMetadata: async (chatId: string) => {
+          metadataCalls += 1;
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          active -= 1;
+          return { subject: `Group ${chatId.slice(-6, -5)}` };
+        },
+      },
     });
     Object.defineProperty(connection, 'status', { value: { state: 'connected' } });
 
-    assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: chatId.split('@')[0] }]);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.deepEqual(await connection.getHistoryNames([chatId]), [{ chatId, name: 'Family group' }]);
+    const names = await connection.getHistoryNames(groupIds);
+    assert.deepEqual(
+      names,
+      groupIds.map((chatId) => ({ chatId, name: `Group ${chatId.slice(-6, -5)}` })),
+    );
+    assert.ok(maxActive <= 3, 'group metadata requests are rate limited');
+
+    await connection.getHistoryNames(groupIds);
+    assert.equal(metadataCalls, groupIds.length, 'resolved subjects are kept');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('only saved contacts are reported, by phone number, for their LID or phone ID', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-saved-contacts-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+
+  try {
+    await connection.recordAddressBook([
+      { ids: ['15551234567@s.whatsapp.net'], fullName: 'Alex Martin', firstName: 'Alex', lastName: 'Martin' },
+    ]);
+    await connection.recordHistory(
+      [
+        { id: '777777777@lid', lid: '777777777@lid', jid: '15551234567@s.whatsapp.net' },
+        { id: '15557654321@s.whatsapp.net', notify: 'Profile name only' },
+      ],
+      [],
+    );
+
+    assert.deepEqual(
+      await connection.getSavedContacts(['777777777@lid', '15551234567@s.whatsapp.net', '15557654321@s.whatsapp.net']),
+      [
+        { id: '777777777@lid', phoneNumber: '+15551234567', firstName: 'Alex', lastName: 'Martin' },
+        { id: '15551234567@s.whatsapp.net', phoneNumber: '+15551234567', firstName: 'Alex', lastName: 'Martin' },
+      ],
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('group members saved in the address book are flagged as saved contacts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-saved-members-'));
+  const connection = new WhatsAppConnection(directory, randomBytes(32));
+
+  try {
+    await connection.recordAddressBook([
+      { ids: ['15551234567@s.whatsapp.net'], fullName: 'Alex Martin', firstName: 'Alex', lastName: 'Martin' },
+    ]);
+    Object.defineProperty(connection, 'socket', {
+      value: {
+        groupMetadata: async () => ({
+          participants: [{ id: '15551234567@s.whatsapp.net' }, { id: '15557654321@s.whatsapp.net', notify: 'Sam' }],
+        }),
+      },
+    });
+    Object.defineProperty(connection, 'status', { value: { state: 'connected' } });
+
+    assert.deepEqual(await connection.getGroupMembers('120363123456789012@g.us'), [
+      {
+        id: '15551234567@s.whatsapp.net',
+        phoneNumber: '+15551234567',
+        displayName: 'Alex Martin',
+        firstName: 'Alex',
+        lastName: 'Martin',
+        isSavedContact: true,
+      },
+      {
+        id: '15557654321@s.whatsapp.net',
+        phoneNumber: '+15557654321',
+        displayName: 'Sam',
+        firstName: 'Sam',
+        lastName: '',
+      },
+    ]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

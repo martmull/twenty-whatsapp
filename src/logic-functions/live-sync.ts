@@ -9,11 +9,14 @@ import {
   isValidBridgeEvent,
   messageRecord,
   personName,
+  planSavedContactPeople,
   summarizeEvents,
   summaryPatch,
   type BridgeMessageEvent,
+  type ContactName,
   type Conversation,
   type Person,
+  type SavedContact,
 } from 'src/logic-functions/message-data';
 import { queueMedia } from 'src/logic-functions/media-import';
 import { pendingMedia, type MediaItem } from 'src/logic-functions/message-media';
@@ -23,12 +26,14 @@ import {
   rateLimitRetryAfterMs,
   upsertConversations,
   upsertMessages,
+  upsertPeople,
   type UpsertedMessage,
 } from 'src/logic-functions/record-writes';
 import type { Logger } from 'src/logic-functions/utils/logger';
 import {
   chatNumber,
   digits,
+  isContactId,
   isDirectChatId,
   isGroupChatId,
   isPhoneLikeName,
@@ -68,20 +73,23 @@ const resolveAccountId = async (client: CoreApiClient, phoneNumber: string, cach
 };
 
 // Direct chats need exactly one matching Person; group chats are imported only once an admin has
-// imported their history (the conversation exists).
+// imported their history (the conversation exists). A conversation still named after a number takes
+// the name the bridge knows.
 const planChats = (
   eventsByChat: Map<string, BridgeMessageEvent[]>,
   people: Map<string, Person[]>,
   conversations: Map<string, Conversation>,
+  contactByChatId: Map<string, ContactName>,
 ): { batches: ChatBatch[]; ignored: BridgeMessageEvent[] } => {
   const batches: ChatBatch[] = [];
   const ignored: BridgeMessageEvent[] = [];
 
   for (const [chatId, events] of eventsByChat) {
     const conversation = conversations.get(chatId);
+    const contactName = contactByChatId.get(chatId)?.name;
 
     if (isGroupChatId(chatId)) {
-      if (conversation) batches.push({ chatId, events, conversation, name: conversation.name });
+      if (conversation) batches.push({ chatId, events, conversation, name: contactName ?? conversation.name });
       else ignored.push(...events);
       continue;
     }
@@ -93,7 +101,7 @@ const planChats = (
         events,
         conversation,
         person: matches[0],
-        name: personName(matches[0]) || chatNumber(chatId),
+        name: personName(matches[0]) || contactName || chatNumber(chatId),
       });
     } else {
       ignored.push(...events);
@@ -101,6 +109,108 @@ const planChats = (
   }
 
   return { batches, ignored };
+};
+
+// Group senders saved in the phone's address book, by sender ID. Best effort: a group's messages are
+// imported even when its senders cannot become People.
+const findSavedGroupSenders = async (
+  events: BridgeMessageEvent[],
+  logger: Logger,
+): Promise<(SavedContact & { id: string })[]> => {
+  const ids = [
+    ...new Set(
+      events.flatMap((event) => (isGroupChatId(event.chatId) && isContactId(event.senderId) ? [event.senderId] : [])),
+    ),
+  ];
+  if (ids.length === 0) return [];
+
+  return bridgePost<(SavedContact & { id: string })[]>('/contacts/saved', { ids }).catch((error: unknown) => {
+    logger.warn('Could not look up saved group senders', { error: String(error) });
+    return [];
+  });
+};
+
+// Unmatched direct chats need the contact's saved name to become People; conversations still named
+// after a number need a better one. Without it, unmatched chats are ignored as before.
+const findContactNames = async (
+  chatIds: string[],
+  people: Map<string, Person[]>,
+  conversations: Map<string, Conversation>,
+  logger: Logger,
+): Promise<Map<string, ContactName>> => {
+  const chatsToName = chatIds.filter((chatId) => {
+    const conversation = conversations.get(chatId);
+    if (conversation) return isPhoneLikeName(conversation.name);
+    return isDirectChatId(chatId) && !people.has(chatNumber(chatId));
+  });
+  if (chatsToName.length === 0) return new Map();
+
+  const names = await bridgePost<ContactName[]>('/history/names', { chatIds: chatsToName }, 30_000).catch(
+    (error: unknown) => {
+      logger.warn('Could not read contact names', { error: String(error) });
+      return [];
+    },
+  );
+  return new Map(names.map((contact) => [contact.chatId, contact]));
+};
+
+type SavedContactPlan = {
+  eventsByChat: Map<string, BridgeMessageEvent[]>;
+  people: Map<string, Person[]>;
+  conversations: Map<string, Conversation>;
+  contactByChatId: Map<string, ContactName>;
+  savedSenders: (SavedContact & { id: string })[];
+  logger: Logger;
+};
+
+// Creates, in one upsert, a Person for each saved contact of the batch: direct chats from a saved
+// contact, and saved senders of imported groups. Unknown numbers are ignored. Returns the direct
+// chats that could not get their Person, so their messages are not dropped.
+const createSavedContactPeople = async (
+  client: CoreApiClient,
+  { eventsByChat, people, conversations, contactByChatId, savedSenders, logger }: SavedContactPlan,
+): Promise<string[]> => {
+  const senderById = new Map(savedSenders.map((sender) => [sender.id, sender]));
+  const directContacts: SavedContact[] = [];
+  const groupContacts: SavedContact[] = [];
+
+  for (const [chatId, events] of eventsByChat) {
+    if (isGroupChatId(chatId)) {
+      if (conversations.has(chatId)) {
+        groupContacts.push(...events.flatMap((event) => senderById.get(event.senderId ?? '') ?? []));
+      }
+      continue;
+    }
+    const contact = contactByChatId.get(chatId);
+    if (!people.has(chatNumber(chatId)) && contact?.firstName) {
+      directContacts.push({
+        phoneNumber: chatNumber(chatId),
+        firstName: contact.firstName,
+        lastName: contact.lastName ?? '',
+      });
+    }
+  }
+
+  const planned = planSavedContactPeople([...directContacts, ...groupContacts], people);
+  if (planned.length === 0) return [];
+
+  try {
+    await upsertPeople(
+      client,
+      planned.map(({ write }) => write),
+    );
+  } catch (error) {
+    if (rateLimitRetryAfterMs(error) !== undefined) throw error;
+    logger.error('Could not create People for saved contacts', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    const waiting = new Set(directContacts.map((contact) => digits(contact.phoneNumber)));
+    return [...eventsByChat.keys()].filter((chatId) => isDirectChatId(chatId) && waiting.has(chatNumber(chatId)));
+  }
+
+  for (const { number, person } of planned) people.set(number, [person]);
+  logger.info('Created People for saved contacts', { count: planned.length });
+  return [];
 };
 
 const conversationWrite = (accountId: string, batch: ChatBatch): Record<string, unknown> | undefined => {
@@ -119,7 +229,7 @@ const conversationWrite = (accountId: string, batch: ChatBatch): Record<string, 
   }
 
   const rename =
-    person && isPhoneLikeName(conversation.name) && name.trim() && !isPhoneLikeName(name)
+    isPhoneLikeName(conversation.name) && name.trim() && !isPhoneLikeName(name)
       ? { name: name.trim().slice(0, 120) }
       : {};
   const data = { ...patch, ...rename };
@@ -213,12 +323,28 @@ export const syncMessages = async (
     }
 
     const accountId = await resolveAccountId(client, `+${digits(status.phoneNumber)}`, status.twentyAccountId);
-    const directNumbers = [...eventsByChat.keys()].filter(isDirectChatId).map(chatNumber);
+    const chatIds = [...eventsByChat.keys()];
+    const savedSenders = await findSavedGroupSenders(valid, logger);
     const [people, conversations] = await Promise.all([
-      findPeopleByPhones(client, directNumbers),
-      findConversations(client, accountId, [...eventsByChat.keys()]),
+      findPeopleByPhones(client, [
+        ...chatIds.filter(isDirectChatId).map(chatNumber),
+        ...savedSenders.map((sender) => digits(sender.phoneNumber)),
+      ]),
+      findConversations(client, accountId, chatIds),
     ]);
-    const { batches, ignored } = planChats(eventsByChat, people, conversations);
+    const contactByChatId = await findContactNames(chatIds, people, conversations, logger);
+    const unwrittenChatIds = await createSavedContactPeople(client, {
+      eventsByChat,
+      people,
+      conversations,
+      contactByChatId,
+      savedSenders,
+      logger,
+    });
+    // Chats waiting for their Person stay queued for the next sync.
+    for (const chatId of unwrittenChatIds) eventsByChat.delete(chatId);
+
+    const { batches, ignored } = planChats(eventsByChat, people, conversations, contactByChatId);
     ignoredCount = ignored.length;
     acknowledge.push(...ignored.map((event) => event.eventId));
 

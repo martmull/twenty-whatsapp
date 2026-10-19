@@ -391,12 +391,14 @@ export class HistoryImportQueue {
     });
   }
 
-  // Gives the page back after a failure. A chat that keeps failing is set aside as failed.
+  // Gives the page back after a failure. A chat that keeps failing is set aside as failed, and an
+  // abandoned one (its conversation was deleted) at once, without blaming the others.
   release(
     leaseId: string,
     failed: boolean,
     nextRunInMs: number,
     requests?: number,
+    abandonedChatIds: string[] = [],
   ): Promise<ChainStep & { failures: number }> {
     return this.serialize(async () => {
       const lease = this.takeLease(leaseId);
@@ -405,10 +407,12 @@ export class HistoryImportQueue {
       if (lease && requests !== undefined) this.budget?.adjust(requests - lease.cost);
       if (lease) {
         this.pageAttempt += 1;
-        for (const chat of failed ? lease.chats : []) {
+        const abandoned = new Set(abandonedChatIds);
+        const blamed = abandoned.size > 0 ? lease.chats.filter((chat) => abandoned.has(chat.chatId)) : lease.chats;
+        for (const chat of failed ? blamed : []) {
           const task = await this.tasks.read(chat.chatId);
           if (task?.taskId !== chat.taskId) continue;
-          const taskFailures = task.failures + 1;
+          const taskFailures = abandoned.has(chat.chatId) ? MAX_FAILURES : task.failures + 1;
           failures = Math.max(failures, taskFailures);
           await this.tasks.write(task.chatId, {
             ...task,

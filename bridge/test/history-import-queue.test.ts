@@ -290,3 +290,25 @@ test('spaces pages at least a second apart, counted from when the job started', 
     assert.equal((await queue.complete(second.leaseId, {}, 0, 1, 5_000)).nextRunInMs, 0);
   });
 });
+
+test('an abandoned chat is set aside at once, without blaming the chats it shared a page with', async () => {
+  await withQueue({ [CHAT_ID]: messages(2), [OTHER_CHAT_ID]: messages(2, OTHER_CHAT_ID, 10) }, async (queue) => {
+    const { runToken } = await queueBoth(queue);
+    const shared = asPage(await queue.claim(runToken!, 0));
+
+    assert.equal((await queue.release(shared.leaseId, true, 0, undefined, [CHAT_ID])).failures, 5);
+    assert.deepEqual(
+      (await sortedProgress(queue)).map((task) => [task.chatId, task.state]),
+      [
+        [CHAT_ID, 'failed'],
+        [OTHER_CHAT_ID, 'queued'],
+      ],
+    );
+    const next = asPage(await queue.claim(runToken!, 0));
+    assert.deepEqual(
+      next.chats.map((chat) => chat.chatId),
+      [OTHER_CHAT_ID],
+    );
+    assert.equal(next.chats[0].messages.length, 2, 'the other chat was not counted as failing');
+  });
+});

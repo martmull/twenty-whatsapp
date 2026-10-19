@@ -11,8 +11,11 @@ import {
   findConversations,
   findPeopleByPhones,
   personName,
+  planSavedContactPeople,
   userClient,
+  type ContactName,
   type Person,
+  type SavedContact,
 } from 'src/logic-functions/message-data';
 import { deterministicId, upsertConversations, upsertPeople } from 'src/logic-functions/record-writes';
 import type { Logger } from 'src/logic-functions/utils/logger';
@@ -47,8 +50,7 @@ type HistoryCandidate = {
   messageCount: number;
   lastMessageAt?: string;
 };
-// Names the bridge knows for a chat: the display name, and first and last names from the phone's address book.
-type ContactName = { name: string; firstName?: string; lastName?: string };
+type GroupMember = { phoneNumber?: string; firstName?: string; lastName?: string; isSavedContact?: boolean };
 
 const listCandidates = async (request: HistoryRequest) => {
   const offset = request.offset ?? 0;
@@ -87,7 +89,12 @@ const listCandidates = async (request: HistoryRequest) => {
 type PersonPlan = { person: Person; write?: Record<string, unknown>; createdPerson: boolean };
 
 // Finds the Person for a direct chat and the write that creates or renames them as the admin asked.
-const planPerson = (request: ChatSelection, chatId: string, contact: ContactName, matches: Person[]): PersonPlan => {
+const planPerson = (
+  request: ChatSelection,
+  chatId: string,
+  contact: Omit<ContactName, 'chatId'>,
+  matches: Person[],
+): PersonPlan => {
   if (matches.length > 1) {
     throw new HttpError(409, 'More than one Person has this phone number');
   }
@@ -144,6 +151,25 @@ const planPerson = (request: ChatSelection, chatId: string, contact: ContactName
   return { person: existing, createdPerson: false };
 };
 
+// Members of the selected groups saved in the phone's address book. A group whose members cannot be
+// read is still imported.
+const savedGroupMembers = async (groupChatIds: string[], logger: Logger): Promise<SavedContact[]> => {
+  const members = await Promise.all(
+    groupChatIds.map((chatId) =>
+      bridgePost<GroupMember[]>('/history/members', { chatId }, 30_000).catch(() => {
+        logger.warn('Could not read group members', { chatId });
+        return [];
+      }),
+    ),
+  );
+
+  return members
+    .flat()
+    .flatMap(({ phoneNumber, firstName, lastName, isSavedContact }) =>
+      isSavedContact && phoneNumber && firstName ? [{ phoneNumber, firstName, lastName: lastName ?? '' }] : [],
+    );
+};
+
 type QueueImportDependencies = {
   client?: CoreApiClient;
   // Writes People as the admin, so their own permissions apply.
@@ -183,12 +209,21 @@ export const queueImport = async (
   }
 
   const [names, accountId] = await Promise.all([
-    bridgePost<(ContactName & { chatId: string })[]>('/history/names', { chatIds }, 30_000),
+    bridgePost<ContactName[]>('/history/names', { chatIds }, 30_000),
     ensureAccount(client, `+${accountPhoneNumber}`),
   ]);
   const contactByChatId = new Map(names.map(({ chatId, ...contact }) => [chatId, contact]));
+  const groupMembers = await savedGroupMembers(
+    chats
+      .filter((chat) => isGroupChatId(chat.chatId) && chat.createPerson === true)
+      .map((chat) => chat.chatId as string),
+    logger,
+  );
   const [peopleByPhone, conversations] = await Promise.all([
-    findPeopleByPhones(client, chatIds.filter((chatId) => !isGroupChatId(chatId)).map(chatNumber)),
+    findPeopleByPhones(client, [
+      ...chatIds.filter((chatId) => !isGroupChatId(chatId)).map(chatNumber),
+      ...groupMembers.map((member) => digits(member.phoneNumber)),
+    ]),
     findConversations(client, accountId, chatIds),
   ]);
   const resolved: { chatId: string; name: string; person?: Person }[] = [];
@@ -217,8 +252,15 @@ export const queueImport = async (
     }
   }
 
-  if (personWrites.length > 0) {
-    await upsertPeople(adminClient, personWrites);
+  // Saved members of the imported groups join the same upsert; other members are left out.
+  const planned = new Set(personWrites.map((write) => write.id));
+  const memberWrites = planSavedContactPeople(groupMembers, peopleByPhone)
+    .map(({ write }) => write)
+    .filter((write) => !planned.has(write.id));
+  createdPeople += memberWrites.length;
+
+  if (personWrites.length + memberWrites.length > 0) {
+    await upsertPeople(adminClient, [...personWrites, ...memberWrites]);
   }
 
   const conversationWrites = resolved.flatMap(({ chatId, name, person }) => {

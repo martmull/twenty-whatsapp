@@ -4,6 +4,7 @@ import { bridgePost } from 'src/logic-functions/bridge-request';
 import {
   chunkRecords,
   countingClient,
+  deterministicId,
   MAX_UPSERT_RECORDS,
   upsertConversations,
 } from 'src/logic-functions/record-writes';
@@ -159,6 +160,37 @@ export const findPeopleByPhones = async (client: CoreApiClient, numbers: string[
   }
 
   return peopleByPhone;
+};
+
+// Names the bridge knows for a chat: the display name, and first and last names from the phone's address book.
+export type ContactName = { chatId: string; name: string; firstName?: string; lastName?: string };
+
+// A contact saved in the phone's address book: the only people the app creates as People.
+export type SavedContact = { phoneNumber: string; firstName: string; lastName: string };
+
+export type NewPerson = { number: string; person: Person; write: Record<string, unknown> };
+
+// The People to create for saved contacts whose number no Person has yet. Ids derive from the number,
+// so a replayed write lands on the same Person.
+export const planSavedContactPeople = (contacts: SavedContact[], peopleByPhone: Map<string, Person[]>): NewPerson[] => {
+  const planned = new Map<string, NewPerson>();
+
+  for (const { phoneNumber, firstName, lastName } of contacts) {
+    const number = digits(phoneNumber);
+    if (!number || !firstName.trim() || peopleByPhone.has(number) || planned.has(number)) continue;
+
+    const id = deterministicId('person', `+${number}`);
+    const name = { firstName: firstName.trim(), lastName: lastName.trim() };
+    const phones = {
+      primaryPhoneNumber: `+${number}`,
+      primaryPhoneCountryCode: '',
+      primaryPhoneCallingCode: '',
+      additionalPhones: null,
+    };
+    planned.set(number, { number, person: { id, name, phones }, write: { id, name, phones } });
+  }
+
+  return [...planned.values()];
 };
 
 export const ensureAccount = async (client: CoreApiClient, phoneNumber: string): Promise<string> => {

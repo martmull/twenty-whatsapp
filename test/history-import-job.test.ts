@@ -279,3 +279,23 @@ test('retries queueing the next page before leaving it to the bridge', async () 
 
   assert.equal(attempts, 2);
 });
+
+test('drops the chats whose conversation was deleted and retries the others at once', async () => {
+  const twenty = createFakeTwenty({
+    whatsappConversations: [{ id: OTHER_CONVERSATION_ID, name: 'Sam', chatId: OTHER_CHAT_ID, accountId: 'acc' }],
+  });
+  twenty.failNextRequest(new Error('insert or update on table "_whatsappMessage" violates foreign key constraint'));
+  const calls = bridgeWith(page(), { remaining: 1, pageSeq: 4, nextJobKey: '4-1' });
+
+  const { result, scheduled } = await run(twenty);
+
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(calls.find((call) => call.path === '/history/imports/release')?.body, {
+    leaseId: LEASE_ID,
+    failed: true,
+    nextRunInMs: 0,
+    requests: 2,
+    abandonedChatIds: [CHAT_ID],
+  });
+  assert.equal(scheduled[0].delayMs, 0);
+});

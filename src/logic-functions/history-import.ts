@@ -104,6 +104,24 @@ const writeSummaries = async (client: CoreApiClient, summaries: PageSummary[]): 
   }
 };
 
+// The page's chats whose conversation no longer exists in Twenty: they were queued before it was
+// deleted, so retrying them can never succeed.
+const chatsWithDeletedConversation = async (client: CoreApiClient, page: HistoryImportPage): Promise<string[]> => {
+  const ids = [...new Set(page.chats.map((chat) => chat.conversationId).filter(isUuid))];
+  if (ids.length === 0) return [];
+
+  const result = await client.query({
+    whatsappConversations: {
+      __args: { filter: { id: { in: ids } }, first: MAX_UPSERT_RECORDS },
+      edges: { node: { id: true } },
+    },
+  });
+  const existing = new Set(
+    nodesOf<{ id: string }>(result.whatsappConversations).map((conversation) => conversation.id),
+  );
+  return page.chats.filter((chat) => !existing.has(chat.conversationId)).map((chat) => chat.chatId);
+};
+
 type ImportedPage = { importedByChat: Record<string, number>; imported: number; media: MediaItem[] };
 
 // One messages upsert for every chat of the page; existing messages are matched, not duplicated.
@@ -228,12 +246,19 @@ export const runHistoryImportStep = async (
     result = { status: 'imported', imported: imported.imported, remaining: step.remaining, nextRunInMs };
   } catch (error) {
     const retryAfterMs = rateLimitRetryAfterMs(error);
-    const nextRunInMs = retryAfterMs ?? RETRY_DELAY_MS;
-    logger.warn('Could not import history page', {
-      chats: page.chats.map((chat) => chat.chatId),
-      rateLimited: retryAfterMs !== undefined,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    const abandonedChatIds =
+      retryAfterMs === undefined ? await chatsWithDeletedConversation(countedClient, page).catch(() => []) : [];
+    // The other chats of the page are retried at once, without counting a failure against them.
+    const nextRunInMs = retryAfterMs ?? (abandonedChatIds.length > 0 ? 0 : RETRY_DELAY_MS);
+    logger.warn(
+      abandonedChatIds.length > 0 ? 'Skipping chats whose conversation was deleted' : 'Could not import history page',
+      {
+        chats: page.chats.map((chat) => chat.chatId),
+        abandonedChatIds,
+        rateLimited: retryAfterMs !== undefined,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
     if (retryAfterMs !== undefined) await reportRateLimit(retryAfterMs);
     // Rate limiting is not the chats' fault, so it does not count toward setting them aside.
     step = await bridgePost<ChainStep>('/history/imports/release', {
@@ -241,6 +266,7 @@ export const runHistoryImportStep = async (
       failed: retryAfterMs === undefined,
       nextRunInMs,
       requests: counter.requests,
+      ...(abandonedChatIds.length > 0 ? { abandonedChatIds } : {}),
     });
     result = { status: 'failed', remaining: step.remaining, nextRunInMs };
   }
