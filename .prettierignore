@@ -6,3 +6,4 @@ public/
 yarn.lock
 bridge/package-lock.json
 bridge/data/
+bridge/dist/

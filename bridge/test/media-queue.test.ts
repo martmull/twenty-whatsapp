@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
 
 import { ApiBudget } from '../src/api-budget.js';
 import { MAX_MEDIA_CHAINS, MEDIA_ITEMS_PER_CLAIM, MediaQueue, type MediaClaim } from '../src/media-queue.js';
+
+import { MemoryStorage } from './memory-storage.js';
 
 const item = (index: number, source: 'live' | 'history' = 'history') => ({
   messageId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
@@ -23,22 +22,18 @@ const withQueue = async (
     world: { budget: ApiBudget; restarted: string[][] },
   ) => Promise<void>,
 ) => {
-  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-media-'));
+  const storage = new MemoryStorage();
   const clock = { now: Date.UTC(2026, 9, 18) };
   const world = { budget: new ApiBudget(100, () => clock.now), restarted: [] as string[][] };
-  try {
-    await run(
-      new MediaQueue(directory, randomBytes(32), {
-        now: () => clock.now,
-        budget: world.budget,
-        onChainsRestarted: (tokens) => world.restarted.push(tokens),
-      }),
-      clock,
-      world,
-    );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  await run(
+    new MediaQueue(storage, randomBytes(32), {
+      now: () => clock.now,
+      budget: world.budget,
+      onChainsRestarted: (tokens) => world.restarted.push(tokens),
+    }),
+    clock,
+    world,
+  );
 };
 
 const asLease = (claim: MediaClaim) => {

@@ -1,19 +1,30 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
-import { resolve } from 'node:path';
+
+import pg from 'pg';
 
 import { ApiBudget, DEFAULT_BACKGROUND_REQUESTS_PER_MINUTE } from './api-budget.js';
 import { MAX_SYNC_EVENTS, WhatsAppConnection, type BridgeSignal } from './connection.js';
+import { verifyEncryptionKey } from './encrypted-json-store.js';
 import type { MediaSource } from './media-queue.js';
 import { isGroupChatId, isSupportedChatId } from './message-event.js';
+import { migrate, PostgresStorage } from './postgres-storage.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
 const keyHex = process.env.WHATSAPP_SESSION_KEY;
 const webhookUrl = process.env.TWENTY_WEBHOOK_URL;
+const databaseUrl = process.env.DATABASE_URL;
 
 if (!token || !keyHex || !/^[a-f\d]{64}$/i.test(keyHex)) {
   throw new Error('Set WHATSAPP_BRIDGE_TOKEN and a 32-byte hex WHATSAPP_SESSION_KEY');
 }
+
+if (!databaseUrl) {
+  throw new Error('Set DATABASE_URL to the bridge Postgres database');
+}
+
+// Every session lives under this tenant until the bridge serves several workspaces.
+const TENANT_ID = 'default';
 
 const log = (message: string, data: Record<string, unknown> = {}) =>
   process.stdout.write(`${JSON.stringify({ time: new Date().toISOString(), message, ...data })}\n`);
@@ -77,8 +88,18 @@ const notifyTwenty = (signal: BridgeSignal) => {
 const backgroundRequestsPerMinute =
   Number(process.env.WHATSAPP_BACKGROUND_REQUESTS_PER_MINUTE) || DEFAULT_BACKGROUND_REQUESTS_PER_MINUTE;
 const expectedToken = Buffer.from(token);
+const pool = new pg.Pool({ connectionString: databaseUrl });
+// Without a listener, an idle client losing its connection would crash the bridge.
+pool.on('error', (error) => log('Postgres connection lost', { error: error.message }));
+
+const applied = await migrate(pool);
+if (applied.length > 0) log('Database migrated', { migrations: applied });
+
+const storage = new PostgresStorage(pool, TENANT_ID);
+await verifyEncryptionKey(storage, Buffer.from(keyHex, 'hex'));
+
 const connection = new WhatsAppConnection(
-  resolve(process.env.WHATSAPP_DATA_DIR ?? './data/session'),
+  storage,
   Buffer.from(keyHex, 'hex'),
   notifyTwenty,
   log,
@@ -400,9 +421,20 @@ let resumed: Promise<unknown> = new Promise(() => undefined);
 
 // Node's default 16 KB header limit would reject the metadata of a long caption.
 const server = createServer({ maxHeaderSize: 32 * 1024 }, async (request, response) => {
-  await resumed;
   response.setHeader('cache-control', 'no-store');
   response.setHeader('content-type', 'application/json');
+
+  // Unauthenticated, for container health checks: says only whether the database answers.
+  if (request.method === 'GET' && request.url === '/healthz') {
+    const healthy = await pool.query('SELECT 1').then(
+      () => true,
+      () => false,
+    );
+    response.writeHead(healthy ? 200 : 503).end(JSON.stringify({ ok: healthy }));
+    return;
+  }
+
+  await resumed;
 
   if (!isAuthorized(request.headers.authorization)) {
     response.writeHead(401).end(JSON.stringify({ error: 'Unauthorized' }));
@@ -473,6 +505,7 @@ const stop = async (signal: NodeJS.Signals) => {
   log('WhatsApp bridge stopping', { signal });
   server.close();
   await connection.close();
+  await pool.end();
   process.exit(0);
 };
 process.once('SIGTERM', stop);

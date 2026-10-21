@@ -1,7 +1,3 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-
 import {
   BufferJSON,
   initAuthCreds,
@@ -10,54 +6,18 @@ import {
   type SignalDataTypeMap,
 } from '@whiskeysockets/baileys';
 
-const encodeName = (name: string) => createHash('sha256').update(name).digest('hex');
+import { EncryptedJsonStore } from './encrypted-json-store.js';
+import type { Storage } from './storage.js';
 
 export const createEncryptedAuthState = async (
-  directory: string,
+  storage: Storage,
   encryptionKey: Buffer,
 ): Promise<{ state: AuthenticationState; saveCreds: () => Promise<void> }> => {
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-
-  const filePath = (name: string) => join(directory, encodeName(name));
-
-  const read = async (name: string): Promise<unknown | null> => {
-    let content: Buffer;
-
-    try {
-      content = await readFile(filePath(name));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return null;
-      }
-
-      throw error;
-    }
-
-    const nonce = content.subarray(0, 12);
-    const tag = content.subarray(12, 28);
-    const ciphertext = content.subarray(28);
-    const decipher = createDecipheriv('aes-256-gcm', encryptionKey, nonce);
-    decipher.setAuthTag(tag);
-    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-
-    return JSON.parse(plaintext.toString('utf8'), BufferJSON.reviver) as unknown;
-  };
-
-  const write = async (name: string, value: unknown): Promise<void> => {
-    const nonce = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', encryptionKey, nonce);
-    const plaintext = Buffer.from(JSON.stringify(value, BufferJSON.replacer));
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const content = Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]);
-    const destination = filePath(name);
-    const temporary = `${destination}.${randomUUID()}.tmp`;
-
-    await writeFile(temporary, content, { mode: 0o600 });
-    await rename(temporary, destination);
-  };
-
-  const credentials = (await read('credentials')) as AuthenticationState['creds'] | null;
-  const creds = credentials ?? initAuthCreds();
+  const store = new EncryptedJsonStore<unknown>(storage, 'auth', encryptionKey, {
+    replacer: BufferJSON.replacer,
+    reviver: BufferJSON.reviver,
+  });
+  const creds = ((await store.read('credentials')) as AuthenticationState['creds'] | undefined) ?? initAuthCreds();
 
   return {
     state: {
@@ -67,7 +27,7 @@ export const createEncryptedAuthState = async (
           const values: Record<string, SignalDataTypeMap[typeof type]> = {};
 
           for (const id of ids) {
-            let value = await read(`${type}:${id}`);
+            let value = (await store.read(`${type}:${id}`)) ?? null;
 
             if (type === 'app-state-sync-key' && value) {
               value = proto.Message.AppStateSyncKeyData.fromObject(value);
@@ -78,25 +38,19 @@ export const createEncryptedAuthState = async (
 
           return values;
         },
+        // One Signal update can touch several keys; saving them together keeps the session consistent.
         set: async (values) => {
-          for (const [type, entries] of Object.entries(values)) {
-            if (!entries) {
-              continue;
-            }
-
-            for (const [id, value] of Object.entries(entries)) {
-              const name = `${type}:${id}`;
-
-              if (value) {
-                await write(name, value);
-              } else {
-                await rm(filePath(name), { force: true });
-              }
-            }
-          }
+          await store.writeMany(
+            Object.entries(values).flatMap(([type, entries]) =>
+              Object.entries(entries ?? {}).map(([id, value]): [string, unknown] => [
+                `${type}:${id}`,
+                value ?? undefined,
+              ]),
+            ),
+          );
         },
       },
     },
-    saveCreds: async () => write('credentials', creds),
+    saveCreds: async () => store.write('credentials', creds),
   };
 };

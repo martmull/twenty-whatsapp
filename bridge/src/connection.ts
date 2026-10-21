@@ -1,6 +1,4 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
 
 import makeWASocket, {
   Browsers,
@@ -35,6 +33,7 @@ import {
   toMessageEvent,
   type MessageEvent,
 } from './message-event.js';
+import type { Storage } from './storage.js';
 
 // File names must not contain path separators or control characters.
 // eslint-disable-next-line no-control-regex
@@ -161,25 +160,25 @@ export class WhatsAppConnection {
   private fullNamesRefreshUntil: number | undefined = 0;
 
   constructor(
-    private readonly directory: string,
+    private readonly storage: Storage,
     private readonly encryptionKey: Buffer,
     // Delivered to Twenty's bridge webhook (see server.ts).
     private readonly onSignal: (signal: BridgeSignal) => void = () => undefined,
     private readonly log: (message: string, data?: Record<string, unknown>) => void = () => undefined,
     readonly budget: ApiBudget = new ApiBudget(),
   ) {
-    this.events = new EncryptedJsonStore(join(directory, 'events'), encryptionKey);
-    this.sends = new EncryptedJsonStore(join(directory, 'sends'), encryptionKey);
-    this.sentMessages = new EncryptedJsonStore(join(directory, 'sent-messages'), encryptionKey);
-    this.phoneNumbers = new EncryptedJsonStore(join(directory, 'phone-numbers'), encryptionKey);
-    this.contactNames = new EncryptedJsonStore(join(directory, 'contact-names'), encryptionKey);
-    this.addressBook = new EncryptedJsonStore(join(directory, 'address-book'), encryptionKey);
-    this.historyChats = new EncryptedJsonStore(join(directory, 'history-chats'), encryptionKey);
-    this.historyState = new EncryptedJsonStore(join(directory, 'history-state'), encryptionKey);
-    this.mediaReferences = new EncryptedJsonStore(join(directory, 'media-references'), encryptionKey);
-    this.twentyAccounts = new EncryptedJsonStore(join(directory, 'twenty-account'), encryptionKey);
+    this.events = new EncryptedJsonStore(storage, 'events', encryptionKey);
+    this.sends = new EncryptedJsonStore(storage, 'sends', encryptionKey);
+    this.sentMessages = new EncryptedJsonStore(storage, 'sent-messages', encryptionKey);
+    this.phoneNumbers = new EncryptedJsonStore(storage, 'phone-numbers', encryptionKey);
+    this.contactNames = new EncryptedJsonStore(storage, 'contact-names', encryptionKey);
+    this.addressBook = new EncryptedJsonStore(storage, 'address-book', encryptionKey);
+    this.historyChats = new EncryptedJsonStore(storage, 'history-chats', encryptionKey);
+    this.historyState = new EncryptedJsonStore(storage, 'history-state', encryptionKey);
+    this.mediaReferences = new EncryptedJsonStore(storage, 'media-references', encryptionKey);
+    this.twentyAccounts = new EncryptedJsonStore(storage, 'twenty-account', encryptionKey);
     this.historyImports = new HistoryImportQueue(
-      join(directory, 'history-imports'),
+      storage,
       encryptionKey,
       async (chatId) => {
         await this.historyWrites;
@@ -191,7 +190,7 @@ export class WhatsAppConnection {
         budget,
       },
     );
-    this.mediaQueue = new MediaQueue(join(directory, 'media-queue'), encryptionKey, {
+    this.mediaQueue = new MediaQueue(storage, encryptionKey, {
       budget,
       onChainsRestarted: (mediaRunTokens) => this.onSignal({ mediaRunTokens }),
       canRun: () => this.status.state === 'connected',
@@ -1042,7 +1041,7 @@ export class WhatsAppConnection {
 
   async resume(): Promise<void> {
     this.twentyAccount = (await this.twentyAccounts.read('current')) ?? undefined;
-    const { state } = await createEncryptedAuthState(this.directory, this.encryptionKey);
+    const { state } = await createEncryptedAuthState(this.storage, this.encryptionKey);
 
     if (state.creds.me?.id) {
       await this.connect();
@@ -1057,8 +1056,8 @@ export class WhatsAppConnection {
     this.intentionallyDisconnected = false;
     this.status = { state: 'pairing' };
     const generation = ++this.generation;
-    const { state, saveCreds } = await createEncryptedAuthState(this.directory, this.encryptionKey);
-    // Signal keys are read for every message; the cache spares decrypting a file each time.
+    const { state, saveCreds } = await createEncryptedAuthState(this.storage, this.encryptionKey);
+    // Signal keys are read for every message; the cache spares a database read each time.
     const keys = makeCacheableSignalKeyStore(state.keys, baileysLogger);
     this.appState = { keys, hasKey: () => Boolean(state.creds.myAppStateKeyId) };
     const socket = makeWASocket({
@@ -1249,7 +1248,7 @@ export class WhatsAppConnection {
     }
 
     await this.historyWrites.catch(() => undefined);
-    await rm(this.directory, { recursive: true, force: true });
+    await this.storage.clear();
 
     return this.status;
   }

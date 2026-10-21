@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { ApiBudget } from '../bridge/src/api-budget';
 import { HistoryImportQueue } from '../bridge/src/history-import-queue';
 import { MediaQueue } from '../bridge/src/media-queue';
+import { MemoryStorage } from '../bridge/test/memory-storage';
 import { historyJobId, runHistoryImportStep } from '../src/logic-functions/history-import';
 import { mediaJobId, queueMedia, runMediaImport } from '../src/logic-functions/media-import';
 import { createFakeTwenty, mockBridge } from './fake-twenty';
@@ -61,14 +59,14 @@ test('imports 10,000 messages and 2,500 files from 50 chats, within Twenty’s j
       Array.from({ length: MESSAGES_PER_CHAT }, (_, index) => message(chat, index)),
     ]),
   );
-  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-simulation-'));
+  const storage = new MemoryStorage();
   const clock = { now: Date.UTC(2026, 9, 18) };
   const budget = new ApiBudget(200, () => clock.now);
-  const historyQueue = new HistoryImportQueue(join(directory, 'history'), randomBytes(32), async (id) => history[id], {
+  const historyQueue = new HistoryImportQueue(storage, randomBytes(32), async (id) => history[id], {
     now: () => clock.now,
     budget,
   });
-  const mediaQueue = new MediaQueue(join(directory, 'media'), randomBytes(32), { now: () => clock.now, budget });
+  const mediaQueue = new MediaQueue(storage, randomBytes(32), { now: () => clock.now, budget });
   const twenty = createFakeTwenty({
     whatsappConversations: Array.from({ length: CHATS }, (_, chat) => ({
       id: conversationId(chat),
@@ -151,7 +149,6 @@ test('imports 10,000 messages and 2,500 files from 50 chats, within Twenty’s j
     }
   } finally {
     bridge.restore();
-    await rm(directory, { recursive: true, force: true });
   }
 
   const expectedFiles = CHATS * Math.ceil(MESSAGES_PER_CHAT / MEDIA_EVERY);
