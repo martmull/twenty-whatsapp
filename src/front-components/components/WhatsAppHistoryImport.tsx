@@ -17,13 +17,9 @@ type HistoryCandidate = {
   chatId: string;
   kind: 'direct' | 'group';
   name: string;
-  firstName?: string;
   messageCount: number;
   lastMessageAt?: string;
-  match: 'matched' | 'new' | 'ambiguous' | 'group';
 };
-
-type ChatFilter = 'all' | 'direct' | 'group';
 
 type HistoryList = { items: HistoryCandidate[]; total: number };
 
@@ -41,9 +37,6 @@ const RANGE_OPTIONS: { value: RangeDays; label: string }[] = [
   { value: 365, label: t('Last year') },
 ];
 
-const hasContactName = (candidate: HistoryCandidate) =>
-  Boolean(candidate.firstName) || !/^\+?\d+$/.test(candidate.name.trim());
-
 const historyRequest = <TResult,>(body: Record<string, unknown>) =>
   new RestApiClient().post<TResult>('/s/whatsapp/history', body);
 
@@ -58,18 +51,6 @@ const listChats = async (rangeDays: RangeDays): Promise<HistoryCandidate[]> => {
   return chats;
 };
 
-const FILTER_OPTIONS: { value: ChatFilter; label: string }[] = [
-  { value: 'all', label: t('All chats') },
-  { value: 'direct', label: t('Direct') },
-  { value: 'group', label: t('Groups') },
-];
-
-const MATCH_TAGS = {
-  matched: { label: t('Person'), color: 'green' },
-  new: { label: t('New Person'), color: 'blue' },
-  group: { label: t('Group'), color: 'gray' },
-} as const;
-
 type WhatsAppHistoryImportProps = { createPeople: boolean };
 
 export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportProps) => {
@@ -77,7 +58,6 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
   const [rangeDays, setRangeDays] = useState<RangeDays>(30);
   const [chats, setChats] = useState<HistoryCandidate[]>();
   const [loadingChats, setLoadingChats] = useState(false);
-  const [chatFilter, setChatFilter] = useState<ChatFilter>('all');
   const [selected, setSelected] = useState<string[]>([]);
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -138,7 +118,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
     setSelected([]);
 
     try {
-      setChats((await listChats(range)).filter((chat) => chat.messageCount > 0));
+      setChats(await listChats(range));
     } catch (requestError) {
       setChats(undefined);
       setError(bridgeError(requestError));
@@ -152,26 +132,14 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
     if (chats) void loadChats(range);
   };
 
-  const isImportable = (chat: HistoryCandidate) =>
-    chat.match === 'group' ||
-    chat.match === 'matched' ||
-    (chat.match === 'new' && createPeople && hasContactName(chat));
-
-  const importableChats = (chats ?? []).filter(isImportable);
-  const hiddenCount = (chats ?? []).length - importableChats.length;
-  const shownChats = importableChats.filter((chat) => chatFilter === 'all' || chat.kind === chatFilter);
-  const selectedChats = importableChats.filter((chat) => selected.includes(chat.chatId));
-  const allShownSelected = shownChats.length > 0 && shownChats.every((chat) => selected.includes(chat.chatId));
+  const allChats = chats ?? [];
+  const selectedChats = allChats.filter((chat) => selected.includes(chat.chatId));
+  const allSelected = allChats.length > 0 && selectedChats.length === allChats.length;
 
   const toggle = (chatId: string, checked: boolean) =>
     setSelected((previous) => (checked ? [...previous, chatId] : previous.filter((id) => id !== chatId)));
 
-  const toggleShown = (checked: boolean) => {
-    const shownIds = shownChats.map((chat) => chat.chatId);
-    setSelected((previous) =>
-      checked ? [...new Set([...previous, ...shownIds])] : previous.filter((id) => !shownIds.includes(id)),
-    );
-  };
+  const toggleAll = (checked: boolean) => setSelected(checked ? allChats.map((chat) => chat.chatId) : []);
 
   const runImport = async () => {
     setStarting(true);
@@ -187,7 +155,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
           rangeDays,
           chats: selectedChats.slice(start, start + CHATS_PER_REQUEST).map((chat) => ({
             chatId: chat.chatId,
-            createPerson: chat.match === 'new' || (chat.match === 'group' && createPeople),
+            createPerson: createPeople,
           })),
         });
         queued += result.queued;
@@ -240,7 +208,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
       </div>
       <p style={{ ...styles.muted, margin: 0 }}>
         {t(
-          'Choose the chats to import. Imported messages are visible to workspace members with access to these records, and new messages of an imported group keep arriving. Messages already imported are skipped.',
+          'Choose the chats to import. Only imported chats receive new messages. Imported messages are visible to workspace members with access to these records. Messages already imported are skipped.',
         )}
       </p>
       <label style={{ display: 'grid', gap: themeCssVariables.spacing[1] }}>
@@ -283,21 +251,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
       )}
       {chats && (
         <div style={{ display: 'grid', gap: themeCssVariables.spacing[2] }}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[2] }}>
-            {FILTER_OPTIONS.map((option) => (
-              <Button
-                key={option.value}
-                type="button"
-                variant={chatFilter === option.value ? 'solid' : 'outline'}
-                color={chatFilter === option.value ? 'accent' : 'neutral'}
-                size="sm"
-                onClick={() => setChatFilter(option.value)}
-              >
-                {option.label}
-              </Button>
-            ))}
-          </div>
-          {shownChats.length === 0 ? (
+          {allChats.length === 0 ? (
             <p style={{ ...styles.muted, margin: 0 }}>
               {loadingChats ? t('Loading chats…') : t('No chats to import in this period.')}
             </p>
@@ -312,59 +266,49 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
                 }}
               >
                 <FrontComponentCheckbox
-                  checked={allShownSelected}
+                  checked={allSelected}
                   disabled={running || loadingChats}
-                  onChange={(event) => toggleShown(event.target.checked)}
+                  onChange={(event) => toggleAll(event.target.checked)}
                 />
                 <span style={styles.label}>
-                  {t('Select all')} ({shownChats.length})
+                  {t('Select all')} ({allChats.length})
                 </span>
               </label>
-              {shownChats.map((chat) => {
-                const tag = MATCH_TAGS[chat.match as keyof typeof MATCH_TAGS];
-
-                return (
-                  <label
-                    key={chat.chatId}
-                    style={{
-                      alignItems: 'center',
-                      borderTop: `1px solid ${themeCssVariables.border.color.light}`,
-                      display: 'flex',
-                      gap: themeCssVariables.spacing[3],
-                      padding: themeCssVariables.spacing[2],
-                    }}
-                  >
-                    <FrontComponentCheckbox
-                      checked={selected.includes(chat.chatId)}
-                      disabled={running || loadingChats}
-                      onChange={(event) => toggle(chat.chatId, event.target.checked)}
-                    />
-                    <span style={{ display: 'grid', flex: 1, minWidth: 0 }}>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {chat.name}
-                      </span>
-                      <span style={styles.label}>
-                        {chat.messageCount} {t('messages')}
-                        {chat.lastMessageAt
-                          ? ` · ${new Date(chat.lastMessageAt).toLocaleDateString(undefined, { dateStyle: 'medium' })}`
-                          : ''}
-                      </span>
+              {allChats.map((chat) => (
+                <label
+                  key={chat.chatId}
+                  style={{
+                    alignItems: 'center',
+                    borderTop: `1px solid ${themeCssVariables.border.color.light}`,
+                    display: 'flex',
+                    gap: themeCssVariables.spacing[3],
+                    padding: themeCssVariables.spacing[2],
+                  }}
+                >
+                  <FrontComponentCheckbox
+                    checked={selected.includes(chat.chatId)}
+                    disabled={running || loadingChats}
+                    onChange={(event) => toggle(chat.chatId, event.target.checked)}
+                  />
+                  <span style={{ display: 'grid', flex: 1, minWidth: 0 }}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {chat.name}
                     </span>
-                    <Tag color={tag.color} variant="soft" preventShrink>
-                      {tag.label}
+                    <span style={styles.label}>
+                      {chat.messageCount} {t('messages')}
+                      {chat.lastMessageAt
+                        ? ` · ${new Date(chat.lastMessageAt).toLocaleDateString(undefined, { dateStyle: 'medium' })}`
+                        : ''}
+                    </span>
+                  </span>
+                  {chat.kind === 'group' && (
+                    <Tag color="gray" variant="soft" preventShrink>
+                      {t('Group')}
                     </Tag>
-                  </label>
-                );
-              })}
+                  )}
+                </label>
+              ))}
             </div>
-          )}
-          {hiddenCount > 0 && (
-            <p style={{ ...styles.muted, margin: 0 }}>
-              {hiddenCount}{' '}
-              {createPeople
-                ? t('chats are hidden: their contact has no name, or matches more than one Person.')
-                : t('chats are hidden: their contact is not a Person in Twenty, or matches more than one.')}
-            </p>
           )}
         </div>
       )}

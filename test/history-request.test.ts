@@ -52,8 +52,8 @@ test('imports 50 chats, creating and renaming People and conversations, in 5 req
   restore = bridge.restore;
   const chats = [
     ...range(30).map((index) => ({ chatId: chatId(1, index), createPerson: true })),
-    ...range(10).map((index) => ({ chatId: chatId(2, index) })),
-    ...range(10).map((index) => ({ chatId: chatId(3, index) })),
+    ...range(10).map((index) => ({ chatId: chatId(2, index), createPerson: true })),
+    ...range(10).map((index) => ({ chatId: chatId(3, index), createPerson: true })),
   ];
   const request = { action: 'import' as const, rangeDays: 30, chats };
   const dependencies = { client: twenty.client, adminClient: twenty.client, enqueue: async () => undefined };
@@ -86,7 +86,7 @@ test('imports 50 chats, creating and renaming People and conversations, in 5 req
   assert.deepEqual(twenty.requests, ['query whatsappAccounts', 'query people', 'query whatsappConversations']);
 });
 
-test('creates no People when the setting is off, even if the request asks for them', async () => {
+test('imports every selected chat without creating or renaming People when the setting is off', async () => {
   const twenty = createFakeTwenty({
     whatsappAccounts: [ACCOUNT],
     people: [
@@ -120,12 +120,12 @@ test('creates no People when the setting is off, even if the request asks for th
     enqueue: async () => undefined,
   });
 
-  assert.deepEqual(result, {
-    queued: 2,
-    createdPeople: 0,
-    failures: [{ chatId: chatId(1, 0), error: 'This contact is not matched to a Person' }],
-  });
+  assert.deepEqual(result, { queued: 3, createdPeople: 0, failures: [] });
   assert.equal(twenty.store.people.length, 1);
+  assert.deepEqual(twenty.store.people[0].name, { firstName: 'Known', lastName: '' });
+  const personIdByChatId = new Map(twenty.store.whatsappConversations.map((row) => [row.chatId, row.personId]));
+  assert.equal(personIdByChatId.get(chatId(3, 0)), 'known', 'an existing Person is still linked');
+  assert.equal(personIdByChatId.get(chatId(1, 0)), undefined);
   assert.deepEqual(memberLookups, []);
 });
 

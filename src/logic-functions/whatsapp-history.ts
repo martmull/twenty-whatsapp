@@ -60,45 +60,23 @@ const listCandidates = async (request: HistoryRequest) => {
     throw new HttpError(400, 'Invalid history request');
   }
 
-  const history = await bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
+  return bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
     '/history/list',
     { rangeDays: request.rangeDays, kind, offset, limit: 50 },
     30_000,
   );
-  const directNumbers = history.items.filter((item) => item.kind === 'direct').map((item) => chatNumber(item.chatId));
-  const peopleByPhone = await findPeopleByPhones(applicationClient(), directNumbers);
-
-  return {
-    ...history,
-    items: history.items.map((item) => {
-      if (item.kind === 'group') {
-        return { ...item, match: 'group' as const };
-      }
-
-      const matches = peopleByPhone.get(chatNumber(item.chatId)) ?? [];
-
-      return {
-        ...item,
-        match:
-          matches.length === 1 ? ('matched' as const) : matches.length > 1 ? ('ambiguous' as const) : ('new' as const),
-      };
-    }),
-  };
 };
 
-type PersonPlan = { person: Person; write?: Record<string, unknown>; createdPerson: boolean };
+type PersonPlan = { person?: Person; write?: Record<string, unknown>; createdPerson: boolean };
 
-// Finds the Person for a direct chat and the write that creates or renames them as the admin asked.
+// A selected chat is imported either way: it links to the one Person with its number, if any, and
+// creates or renames that Person only when People creation is on.
 const planPerson = (
   request: ChatSelection,
   chatId: string,
   contact: Omit<ContactName, 'chatId'>,
   matches: Person[],
 ): PersonPlan => {
-  if (matches.length > 1) {
-    throw new HttpError(409, 'More than one Person has this phone number');
-  }
-
   for (const value of [request.firstName, request.lastName]) {
     if (value !== undefined && (typeof value !== 'string' || value.length > 80)) {
       throw new HttpError(400, 'Invalid Person name');
@@ -114,11 +92,14 @@ const planPerson = (
   const [firstName, lastName] = request.firstName?.trim()
     ? [request.firstName.trim(), request.lastName?.trim() ?? '']
     : [suggestedFirstName, suggestedLastName.join(' ')];
+  if (matches.length > 1) {
+    return { createdPerson: false };
+  }
+
   const existing = matches[0];
 
   if (!existing) {
-    if (request.createPerson !== true) throw new HttpError(409, 'This contact is not matched to a Person');
-    if (!firstName) throw new HttpError(400, 'Enter a first name for this contact');
+    if (request.createPerson !== true || !firstName) return { createdPerson: false };
 
     const phoneNumber = `+${chatNumber(chatId)}`;
     // Derived from the number, so submitting the same import twice cannot create the Person twice.
@@ -140,7 +121,7 @@ const planPerson = (
     };
   }
 
-  if (isPhoneLikeName(personName(existing)) && firstName) {
+  if (request.createPerson === true && isPhoneLikeName(personName(existing)) && firstName) {
     return {
       person: { ...existing, name: { firstName, lastName } },
       createdPerson: false,
