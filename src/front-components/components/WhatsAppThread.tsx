@@ -106,6 +106,8 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [showGroupMembers, setShowGroupMembers] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const focusedConversationIdRef = useRef<string | undefined>(undefined);
 
   const markSelectedRead = async (next: InboxData) => {
     const conversation = next.conversations.find((item) => item.id === next.selectedConversationId);
@@ -344,6 +346,15 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
       }
     }
   }
+  const composerEnabled = Boolean(selected) && connected && !sending;
+
+  // The composer is disabled until the conversation loads, so focus it once it becomes usable.
+  useEffect(() => {
+    if (!composerEnabled || focusedConversationIdRef.current === selectedId) return;
+    focusedConversationIdRef.current = selectedId;
+    composerRef.current?.focus();
+  }, [composerEnabled, selectedId]);
+
   // The sandbox does not forward imperative scrolling, so remount at the newest message.
   const latestMessageId = data?.messages[data.messages.length - 1]?.id;
 
@@ -726,6 +737,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
               </div>
             )}
             <textarea
+              ref={composerRef}
               aria-label={t('Write a WhatsApp message')}
               placeholder={
                 selected
@@ -753,7 +765,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                   if (!event.repeat) void send();
                 }
               }}
-              disabled={!selected || !connected || sending}
+              disabled={!composerEnabled}
               rows={personId ? 2 : 3}
               maxLength={4096}
               style={{
