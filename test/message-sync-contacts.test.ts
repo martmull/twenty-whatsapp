@@ -24,10 +24,16 @@ const event = (chatId: string, index: number, sender?: { senderId: string; sende
   ...sender,
 });
 
-const bridgeWith = (savedContacts: (body: Record<string, unknown>) => unknown) => {
+const bridgeWith = (savedContacts: (body: Record<string, unknown>) => unknown, createPeople = true) => {
   const acknowledged: string[][] = [];
   const bridge = mockBridge({
-    '/status': () => ({ state: 'connected', apiVersion: 2, phoneNumber: '15559999999', twentyAccountId: ACCOUNT.id }),
+    '/status': () => ({
+      state: 'connected',
+      apiVersion: 3,
+      phoneNumber: '15559999999',
+      twentyAccountId: ACCOUNT.id,
+      createPeople,
+    }),
     '/events/claim': () => ({
       leaseId: '33333333-3333-4333-8333-333333333333',
       events: [
@@ -109,4 +115,32 @@ test('keeps a saved contact queued when their Person cannot be created, and impo
   assert.equal(acknowledged.flat().includes(event(SAVED_CHAT_ID, 1).eventId), false);
   assert.equal(result.imported, 2, 'group messages still land without their senders as People');
   assert.equal(twenty.store.people.length, 0);
+});
+
+test('creates no People and skips unmatched direct chats when the setting is off', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: [{ ...groupConversation }] });
+  const { calls, acknowledged } = bridgeWith(() => {
+    throw new Error('saved contacts must not be read');
+  }, false);
+
+  const result = await syncMessages(silentLogger, { client: twenty.client, queueFiles: async () => undefined });
+
+  assert.deepEqual(twenty.requests, [
+    'query people',
+    'query whatsappConversations',
+    'mutation createWhatsappConversations',
+    'mutation createWhatsappMessages',
+  ]);
+  assert.equal(twenty.store.people.length, 0);
+  assert.deepEqual(
+    twenty.store.whatsappConversations.map((conversation) => conversation.chatId),
+    [GROUP_ID],
+  );
+  assert.equal(result.imported, 2, 'messages of the imported group still land');
+  assert.equal(result.ignored, 2);
+  assert.equal(acknowledged.flat().length, 4);
+  assert.equal(
+    calls.some((call) => call.path === '/contacts/saved'),
+    false,
+  );
 });

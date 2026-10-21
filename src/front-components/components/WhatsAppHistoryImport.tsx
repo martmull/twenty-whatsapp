@@ -3,6 +3,7 @@ import { RestApiClient, RestApiClientError } from 'twenty-client-sdk/rest';
 import { t } from 'twenty-sdk/front-component';
 import { Callout } from 'twenty-ui/components';
 import { IconHistory } from 'twenty-ui/icon';
+import { Tag } from 'twenty-ui/primitives/data-display';
 import { Button } from 'twenty-ui/primitives/input';
 import { themeCssVariables } from 'twenty-ui/theme';
 import 'twenty-ui/style.css';
@@ -18,8 +19,11 @@ type HistoryCandidate = {
   name: string;
   firstName?: string;
   messageCount: number;
+  lastMessageAt?: string;
   match: 'matched' | 'new' | 'ambiguous' | 'group';
 };
+
+type ChatFilter = 'all' | 'direct' | 'group';
 
 type HistoryList = { items: HistoryCandidate[]; total: number };
 
@@ -54,10 +58,27 @@ const listChats = async (rangeDays: RangeDays): Promise<HistoryCandidate[]> => {
   return chats;
 };
 
-export const WhatsAppHistoryImport = () => {
+const FILTER_OPTIONS: { value: ChatFilter; label: string }[] = [
+  { value: 'all', label: t('All chats') },
+  { value: 'direct', label: t('Direct') },
+  { value: 'group', label: t('Groups') },
+];
+
+const MATCH_TAGS = {
+  matched: { label: t('Person'), color: 'green' },
+  new: { label: t('New Person'), color: 'blue' },
+  group: { label: t('Group'), color: 'gray' },
+} as const;
+
+type WhatsAppHistoryImportProps = { createPeople: boolean };
+
+export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportProps) => {
   const styles = getPreviewStyles();
   const [rangeDays, setRangeDays] = useState<RangeDays>(30);
-  const [createPeople, setCreatePeople] = useState(true);
+  const [chats, setChats] = useState<HistoryCandidate[]>();
+  const [loadingChats, setLoadingChats] = useState(false);
+  const [chatFilter, setChatFilter] = useState<ChatFilter>('all');
+  const [selected, setSelected] = useState<string[]>([]);
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   // From 0 to 100 while an import runs.
@@ -103,26 +124,68 @@ export const WhatsAppHistoryImport = () => {
     };
   }, [importRunning]);
 
+  const bridgeError = (requestError: unknown) =>
+    // 426: the bridge runs an older version than the app.
+    requestError instanceof RestApiClientError && requestError.status === 426
+      ? t(
+          'The WhatsApp bridge that is running is older than this app. Restart it with npm run restart in the bridge folder, then import again.',
+        )
+      : t('Could not reach the WhatsApp bridge. Check that it is running and retry.');
+
+  const loadChats = async (range: RangeDays) => {
+    setLoadingChats(true);
+    setError('');
+    setSelected([]);
+
+    try {
+      setChats((await listChats(range)).filter((chat) => chat.messageCount > 0));
+    } catch (requestError) {
+      setChats(undefined);
+      setError(bridgeError(requestError));
+    } finally {
+      setLoadingChats(false);
+    }
+  };
+
+  const changeRange = (range: RangeDays) => {
+    setRangeDays(range);
+    if (chats) void loadChats(range);
+  };
+
+  const isImportable = (chat: HistoryCandidate) =>
+    chat.match === 'group' ||
+    chat.match === 'matched' ||
+    (chat.match === 'new' && createPeople && hasContactName(chat));
+
+  const importableChats = (chats ?? []).filter(isImportable);
+  const hiddenCount = (chats ?? []).length - importableChats.length;
+  const shownChats = importableChats.filter((chat) => chatFilter === 'all' || chat.kind === chatFilter);
+  const selectedChats = importableChats.filter((chat) => selected.includes(chat.chatId));
+  const allShownSelected = shownChats.length > 0 && shownChats.every((chat) => selected.includes(chat.chatId));
+
+  const toggle = (chatId: string, checked: boolean) =>
+    setSelected((previous) => (checked ? [...previous, chatId] : previous.filter((id) => id !== chatId)));
+
+  const toggleShown = (checked: boolean) => {
+    const shownIds = shownChats.map((chat) => chat.chatId);
+    setSelected((previous) =>
+      checked ? [...new Set([...previous, ...shownIds])] : previous.filter((id) => !shownIds.includes(id)),
+    );
+  };
+
   const runImport = async () => {
     setStarting(true);
     setError('');
 
     try {
-      const chats = (await listChats(rangeDays)).filter((chat) => chat.messageCount > 0);
-      const importable = chats.filter(
-        (chat) =>
-          chat.match === 'group' ||
-          chat.match === 'matched' ||
-          (chat.match === 'new' && createPeople && hasContactName(chat)),
-      );
       let queued = 0;
       let failed = 0;
 
-      for (let start = 0; start < importable.length; start += CHATS_PER_REQUEST) {
+      for (let start = 0; start < selectedChats.length; start += CHATS_PER_REQUEST) {
         const result = await historyRequest<QueueResult>({
           action: 'import',
           rangeDays,
-          chats: importable.slice(start, start + CHATS_PER_REQUEST).map((chat) => ({
+          chats: selectedChats.slice(start, start + CHATS_PER_REQUEST).map((chat) => ({
             chatId: chat.chatId,
             createPerson: chat.match === 'new' || (chat.match === 'group' && createPeople),
           })),
@@ -133,18 +196,12 @@ export const WhatsAppHistoryImport = () => {
 
       if (failed > 0) setError(`${failed} ${t('chats failed; import again to retry them')}`);
       if (queued > 0) {
+        setSelected([]);
         setProgress((previous) => previous ?? 0);
         setImportRunning(true);
       }
     } catch (requestError) {
-      // 426: the bridge runs an older version than the app.
-      setError(
-        requestError instanceof RestApiClientError && requestError.status === 426
-          ? t(
-              'The WhatsApp bridge that is running is older than this app. Restart it with npm run restart in the bridge folder, then import again.',
-            )
-          : t('Could not reach the WhatsApp bridge. Check that it is running and retry.'),
-      );
+      setError(bridgeError(requestError));
     } finally {
       setStarting(false);
     }
@@ -183,7 +240,7 @@ export const WhatsAppHistoryImport = () => {
       </div>
       <p style={{ ...styles.muted, margin: 0 }}>
         {t(
-          'Imports group chats and chats with People in Twenty. Imported messages are visible to workspace members with access to these records. Messages already imported are skipped.',
+          'Choose the chats to import. Imported messages are visible to workspace members with access to these records, and new messages of an imported group keep arriving. Messages already imported are skipped.',
         )}
       </p>
       <label style={{ display: 'grid', gap: themeCssVariables.spacing[1] }}>
@@ -191,7 +248,7 @@ export const WhatsAppHistoryImport = () => {
         <select
           value={rangeDays}
           disabled={running}
-          onChange={(event) => setRangeDays(Number(event.target.value) as RangeDays)}
+          onChange={(event) => changeRange(Number(event.target.value) as RangeDays)}
           style={{
             background: themeCssVariables.background.primary,
             border: `1px solid ${themeCssVariables.border.color.medium}`,
@@ -210,25 +267,118 @@ export const WhatsAppHistoryImport = () => {
           ))}
         </select>
       </label>
-      <label style={{ display: 'flex', alignItems: 'center', gap: themeCssVariables.spacing[2] }}>
-        <FrontComponentCheckbox
-          checked={createPeople}
-          disabled={running}
-          onChange={(event) => setCreatePeople(event.target.checked)}
-        />
-        <span>{t('Create People from WhatsApp contact info')}</span>
-      </label>
+      {!chats && (
+        <div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            loading={loadingChats}
+            disabled={loadingChats}
+            onClick={() => void loadChats(rangeDays)}
+          >
+            {t('Show chats')}
+          </Button>
+        </div>
+      )}
+      {chats && (
+        <div style={{ display: 'grid', gap: themeCssVariables.spacing[2] }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[2] }}>
+            {FILTER_OPTIONS.map((option) => (
+              <Button
+                key={option.value}
+                type="button"
+                variant={chatFilter === option.value ? 'solid' : 'outline'}
+                color={chatFilter === option.value ? 'accent' : 'neutral'}
+                size="sm"
+                onClick={() => setChatFilter(option.value)}
+              >
+                {option.label}
+              </Button>
+            ))}
+          </div>
+          {shownChats.length === 0 ? (
+            <p style={{ ...styles.muted, margin: 0 }}>
+              {loadingChats ? t('Loading chats…') : t('No chats to import in this period.')}
+            </p>
+          ) : (
+            <div style={{ ...styles.card, maxHeight: 360, overflowY: 'auto' }}>
+              <label
+                style={{
+                  alignItems: 'center',
+                  display: 'flex',
+                  gap: themeCssVariables.spacing[3],
+                  padding: themeCssVariables.spacing[2],
+                }}
+              >
+                <FrontComponentCheckbox
+                  checked={allShownSelected}
+                  disabled={running || loadingChats}
+                  onChange={(event) => toggleShown(event.target.checked)}
+                />
+                <span style={styles.label}>
+                  {t('Select all')} ({shownChats.length})
+                </span>
+              </label>
+              {shownChats.map((chat) => {
+                const tag = MATCH_TAGS[chat.match as keyof typeof MATCH_TAGS];
+
+                return (
+                  <label
+                    key={chat.chatId}
+                    style={{
+                      alignItems: 'center',
+                      borderTop: `1px solid ${themeCssVariables.border.color.light}`,
+                      display: 'flex',
+                      gap: themeCssVariables.spacing[3],
+                      padding: themeCssVariables.spacing[2],
+                    }}
+                  >
+                    <FrontComponentCheckbox
+                      checked={selected.includes(chat.chatId)}
+                      disabled={running || loadingChats}
+                      onChange={(event) => toggle(chat.chatId, event.target.checked)}
+                    />
+                    <span style={{ display: 'grid', flex: 1, minWidth: 0 }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {chat.name}
+                      </span>
+                      <span style={styles.label}>
+                        {chat.messageCount} {t('messages')}
+                        {chat.lastMessageAt
+                          ? ` · ${new Date(chat.lastMessageAt).toLocaleDateString(undefined, { dateStyle: 'medium' })}`
+                          : ''}
+                      </span>
+                    </span>
+                    <Tag color={tag.color} variant="soft" preventShrink>
+                      {tag.label}
+                    </Tag>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          {hiddenCount > 0 && (
+            <p style={{ ...styles.muted, margin: 0 }}>
+              {hiddenCount}{' '}
+              {createPeople
+                ? t('chats are hidden: their contact has no name, or matches more than one Person.')
+                : t('chats are hidden: their contact is not a Person in Twenty, or matches more than one.')}
+            </p>
+          )}
+        </div>
+      )}
       <div style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
         <Button
           type="button"
           variant="solid"
           color="accent"
           size="sm"
-          loading={running}
-          disabled={running}
+          loading={starting}
+          disabled={running || loadingChats || selectedChats.length === 0}
           onClick={() => void runImport()}
         >
-          {t('Import')}
+          {selectedChats.length > 0 ? `${t('Import')} (${selectedChats.length})` : t('Import')}
         </Button>
         {importRunning && !starting && (
           <Button

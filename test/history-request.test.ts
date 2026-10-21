@@ -58,7 +58,7 @@ test('imports 50 chats, creating and renaming People and conversations, in 5 req
   const request = { action: 'import' as const, rangeDays: 30, chats };
   const dependencies = { client: twenty.client, adminClient: twenty.client, enqueue: async () => undefined };
 
-  const result = await queueImport(request, number(5, 0), silentLogger, dependencies);
+  const result = await queueImport(request, number(5, 0), true, silentLogger, dependencies);
 
   assert.deepEqual(result, { queued: 50, createdPeople: 30, failures: [] });
   assert.deepEqual(twenty.requests, [
@@ -80,10 +80,53 @@ test('imports 50 chats, creating and renaming People and conversations, in 5 req
 
   // Submitting the same import again finds everything and creates nothing twice.
   twenty.requests.length = 0;
-  await queueImport(request, number(5, 0), silentLogger, dependencies);
+  await queueImport(request, number(5, 0), true, silentLogger, dependencies);
   assert.equal(twenty.store.people.length, 50);
   assert.equal(twenty.store.whatsappConversations.length, 50);
   assert.deepEqual(twenty.requests, ['query whatsappAccounts', 'query people', 'query whatsappConversations']);
+});
+
+test('creates no People when the setting is off, even if the request asks for them', async () => {
+  const twenty = createFakeTwenty({
+    whatsappAccounts: [ACCOUNT],
+    people: [
+      { id: 'known', name: { firstName: 'Known', lastName: '' }, phones: { primaryPhoneNumber: `+${number(3, 0)}` } },
+    ],
+  });
+  const memberLookups: unknown[] = [];
+  const bridge = mockBridge({
+    '/history/names': (body) =>
+      (body.chatIds as string[]).map((id) => ({ chatId: id, name: 'Ada Lovelace', firstName: 'Ada' })),
+    '/history/members': (body) => memberLookups.push(body.chatId),
+    '/history/imports/queue': (body) => ({
+      queued: (body.tasks as unknown[]).length,
+      runToken: '22222222-2222-4222-8222-222222222222',
+    }),
+  });
+  restore = bridge.restore;
+  const request = {
+    action: 'import' as const,
+    rangeDays: 30,
+    chats: [
+      { chatId: chatId(1, 0), createPerson: true },
+      { chatId: chatId(3, 0) },
+      { chatId: '120363123456789012@g.us', createPerson: true },
+    ],
+  };
+
+  const result = await queueImport(request, number(5, 0), false, silentLogger, {
+    client: twenty.client,
+    adminClient: twenty.client,
+    enqueue: async () => undefined,
+  });
+
+  assert.deepEqual(result, {
+    queued: 2,
+    createdPeople: 0,
+    failures: [{ chatId: chatId(1, 0), error: 'This contact is not matched to a Person' }],
+  });
+  assert.equal(twenty.store.people.length, 1);
+  assert.deepEqual(memberLookups, []);
 });
 
 test('renames conversations from the names that changed, in one query and one upsert', async () => {

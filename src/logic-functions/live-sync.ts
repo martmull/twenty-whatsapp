@@ -136,12 +136,13 @@ const findContactNames = async (
   chatIds: string[],
   people: Map<string, Person[]>,
   conversations: Map<string, Conversation>,
+  createPeople: boolean,
   logger: Logger,
 ): Promise<Map<string, ContactName>> => {
   const chatsToName = chatIds.filter((chatId) => {
     const conversation = conversations.get(chatId);
     if (conversation) return isPhoneLikeName(conversation.name);
-    return isDirectChatId(chatId) && !people.has(chatNumber(chatId));
+    return createPeople && isDirectChatId(chatId) && !people.has(chatNumber(chatId));
   });
   if (chatsToName.length === 0) return new Map();
 
@@ -324,7 +325,8 @@ export const syncMessages = async (
 
     const accountId = await resolveAccountId(client, `+${digits(status.phoneNumber)}`, status.twentyAccountId);
     const chatIds = [...eventsByChat.keys()];
-    const savedSenders = await findSavedGroupSenders(valid, logger);
+    const createPeople = status.createPeople === true;
+    const savedSenders = createPeople ? await findSavedGroupSenders(valid, logger) : [];
     const [people, conversations] = await Promise.all([
       findPeopleByPhones(client, [
         ...chatIds.filter(isDirectChatId).map(chatNumber),
@@ -332,15 +334,17 @@ export const syncMessages = async (
       ]),
       findConversations(client, accountId, chatIds),
     ]);
-    const contactByChatId = await findContactNames(chatIds, people, conversations, logger);
-    const unwrittenChatIds = await createSavedContactPeople(client, {
-      eventsByChat,
-      people,
-      conversations,
-      contactByChatId,
-      savedSenders,
-      logger,
-    });
+    const contactByChatId = await findContactNames(chatIds, people, conversations, createPeople, logger);
+    const unwrittenChatIds = createPeople
+      ? await createSavedContactPeople(client, {
+          eventsByChat,
+          people,
+          conversations,
+          contactByChatId,
+          savedSenders,
+          logger,
+        })
+      : [];
     // Chats waiting for their Person stay queued for the next sync.
     for (const chatId of unwrittenChatIds) eventsByChat.delete(chatId);
 

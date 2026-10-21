@@ -815,3 +815,16 @@ test('a sync batch waits for the API budget, and only one sync job waits at a ti
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('creating People is off by default, and the setting survives a restart', async () => {
+  await withConnection(async (connection, directory, encryptionKey) => {
+    assert.equal(connection.getStatus().createPeople, false);
+
+    await connection.updateSettings({ createPeople: true });
+    assert.equal(connection.getStatus().createPeople, true);
+
+    const restarted = new RecordingConnection(directory, encryptionKey);
+    await restarted.resume();
+    assert.equal(restarted.getStatus().createPeople, true);
+  });
+});

@@ -7,6 +7,8 @@ export type BridgeStatus = {
   qrExpiresAt?: number;
   phoneNumber?: string;
   twentyAccountId?: string;
+  // Whether saved WhatsApp contacts become People; absent from bridges older than version 3.
+  createPeople?: boolean;
 };
 
 // History pages and the media queue need bridge API version 2. A bridge process started before an
@@ -15,6 +17,8 @@ export const REQUIRED_BRIDGE_API_VERSION = 2;
 
 export const isBridgeOutdated = (status: Pick<BridgeStatus, 'apiVersion'>) =>
   (status.apiVersion ?? 1) < REQUIRED_BRIDGE_API_VERSION;
+
+export const SETTINGS_BRIDGE_API_VERSION = 3;
 
 export const bridgeFetch = async (path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<Response> => {
   const bridgeUrl = process.env.WHATSAPP_BRIDGE_URL;

@@ -183,6 +183,7 @@ type QueueImportDependencies = {
 export const queueImport = async (
   request: HistoryRequest,
   accountPhoneNumber: string,
+  createPeople: boolean,
   logger: Logger,
   {
     client = applicationClient(),
@@ -190,17 +191,19 @@ export const queueImport = async (
     enqueue = enqueueHistoryImport,
   }: QueueImportDependencies = {},
 ) => {
-  const chats = request.chats;
+  const requestedChats = request.chats;
 
   if (
-    !Array.isArray(chats) ||
-    chats.length === 0 ||
-    chats.length > MAX_CHATS_PER_IMPORT ||
-    !chats.every((chat) => isChatId(chat?.chatId)) ||
-    new Set(chats.map((chat) => chat.chatId)).size !== chats.length
+    !Array.isArray(requestedChats) ||
+    requestedChats.length === 0 ||
+    requestedChats.length > MAX_CHATS_PER_IMPORT ||
+    !requestedChats.every((chat) => isChatId(chat?.chatId)) ||
+    new Set(requestedChats.map((chat) => chat.chatId)).size !== requestedChats.length
   ) {
     throw new HttpError(400, 'Invalid history import request');
   }
+
+  const chats = requestedChats.map((chat) => ({ ...chat, createPerson: createPeople && chat.createPerson === true }));
 
   const chatIds = chats.map((chat) => chat.chatId as string);
 
@@ -372,7 +375,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
   }
 
   if (request.action === 'import') {
-    return queueImport(request, digits(status.phoneNumber), logger);
+    return queueImport(request, digits(status.phoneNumber), status.createPeople === true, logger);
   }
 
   throw new HttpError(400, 'Invalid history request');
