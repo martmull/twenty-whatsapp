@@ -45,12 +45,15 @@ type GroupMember = {
 type InboxData = {
   conversations: Conversation[];
   selectedConversationId?: string;
+  // The open conversation, also when the search leaves it out of `conversations`.
+  selectedConversation?: Conversation;
   messages: Message[];
   groupMembers?: GroupMember[];
   connectionState: 'disconnected' | 'pairing' | 'connected' | 'reconnecting' | 'unavailable';
 };
 
 const POLL_INTERVAL_MS = 5_000;
+const SEARCH_DEBOUNCE_MS = 250;
 // Every Nth poll reloads anyway, to pick up connection changes.
 const FULL_RELOAD_EVERY = 12;
 
@@ -106,9 +109,25 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [showGroupMembers, setShowGroupMembers] = useState(false);
+  const [search, setSearch] = useState('');
+  const searchRef = useRef('');
+
+  // The list request for the current search, so polling and selection never drop the filter.
+  const listInbox = (conversationId?: string) => {
+    const term = searchRef.current.trim();
+    return {
+      term,
+      request: new RestApiClient().post<InboxData>('/s/whatsapp/messages/list', {
+        ...(personId ? { personId } : {}),
+        ...(conversationId ? { conversationId } : {}),
+        ...(term ? { search: term } : {}),
+      }),
+    };
+  };
 
   const markSelectedRead = async (next: InboxData) => {
-    const conversation = next.conversations.find((item) => item.id === next.selectedConversationId);
+    const conversation =
+      next.selectedConversation ?? next.conversations.find((item) => item.id === next.selectedConversationId);
 
     if (
       !conversation?.unread ||
@@ -124,15 +143,16 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
         readThroughAt: conversation.lastInboundAt,
       });
 
+      const markRead = (item: Conversation) =>
+        item.id === conversation.id && item.lastInboundAt && item.lastInboundAt <= result.lastReadAt
+          ? { ...item, lastReadAt: result.lastReadAt, unread: false }
+          : item;
       setData((previous) =>
         previous
           ? {
               ...previous,
-              conversations: previous.conversations.map((item) =>
-                item.id === conversation.id && item.lastInboundAt && item.lastInboundAt <= result.lastReadAt
-                  ? { ...item, lastReadAt: result.lastReadAt, unread: false }
-                  : item,
-              ),
+              conversations: previous.conversations.map(markRead),
+              selectedConversation: previous.selectedConversation && markRead(previous.selectedConversation),
             }
           : previous,
       );
@@ -147,11 +167,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     }
 
     try {
-      const next = await new RestApiClient().post<InboxData>('/s/whatsapp/messages/list', {
-        ...(personId ? { personId } : {}),
-        ...(conversationId ? { conversationId } : {}),
-      });
-      if (conversationId !== selectedIdRef.current) return;
+      const { term, request } = listInbox(conversationId);
+      const next = await request;
+      // A newer selection or search has been made since: its own request shows the result.
+      if (conversationId !== selectedIdRef.current || term !== searchRef.current.trim()) return;
       setData(next);
       setSelectedId(next.selectedConversationId);
       selectedIdRef.current = next.selectedConversationId;
@@ -171,12 +190,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     const refresh = async () => {
       try {
         const requestedId = selectedIdRef.current;
-        const next = await new RestApiClient().post<InboxData>('/s/whatsapp/messages/list', {
-          ...(personId ? { personId } : {}),
-          ...(requestedId ? { conversationId: requestedId } : {}),
-        });
+        const { term, request } = listInbox(requestedId);
+        const next = await request;
 
-        if (active && requestedId === selectedIdRef.current) {
+        if (active && requestedId === selectedIdRef.current && term === searchRef.current.trim()) {
           selectedIdRef.current = next.selectedConversationId;
           setData(next);
           setSelectedId(next.selectedConversationId);
@@ -208,6 +225,19 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
       clearInterval(timer);
     };
   }, [personId]);
+
+  // Reloads the list once typing pauses; the open conversation stays open.
+  // `load` reads the latest search and selection through refs, so it is not a dependency.
+  const searchMountedRef = useRef(false);
+  useEffect(() => {
+    searchRef.current = search;
+    if (!searchMountedRef.current) {
+      searchMountedRef.current = true;
+      return;
+    }
+    const timer = setTimeout(() => void load(selectedIdRef.current, true), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   const selectConversation = (conversationId: string) => {
     setDraft('');
@@ -322,7 +352,11 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     }
   };
 
-  const selected = data?.conversations.find((conversation) => conversation.id === selectedId);
+  const selected =
+    data?.selectedConversation?.id === selectedId
+      ? data?.selectedConversation
+      : data?.conversations.find((conversation) => conversation.id === selectedId);
+  const searching = search.trim().length > 0;
   const connected = data?.connectionState === 'connected';
   const connectionWarning =
     data?.connectionState === 'reconnecting'
@@ -402,11 +436,46 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
             aria-label={t('Conversations')}
             style={{ borderRight: `1px solid ${themeCssVariables.border.color.medium}`, overflowY: 'auto' }}
           >
+            <div
+              style={{
+                background: themeCssVariables.background.primary,
+                borderBottom: `1px solid ${themeCssVariables.border.color.medium}`,
+                padding: themeCssVariables.spacing[2],
+                position: 'sticky',
+                top: 0,
+                zIndex: 1,
+              }}
+            >
+              <input
+                type="search"
+                aria-label={t('Search conversations')}
+                placeholder={t('Search conversations')}
+                value={search}
+                maxLength={100}
+                onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') setSearch('');
+                }}
+                style={{
+                  background: themeCssVariables.background.secondary,
+                  border: `1px solid ${themeCssVariables.border.color.medium}`,
+                  borderRadius: themeCssVariables.border.radius.sm,
+                  boxSizing: 'border-box',
+                  color: themeCssVariables.font.color.primary,
+                  fontFamily: themeCssVariables.font.family,
+                  fontSize: themeCssVariables.font.size.md,
+                  padding: themeCssVariables.spacing[2],
+                  width: '100%',
+                }}
+              />
+            </div>
             {loading && !data && (
               <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('Loading conversations…')}</p>
             )}
             {!loading && data?.conversations.length === 0 && (
-              <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('No conversations yet.')}</p>
+              <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>
+                {searching ? t('No conversations match this search.') : t('No conversations yet.')}
+              </p>
             )}
             {data?.conversations.map((conversation) => (
               <button
