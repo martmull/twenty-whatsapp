@@ -20,6 +20,7 @@ export type Conversation = {
   lastMessageAt?: string | null;
   lastInboundAt?: string | null;
   lastPreview?: string | null;
+  isSyncEnabled?: boolean | null;
 };
 
 export type Message = {
@@ -76,6 +77,7 @@ export const CONVERSATION_FIELDS = {
   lastMessageAt: true,
   lastInboundAt: true,
   lastPreview: true,
+  isSyncEnabled: true,
 } as const;
 export const MESSAGE_FIELDS = {
   id: true,

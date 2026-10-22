@@ -22,7 +22,6 @@ import { queueMedia } from 'src/logic-functions/media-import';
 import { pendingMedia, type MediaItem } from 'src/logic-functions/message-media';
 import {
   countingClient,
-  deterministicId,
   rateLimitRetryAfterMs,
   upsertConversations,
   upsertMessages,
@@ -53,9 +52,10 @@ export type SyncResult = {
 type ChatBatch = {
   chatId: string;
   events: BridgeMessageEvent[];
-  conversation?: Conversation;
-  // For a direct chat: its Person, and the name a new or phone-named conversation takes.
+  conversation: Conversation;
+  // The Person a direct conversation without one links to.
   person?: Person;
+  // The name a conversation still named after a number takes.
   name: string;
 };
 
@@ -72,9 +72,9 @@ const resolveAccountId = async (client: CoreApiClient, phoneNumber: string, cach
   return accountId;
 };
 
-// Direct chats need exactly one matching Person; group chats are imported only once an admin has
-// imported their history (the conversation exists). A conversation still named after a number takes
-// the name the bridge knows.
+// Only chats an admin turned syncing on for are synced. A direct conversation without
+// a Person links to the one Person with its number, if any. A conversation still named after a number
+// takes the name the bridge knows.
 const planChats = (
   eventsByChat: Map<string, BridgeMessageEvent[]>,
   people: Map<string, Person[]>,
@@ -86,26 +86,23 @@ const planChats = (
 
   for (const [chatId, events] of eventsByChat) {
     const conversation = conversations.get(chatId);
-    const contactName = contactByChatId.get(chatId)?.name;
 
-    if (isGroupChatId(chatId)) {
-      if (conversation) batches.push({ chatId, events, conversation, name: contactName ?? conversation.name });
-      else ignored.push(...events);
+    if (!conversation) {
+      ignored.push(...events);
       continue;
     }
 
-    const matches = people.get(chatNumber(chatId)) ?? [];
-    if (matches.length === 1) {
-      batches.push({
-        chatId,
-        events,
-        conversation,
-        person: matches[0],
-        name: personName(matches[0]) || contactName || chatNumber(chatId),
-      });
-    } else {
-      ignored.push(...events);
-    }
+    const contactName = contactByChatId.get(chatId)?.name;
+    const matches = isGroupChatId(chatId) || conversation.personId ? [] : (people.get(chatNumber(chatId)) ?? []);
+    const person = matches.length === 1 ? matches[0] : undefined;
+
+    batches.push({
+      chatId,
+      events,
+      conversation,
+      person,
+      name: (person && personName(person)) || contactName || conversation.name,
+    });
   }
 
   return { batches, ignored };
@@ -136,12 +133,16 @@ const findContactNames = async (
   chatIds: string[],
   people: Map<string, Person[]>,
   conversations: Map<string, Conversation>,
+  createPeople: boolean,
   logger: Logger,
 ): Promise<Map<string, ContactName>> => {
   const chatsToName = chatIds.filter((chatId) => {
     const conversation = conversations.get(chatId);
-    if (conversation) return isPhoneLikeName(conversation.name);
-    return isDirectChatId(chatId) && !people.has(chatNumber(chatId));
+    if (!conversation) return false;
+    return (
+      isPhoneLikeName(conversation.name) ||
+      (createPeople && isDirectChatId(chatId) && !conversation.personId && !people.has(chatNumber(chatId)))
+    );
   });
   if (chatsToName.length === 0) return new Map();
 
@@ -181,8 +182,9 @@ const createSavedContactPeople = async (
       }
       continue;
     }
+    const conversation = conversations.get(chatId);
     const contact = contactByChatId.get(chatId);
-    if (!people.has(chatNumber(chatId)) && contact?.firstName) {
+    if (conversation && !conversation.personId && !people.has(chatNumber(chatId)) && contact?.firstName) {
       directContacts.push({
         phoneNumber: chatNumber(chatId),
         firstName: contact.firstName,
@@ -213,49 +215,31 @@ const createSavedContactPeople = async (
   return [];
 };
 
-const conversationWrite = (accountId: string, batch: ChatBatch): Record<string, unknown> | undefined => {
-  const { conversation, chatId, name, person } = batch;
+const conversationWrite = (batch: ChatBatch): Record<string, unknown> | undefined => {
+  const { conversation, name, person } = batch;
   const patch = summaryPatch(conversation, summarizeEvents(batch.events)) ?? {};
-
-  if (!conversation) {
-    return {
-      id: deterministicId('conversation', `${accountId}:${chatId}`),
-      name: name.trim().slice(0, 120),
-      chatId,
-      accountId,
-      ...(person ? { personId: person.id } : {}),
-      ...patch,
-    };
-  }
-
   const rename =
     isPhoneLikeName(conversation.name) && name.trim() && !isPhoneLikeName(name)
       ? { name: name.trim().slice(0, 120) }
       : {};
-  const data = { ...patch, ...rename };
+  const link = person && !conversation.personId ? { personId: person.id } : {};
+  const data = { ...patch, ...rename, ...link };
 
   return Object.keys(data).length > 0 ? { id: conversation.id, ...data } : undefined;
 };
 
 // Writes the chats of a batch together: one conversations upsert, then one messages upsert.
-const writeChats = async (
-  client: CoreApiClient,
-  accountId: string,
-  batches: ChatBatch[],
-): Promise<UpsertedMessage[]> => {
+const writeChats = async (client: CoreApiClient, batches: ChatBatch[]): Promise<UpsertedMessage[]> => {
   const conversationWrites = batches.flatMap((batch) => {
-    const write = conversationWrite(accountId, batch);
+    const write = conversationWrite(batch);
     return write ? [write] : [];
   });
-  const written = conversationWrites.length > 0 ? await upsertConversations(client, conversationWrites) : [];
-  const writtenIdByChatId = new Map(written.map(({ id, chatId }) => [chatId, id]));
-  const records = batches.flatMap((batch) => {
-    const conversationId = batch.conversation?.id ?? writtenIdByChatId.get(batch.chatId);
-    if (!conversationId) throw new Error('Could not create WhatsApp conversation');
-    return batch.events.map((event) => messageRecord(event, conversationId));
-  });
+  if (conversationWrites.length > 0) await upsertConversations(client, conversationWrites);
 
-  return upsertMessages(client, records);
+  return upsertMessages(
+    client,
+    batches.flatMap((batch) => batch.events.map((event) => messageRecord(event, batch.conversation.id))),
+  );
 };
 
 type SyncDependencies = { client?: CoreApiClient; queueFiles?: (items: MediaItem[]) => Promise<unknown> };
@@ -324,23 +308,30 @@ export const syncMessages = async (
 
     const accountId = await resolveAccountId(client, `+${digits(status.phoneNumber)}`, status.twentyAccountId);
     const chatIds = [...eventsByChat.keys()];
-    const savedSenders = await findSavedGroupSenders(valid, logger);
-    const [people, conversations] = await Promise.all([
+    const createPeople = status.createPeople === true;
+    const savedSenders = createPeople ? await findSavedGroupSenders(valid, logger) : [];
+    const [people, allConversations] = await Promise.all([
       findPeopleByPhones(client, [
         ...chatIds.filter(isDirectChatId).map(chatNumber),
         ...savedSenders.map((sender) => digits(sender.phoneNumber)),
       ]),
       findConversations(client, accountId, chatIds),
     ]);
-    const contactByChatId = await findContactNames(chatIds, people, conversations, logger);
-    const unwrittenChatIds = await createSavedContactPeople(client, {
-      eventsByChat,
-      people,
-      conversations,
-      contactByChatId,
-      savedSenders,
-      logger,
-    });
+    // A chat whose syncing is off counts as not imported: no messages, no People.
+    const conversations = new Map(
+      [...allConversations].filter(([, conversation]) => conversation.isSyncEnabled !== false),
+    );
+    const contactByChatId = await findContactNames(chatIds, people, conversations, createPeople, logger);
+    const unwrittenChatIds = createPeople
+      ? await createSavedContactPeople(client, {
+          eventsByChat,
+          people,
+          conversations,
+          contactByChatId,
+          savedSenders,
+          logger,
+        })
+      : [];
     // Chats waiting for their Person stay queued for the next sync.
     for (const chatId of unwrittenChatIds) eventsByChat.delete(chatId);
 
@@ -352,7 +343,7 @@ export const syncMessages = async (
 
     if (batches.length > 0) {
       try {
-        writtenBatches.push({ batches, written: await writeChats(client, accountId, batches) });
+        writtenBatches.push({ batches, written: await writeChats(client, batches) });
       } catch (error) {
         if (rateLimitRetryAfterMs(error) !== undefined || batches.length === 1) throw error;
         logger.warn('Could not write the batch, retrying chat by chat', {
@@ -360,7 +351,7 @@ export const syncMessages = async (
         });
         for (const batch of batches) {
           try {
-            writtenBatches.push({ batches: [batch], written: await writeChats(client, accountId, [batch]) });
+            writtenBatches.push({ batches: [batch], written: await writeChats(client, [batch]) });
           } catch (chatError) {
             if (rateLimitRetryAfterMs(chatError) !== undefined) throw chatError;
             // Keep the chat's events queued for the next sync and carry on with the other chats.

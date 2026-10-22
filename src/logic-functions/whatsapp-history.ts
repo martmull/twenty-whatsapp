@@ -32,7 +32,9 @@ type ChatSelection = {
 };
 
 type HistoryRequest = {
-  action?: 'list' | 'import' | 'progress' | 'cancel';
+  action?: 'list' | 'import' | 'sync' | 'progress' | 'cancel';
+  // For `sync`: whether the chats' new messages are synced.
+  enabled?: boolean;
   rangeDays?: number;
   kind?: 'all' | 'direct' | 'group';
   offset?: number;
@@ -52,7 +54,8 @@ type HistoryCandidate = {
 };
 type GroupMember = { phoneNumber?: string; firstName?: string; lastName?: string; isSavedContact?: boolean };
 
-const listCandidates = async (request: HistoryRequest) => {
+// Each chat says whether its new messages are synced: its conversation exists and syncing is on.
+const listCandidates = async (request: HistoryRequest, accountPhoneNumber: string, cachedAccountId?: string) => {
   const offset = request.offset ?? 0;
   const kind = request.kind ?? 'all';
 
@@ -60,45 +63,40 @@ const listCandidates = async (request: HistoryRequest) => {
     throw new HttpError(400, 'Invalid history request');
   }
 
-  const history = await bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
-    '/history/list',
-    { rangeDays: request.rangeDays, kind, offset, limit: 50 },
-    30_000,
+  const client = applicationClient();
+  const [history, accountId] = await Promise.all([
+    bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
+      '/history/list',
+      { rangeDays: request.rangeDays, kind, offset, limit: 50 },
+      30_000,
+    ),
+    cachedAccountId ?? ensureAccount(client, `+${accountPhoneNumber}`),
+  ]);
+  const conversations = await findConversations(
+    client,
+    accountId,
+    history.items.map((item) => item.chatId),
   );
-  const directNumbers = history.items.filter((item) => item.kind === 'direct').map((item) => chatNumber(item.chatId));
-  const peopleByPhone = await findPeopleByPhones(applicationClient(), directNumbers);
 
   return {
     ...history,
     items: history.items.map((item) => {
-      if (item.kind === 'group') {
-        return { ...item, match: 'group' as const };
-      }
-
-      const matches = peopleByPhone.get(chatNumber(item.chatId)) ?? [];
-
-      return {
-        ...item,
-        match:
-          matches.length === 1 ? ('matched' as const) : matches.length > 1 ? ('ambiguous' as const) : ('new' as const),
-      };
+      const conversation = conversations.get(item.chatId);
+      return { ...item, synced: Boolean(conversation) && conversation?.isSyncEnabled !== false };
     }),
   };
 };
 
-type PersonPlan = { person: Person; write?: Record<string, unknown>; createdPerson: boolean };
+type PersonPlan = { person?: Person; write?: Record<string, unknown>; createdPerson: boolean };
 
-// Finds the Person for a direct chat and the write that creates or renames them as the admin asked.
+// A selected chat is imported either way: it links to the one Person with its number, if any, and
+// creates or renames that Person only when People creation is on.
 const planPerson = (
   request: ChatSelection,
   chatId: string,
   contact: Omit<ContactName, 'chatId'>,
   matches: Person[],
 ): PersonPlan => {
-  if (matches.length > 1) {
-    throw new HttpError(409, 'More than one Person has this phone number');
-  }
-
   for (const value of [request.firstName, request.lastName]) {
     if (value !== undefined && (typeof value !== 'string' || value.length > 80)) {
       throw new HttpError(400, 'Invalid Person name');
@@ -114,11 +112,14 @@ const planPerson = (
   const [firstName, lastName] = request.firstName?.trim()
     ? [request.firstName.trim(), request.lastName?.trim() ?? '']
     : [suggestedFirstName, suggestedLastName.join(' ')];
+  if (matches.length > 1) {
+    return { createdPerson: false };
+  }
+
   const existing = matches[0];
 
   if (!existing) {
-    if (request.createPerson !== true) throw new HttpError(409, 'This contact is not matched to a Person');
-    if (!firstName) throw new HttpError(400, 'Enter a first name for this contact');
+    if (request.createPerson !== true || !firstName) return { createdPerson: false };
 
     const phoneNumber = `+${chatNumber(chatId)}`;
     // Derived from the number, so submitting the same import twice cannot create the Person twice.
@@ -140,7 +141,7 @@ const planPerson = (
     };
   }
 
-  if (isPhoneLikeName(personName(existing)) && firstName) {
+  if (request.createPerson === true && isPhoneLikeName(personName(existing)) && firstName) {
     return {
       person: { ...existing, name: { firstName, lastName } },
       createdPerson: false,
@@ -170,26 +171,7 @@ const savedGroupMembers = async (groupChatIds: string[], logger: Logger): Promis
     );
 };
 
-type QueueImportDependencies = {
-  client?: CoreApiClient;
-  // Writes People as the admin, so their own permissions apply.
-  adminClient?: CoreApiClient;
-  enqueue?: (runToken: string, delayMs: number, position?: ChainPosition) => Promise<void>;
-};
-
-// Creates the People and conversations of the selected chats, then hands the messages to the
-// background import. Chats that cannot be imported are reported without stopping the others.
-// People and conversations are each written in one upsert, whatever the number of chats.
-export const queueImport = async (
-  request: HistoryRequest,
-  accountPhoneNumber: string,
-  logger: Logger,
-  {
-    client = applicationClient(),
-    adminClient = userClient(),
-    enqueue = enqueueHistoryImport,
-  }: QueueImportDependencies = {},
-) => {
+const validChatIds = (request: HistoryRequest): string[] => {
   const chats = request.chats;
 
   if (
@@ -202,7 +184,41 @@ export const queueImport = async (
     throw new HttpError(400, 'Invalid history import request');
   }
 
-  const chatIds = chats.map((chat) => chat.chatId as string);
+  return chats.map((chat) => chat.chatId as string);
+};
+
+type ConversationDependencies = {
+  client?: CoreApiClient;
+  // Writes People as the admin, so their own permissions apply.
+  adminClient?: CoreApiClient;
+};
+
+type QueueImportDependencies = ConversationDependencies & {
+  enqueue?: (runToken: string, delayMs: number, position?: ChainPosition) => Promise<void>;
+};
+
+type PreparedConversations = {
+  conversationIdByChatId: Map<string, string>;
+  createdPeople: number;
+  failures: { chatId: string; error: string }[];
+};
+
+// Creates the People and conversations of the selected chats. Chats that cannot be prepared are
+// reported without stopping the others. People and conversations are each written in one upsert,
+// whatever the number of chats. `enableSync` turns syncing on, for new and existing conversations.
+const prepareConversations = async (
+  request: HistoryRequest,
+  accountPhoneNumber: string,
+  createPeople: boolean,
+  enableSync: boolean,
+  logger: Logger,
+  { client = applicationClient(), adminClient = userClient() }: ConversationDependencies,
+): Promise<PreparedConversations> => {
+  const chatIds = validChatIds(request);
+  const chats = (request.chats ?? []).map((chat) => ({
+    ...chat,
+    createPerson: createPeople && chat.createPerson === true,
+  }));
 
   if (chatIds.some((chatId) => chatNumber(chatId) === accountPhoneNumber)) {
     throw new HttpError(400, 'Cannot import the linked account as a contact');
@@ -273,27 +289,59 @@ export const queueImport = async (
           name,
           chatId,
           accountId,
+          isSyncEnabled: enableSync,
           ...(person ? { personId: person.id } : {}),
         },
       ];
     }
 
     // A conversation still named after its phone number takes the contact's name.
-    return isPhoneLikeName(existing.name) && name.trim() && !isPhoneLikeName(name)
-      ? [{ id: existing.id, name: name.trim().slice(0, 120) }]
-      : [];
+    const rename =
+      isPhoneLikeName(existing.name) && name.trim() && !isPhoneLikeName(name)
+        ? { name: name.trim().slice(0, 120) }
+        : {};
+    const sync = enableSync && existing.isSyncEnabled === false ? { isSyncEnabled: true } : {};
+    return Object.keys({ ...rename, ...sync }).length > 0 ? [{ id: existing.id, ...rename, ...sync }] : [];
   });
   const writtenIdByChatId = new Map(
     (conversationWrites.length > 0 ? await upsertConversations(client, conversationWrites) : []).map(
       ({ id, chatId }) => [chatId, id],
     ),
   );
+  const conversationIdByChatId = new Map(
+    resolved.map(({ chatId }) => {
+      const conversationId = conversations.get(chatId)?.id ?? writtenIdByChatId.get(chatId);
+      if (!conversationId) throw new Error('Could not create WhatsApp conversation');
+      return [chatId, conversationId];
+    }),
+  );
 
-  const tasks = resolved.map(({ chatId }) => {
-    const conversationId = conversations.get(chatId)?.id ?? writtenIdByChatId.get(chatId);
-    if (!conversationId) throw new Error('Could not create WhatsApp conversation');
-    return { chatId, conversationId, rangeDays: request.rangeDays as 0 | 30 | 90 };
-  });
+  logger.info('Prepared conversations', { chats: resolved.length, failed: failures.length, createdPeople });
+  return { conversationIdByChatId, createdPeople, failures };
+};
+
+// Hands the messages of the selected chats to the background import. A new conversation is not
+// synced until an admin turns syncing on.
+export const queueImport = async (
+  request: HistoryRequest,
+  accountPhoneNumber: string,
+  createPeople: boolean,
+  logger: Logger,
+  { enqueue = enqueueHistoryImport, ...dependencies }: QueueImportDependencies = {},
+) => {
+  const { conversationIdByChatId, createdPeople, failures } = await prepareConversations(
+    request,
+    accountPhoneNumber,
+    createPeople,
+    false,
+    logger,
+    dependencies,
+  );
+  const tasks = [...conversationIdByChatId].map(([chatId, conversationId]) => ({
+    chatId,
+    conversationId,
+    rangeDays: request.rangeDays as 0 | 30 | 90,
+  }));
 
   if (tasks.length > 0) {
     const { runToken } = await bridgePost<{ runToken?: string }>('/history/imports/queue', { tasks }, 30_000);
@@ -310,6 +358,48 @@ export const queueImport = async (
 
   logger.info('Queued history import', { queued: tasks.length, failed: failures.length, createdPeople });
   return { queued: tasks.length, createdPeople, failures };
+};
+
+// Turns syncing of new messages on (creating the conversations it needs) or off for the selected chats.
+export const updateSync = async (
+  request: HistoryRequest,
+  accountPhoneNumber: string,
+  createPeople: boolean,
+  logger: Logger,
+  dependencies: ConversationDependencies = {},
+) => {
+  if (typeof request.enabled !== 'boolean') {
+    throw new HttpError(400, 'Invalid sync request');
+  }
+
+  if (request.enabled) {
+    const { conversationIdByChatId, createdPeople, failures } = await prepareConversations(
+      request,
+      accountPhoneNumber,
+      createPeople,
+      true,
+      logger,
+      dependencies,
+    );
+    return { updated: conversationIdByChatId.size, createdPeople, failures };
+  }
+
+  const chatIds = validChatIds(request);
+  const client = dependencies.client ?? applicationClient();
+  const accountId = await ensureAccount(client, `+${accountPhoneNumber}`);
+  const synced = [...(await findConversations(client, accountId, chatIds)).values()].filter(
+    (conversation) => conversation.isSyncEnabled !== false,
+  );
+
+  if (synced.length > 0) {
+    await upsertConversations(
+      client,
+      synced.map((conversation) => ({ id: conversation.id, isSyncEnabled: false })),
+    );
+  }
+
+  logger.info('Stopped syncing chats', { count: synced.length });
+  return { updated: synced.length, createdPeople: 0, failures: [] };
 };
 
 // Stops the running import: the bridge drops the chats and files still queued, and the chain's job
@@ -353,7 +443,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     return cancelImport(logger);
   }
 
-  if (!RANGE_DAYS.includes(request.rangeDays ?? 0)) {
+  if (request.action !== 'sync' && !RANGE_DAYS.includes(request.rangeDays ?? 0)) {
     throw new HttpError(400, 'Invalid history range');
   }
 
@@ -368,11 +458,15 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
   }
 
   if (request.action === 'list') {
-    return listCandidates(request);
+    return listCandidates(request, digits(status.phoneNumber), status.twentyAccountId);
   }
 
   if (request.action === 'import') {
-    return queueImport(request, digits(status.phoneNumber), logger);
+    return queueImport(request, digits(status.phoneNumber), status.createPeople === true, logger);
+  }
+
+  if (request.action === 'sync') {
+    return updateSync(request, digits(status.phoneNumber), status.createPeople === true, logger);
   }
 
   throw new HttpError(400, 'Invalid history request');
@@ -381,7 +475,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
 export default defineLogicFunction({
   universalIdentifier: '6e6ef756-2022-4d4d-93af-3f1a95fe5a86',
   name: 'whatsapp-history',
-  description: 'Review available WhatsApp history and queue selected chats for a background import.',
+  description: 'List WhatsApp chats, import their history in the background, and turn syncing on or off.',
   timeoutSeconds: 60,
   handler,
   httpRouteTriggerSettings: {

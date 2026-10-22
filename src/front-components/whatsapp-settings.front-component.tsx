@@ -19,6 +19,8 @@ type ConnectionStatus = {
   qrExpiresAt?: number;
   phoneNumber?: string;
   bridgeOutdated?: boolean;
+  canManage?: boolean;
+  createPeople?: boolean;
 };
 
 const parseStatus = (value: unknown): ConnectionStatus => {
@@ -43,6 +45,8 @@ const parseStatus = (value: unknown): ConnectionStatus => {
     qrExpiresAt: typeof record.qrExpiresAt === 'number' ? record.qrExpiresAt : undefined,
     phoneNumber: typeof record.phoneNumber === 'string' ? record.phoneNumber : undefined,
     bridgeOutdated: record.bridgeOutdated === true,
+    canManage: record.canManage === true,
+    createPeople: record.createPeople === true,
   };
 };
 
@@ -55,6 +59,7 @@ const WhatsAppSettings = () => {
   const [ownsNumber, setOwnsNumber] = useState(false);
   const [acceptsRisk, setAcceptsRisk] = useState(false);
   const [working, setWorking] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
   const [error, setError] = useState('');
 
   const refreshStatus = async () => {
@@ -122,6 +127,24 @@ const WhatsAppSettings = () => {
     }
   };
 
+  const changeCreatePeople = async (createPeople: boolean) => {
+    setSavingSettings(true);
+    setError('');
+
+    try {
+      await new RestApiClient().post('/s/whatsapp/settings', { createPeople });
+      setStatus((previous) => (previous ? { ...previous, createPeople } : previous));
+    } catch {
+      setError(
+        t(
+          'Could not save the setting. Check administrator access, and restart the bridge if it is older than the app.',
+        ),
+      );
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
   const badge =
     status?.state === 'connected'
       ? { label: t('Connected'), color: 'green' as const }
@@ -181,9 +204,26 @@ const WhatsAppSettings = () => {
             </span>
             <span style={styles.muted}>
               {t(
-                'New direct messages from People and saved contacts, including available images, videos, and audio, appear in the inbox and on Person records. Saved contacts become People; other numbers are ignored. Selected groups appear in the shared inbox after import.',
+                'New messages of the chats you sync below, including available images, videos, and audio, appear in the inbox and on Person records. Other chats are ignored.',
               )}
             </span>
+            {status.canManage && (
+              <label style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
+                <FrontComponentCheckbox
+                  checked={status.createPeople === true}
+                  disabled={savingSettings}
+                  onChange={(event) => void changeCreatePeople(event.target.checked)}
+                />
+                <span style={{ display: 'grid', gap: themeCssVariables.spacing[1] }}>
+                  <span>{t('Create People from WhatsApp contact info')}</span>
+                  <span style={styles.muted}>
+                    {t(
+                      'Contacts saved on the phone become People when you import or sync their chat, or when they write in a synced group.',
+                    )}
+                  </span>
+                </span>
+              </label>
+            )}
             <div>
               <Button
                 type="button"
@@ -253,7 +293,7 @@ const WhatsAppSettings = () => {
               <strong>{t('Before you connect')}</strong>
               <p style={styles.muted}>
                 {t(
-                  'This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. New messages and available images, videos, and audio from People and saved contacts are shared with permitted workspace members, and saved contacts are added as People. Available earlier history is stored encrypted on the bridge and is shared only if you import it.',
+                  'This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. Only the chats you import or sync are shared with permitted workspace members, with their new messages and available images, videos, and audio. Saved contacts are added as People only if you turn that on. Messages of other chats stay encrypted on the bridge.',
                 )}
               </p>
               <a href="https://www.whatsapp.com/legal/terms-of-service" target="_blank" rel="noreferrer">
@@ -291,7 +331,7 @@ const WhatsAppSettings = () => {
           </div>
         )}
       </div>
-      {status?.state === 'connected' && <WhatsAppHistoryImport />}
+      {status?.state === 'connected' && <WhatsAppHistoryImport createPeople={status.createPeople === true} />}
     </main>
   );
 };

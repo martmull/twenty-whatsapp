@@ -84,6 +84,16 @@ export default defineObject({
       relationTargetFieldMetadataUniversalIdentifier: MESSAGE_CONVERSATION_FIELD_ID,
       universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
+    {
+      universalIdentifier: '7d79aeeb-54c5-4032-ab6f-54381d5ac25e',
+      type: FieldType.BOOLEAN,
+      name: 'isSyncEnabled',
+      label: 'Sync new messages',
+      icon: 'IconRefresh',
+      // Conversations from before this field kept syncing.
+      defaultValue: true,
+      isNullable: false,
+    },
     // Rewritten on every message: kept out of the timeline.
     {
       universalIdentifier: '4b32c71f-8c24-4429-8b16-05f6cd65ada6',

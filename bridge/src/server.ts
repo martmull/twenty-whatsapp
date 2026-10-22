@@ -195,6 +195,10 @@ const jsonRoutes: Record<string, Route> = {
     connection.budget.adjust(body.requests as number);
     return { spent: true };
   },
+  'POST /settings': (body) => {
+    check(typeof body.createPeople === 'boolean');
+    return connection.updateSettings({ createPeople: body.createPeople as boolean });
+  },
   'POST /account': (body) => {
     check(typeof body.phoneNumber === 'string' && /^\+\d{7,15}$/.test(body.phoneNumber) && isUuid(body.accountId));
     return connection.rememberTwentyAccount(body.phoneNumber as string, body.accountId as string);

@@ -24,10 +24,16 @@ const event = (chatId: string, index: number, sender?: { senderId: string; sende
   ...sender,
 });
 
-const bridgeWith = (savedContacts: (body: Record<string, unknown>) => unknown) => {
+const bridgeWith = (savedContacts: (body: Record<string, unknown>) => unknown, createPeople = true) => {
   const acknowledged: string[][] = [];
   const bridge = mockBridge({
-    '/status': () => ({ state: 'connected', apiVersion: 2, phoneNumber: '15559999999', twentyAccountId: ACCOUNT.id }),
+    '/status': () => ({
+      state: 'connected',
+      apiVersion: 3,
+      phoneNumber: '15559999999',
+      twentyAccountId: ACCOUNT.id,
+      createPeople,
+    }),
     '/events/claim': () => ({
       leaseId: '33333333-3333-4333-8333-333333333333',
       events: [
@@ -51,9 +57,11 @@ const bridgeWith = (savedContacts: (body: Record<string, unknown>) => unknown) =
 };
 
 const groupConversation = { id: 'group-conversation', name: '120363123456789012', chatId: GROUP_ID, accountId: 'acc' };
+const savedConversation = { id: 'saved-conversation', name: '+15551234567', chatId: SAVED_CHAT_ID, accountId: 'acc' };
+const conversations = () => [{ ...groupConversation }, { ...savedConversation }];
 
-test('creates People for saved contacts only, in one upsert, and names conversations after them', async () => {
-  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: [{ ...groupConversation }] });
+test('creates People for saved contacts of imported chats, in one upsert, and links and names conversations', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: conversations() });
   const { calls, acknowledged } = bridgeWith(() => [
     { id: '777777777@lid', phoneNumber: '+15557777777', firstName: 'Sam', lastName: 'Lee' },
   ]);
@@ -96,7 +104,7 @@ test('creates People for saved contacts only, in one upsert, and names conversat
 });
 
 test('keeps a saved contact queued when their Person cannot be created, and imports the rest', async () => {
-  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: [{ ...groupConversation }] });
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: conversations() });
   twenty.rejectRecords(
     (record) => (record.phones as { primaryPhoneNumber?: string } | undefined)?.primaryPhoneNumber === '+15551234567',
   );
@@ -109,4 +117,33 @@ test('keeps a saved contact queued when their Person cannot be created, and impo
   assert.equal(acknowledged.flat().includes(event(SAVED_CHAT_ID, 1).eventId), false);
   assert.equal(result.imported, 2, 'group messages still land without their senders as People');
   assert.equal(twenty.store.people.length, 0);
+});
+
+test('creates no People when the setting is off, and still syncs imported chats', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: conversations() });
+  const { calls, acknowledged } = bridgeWith(() => {
+    throw new Error('saved contacts must not be read');
+  }, false);
+
+  const result = await syncMessages(silentLogger, { client: twenty.client, queueFiles: async () => undefined });
+
+  assert.deepEqual(twenty.requests, [
+    'query people',
+    'query whatsappConversations',
+    'mutation createWhatsappConversations',
+    'mutation createWhatsappMessages',
+  ]);
+  assert.equal(twenty.store.people.length, 0);
+  assert.equal(twenty.store.whatsappConversations.length, 2);
+  assert.equal(
+    twenty.store.whatsappConversations.find((conversation) => conversation.chatId === SAVED_CHAT_ID)?.personId,
+    undefined,
+  );
+  assert.equal(result.imported, 3);
+  assert.equal(result.ignored, 1, 'the chat that was never imported stays out');
+  assert.equal(acknowledged.flat().length, 4);
+  assert.equal(
+    calls.some((call) => call.path === '/contacts/saved'),
+    false,
+  );
 });

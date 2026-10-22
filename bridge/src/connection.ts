@@ -56,7 +56,12 @@ const MAX_TRACKED_NAME_CHANGES = 1_000;
 
 // Raised when the app and bridge stop understanding each other; the app refuses to import history
 // from an older bridge instead of stalling on it.
-export const BRIDGE_API_VERSION = 2;
+export const BRIDGE_API_VERSION = 3;
+
+export type BridgeSettings = { createPeople: boolean };
+
+// Off until an admin turns it on, so no contact reaches Twenty without a choice.
+const DEFAULT_SETTINGS: BridgeSettings = { createPeople: false };
 
 export type ConnectionStatus = {
   apiVersion?: number;
@@ -66,6 +71,7 @@ export type ConnectionStatus = {
   phoneNumber?: string;
   // The WhatsApp account record in Twenty, once Twenty has reported it, so a sync need not look it up.
   twentyAccountId?: string;
+  createPeople?: boolean;
 };
 
 // Twenty imports at most this many queued events per sync job.
@@ -152,6 +158,8 @@ export class WhatsAppConnection {
   private syncGeneration = 0;
   private readonly twentyAccounts: EncryptedJsonStore<{ phoneNumber: string; accountId: string }>;
   private twentyAccount: { phoneNumber: string; accountId: string } | undefined;
+  private readonly settingsStore: EncryptedJsonStore<BridgeSettings>;
+  private settings: BridgeSettings = DEFAULT_SETTINGS;
   private namesTimer: NodeJS.Timeout | undefined;
   // Chats whose name changed since Twenty last refreshed names, with the change sequence. Lost on
   // restart, so the first refresh after a start covers every conversation.
@@ -177,6 +185,7 @@ export class WhatsAppConnection {
     this.historyState = new EncryptedJsonStore(storage, 'history-state', encryptionKey);
     this.mediaReferences = new EncryptedJsonStore(storage, 'media-references', encryptionKey);
     this.twentyAccounts = new EncryptedJsonStore(storage, 'twenty-account', encryptionKey);
+    this.settingsStore = new EncryptedJsonStore(storage, 'settings', encryptionKey);
     this.historyImports = new HistoryImportQueue(
       storage,
       encryptionKey,
@@ -861,6 +870,12 @@ export class WhatsAppConnection {
     return { remembered: true };
   }
 
+  async updateSettings(settings: BridgeSettings): Promise<BridgeSettings> {
+    await this.settingsStore.write('current', settings);
+    this.settings = settings;
+    return settings;
+  }
+
   private signalEvents(): void {
     this.onSignal({ events: true });
   }
@@ -1026,13 +1041,14 @@ export class WhatsAppConnection {
 
   getStatus(): ConnectionStatus {
     if (this.status.qrExpiresAt && this.status.qrExpiresAt < Date.now()) {
-      return { state: 'pairing', apiVersion: BRIDGE_API_VERSION };
+      return { state: 'pairing', apiVersion: BRIDGE_API_VERSION, createPeople: this.settings.createPeople };
     }
 
     const phoneNumber = this.status.phoneNumber ? `+${this.status.phoneNumber.replace(/\D/g, '')}` : undefined;
     return {
       ...this.status,
       apiVersion: BRIDGE_API_VERSION,
+      createPeople: this.settings.createPeople,
       ...(phoneNumber && this.twentyAccount?.phoneNumber === phoneNumber
         ? { twentyAccountId: this.twentyAccount.accountId }
         : {}),
@@ -1041,6 +1057,7 @@ export class WhatsAppConnection {
 
   async resume(): Promise<void> {
     this.twentyAccount = (await this.twentyAccounts.read('current')) ?? undefined;
+    this.settings = { ...DEFAULT_SETTINGS, ...(await this.settingsStore.read('current')) };
     const { state } = await createEncryptedAuthState(this.storage, this.encryptionKey);
 
     if (state.creds.me?.id) {
@@ -1235,6 +1252,7 @@ export class WhatsAppConnection {
     this.changedNames.clear();
     this.fullNamesRefreshUntil = this.namesSequence;
     this.twentyAccount = undefined;
+    this.settings = DEFAULT_SETTINGS;
     clearTimeout(this.addressBookTimer);
     const socket = this.socket;
     this.socket = undefined;

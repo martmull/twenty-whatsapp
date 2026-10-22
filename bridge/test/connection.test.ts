@@ -733,3 +733,16 @@ test('a sync batch waits for the API budget, and only one sync job waits at a ti
   assert.equal(second.waitMs, undefined, 'a second job ends: the first one will come back');
   assert.equal(second.leaseId, undefined);
 });
+
+test('creating People is off by default, and the setting survives a restart', async () => {
+  await withConnection(async (connection, storage, encryptionKey) => {
+    assert.equal(connection.getStatus().createPeople, false);
+
+    await connection.updateSettings({ createPeople: true });
+    assert.equal(connection.getStatus().createPeople, true);
+
+    const restarted = new WhatsAppConnection(storage, encryptionKey);
+    await restarted.resume();
+    assert.equal(restarted.getStatus().createPeople, true);
+  });
+});

@@ -3,7 +3,7 @@ import { afterEach, test } from 'node:test';
 
 import { syncConversationNames } from '../src/logic-functions/message-data';
 import { deterministicId } from '../src/logic-functions/record-writes';
-import { queueImport } from '../src/logic-functions/whatsapp-history';
+import { queueImport, updateSync } from '../src/logic-functions/whatsapp-history';
 import { createFakeTwenty, mockBridge } from './fake-twenty';
 
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -52,13 +52,13 @@ test('imports 50 chats, creating and renaming People and conversations, in 5 req
   restore = bridge.restore;
   const chats = [
     ...range(30).map((index) => ({ chatId: chatId(1, index), createPerson: true })),
-    ...range(10).map((index) => ({ chatId: chatId(2, index) })),
-    ...range(10).map((index) => ({ chatId: chatId(3, index) })),
+    ...range(10).map((index) => ({ chatId: chatId(2, index), createPerson: true })),
+    ...range(10).map((index) => ({ chatId: chatId(3, index), createPerson: true })),
   ];
   const request = { action: 'import' as const, rangeDays: 30, chats };
   const dependencies = { client: twenty.client, adminClient: twenty.client, enqueue: async () => undefined };
 
-  const result = await queueImport(request, number(5, 0), silentLogger, dependencies);
+  const result = await queueImport(request, number(5, 0), true, silentLogger, dependencies);
 
   assert.deepEqual(result, { queued: 50, createdPeople: 30, failures: [] });
   assert.deepEqual(twenty.requests, [
@@ -80,10 +80,110 @@ test('imports 50 chats, creating and renaming People and conversations, in 5 req
 
   // Submitting the same import again finds everything and creates nothing twice.
   twenty.requests.length = 0;
-  await queueImport(request, number(5, 0), silentLogger, dependencies);
+  await queueImport(request, number(5, 0), true, silentLogger, dependencies);
   assert.equal(twenty.store.people.length, 50);
   assert.equal(twenty.store.whatsappConversations.length, 50);
   assert.deepEqual(twenty.requests, ['query whatsappAccounts', 'query people', 'query whatsappConversations']);
+});
+
+test('imports every selected chat without creating or renaming People when the setting is off', async () => {
+  const twenty = createFakeTwenty({
+    whatsappAccounts: [ACCOUNT],
+    people: [
+      { id: 'known', name: { firstName: 'Known', lastName: '' }, phones: { primaryPhoneNumber: `+${number(3, 0)}` } },
+    ],
+  });
+  const memberLookups: unknown[] = [];
+  const bridge = mockBridge({
+    '/history/names': (body) =>
+      (body.chatIds as string[]).map((id) => ({ chatId: id, name: 'Ada Lovelace', firstName: 'Ada' })),
+    '/history/members': (body) => memberLookups.push(body.chatId),
+    '/history/imports/queue': (body) => ({
+      queued: (body.tasks as unknown[]).length,
+      runToken: '22222222-2222-4222-8222-222222222222',
+    }),
+  });
+  restore = bridge.restore;
+  const request = {
+    action: 'import' as const,
+    rangeDays: 30,
+    chats: [
+      { chatId: chatId(1, 0), createPerson: true },
+      { chatId: chatId(3, 0) },
+      { chatId: '120363123456789012@g.us', createPerson: true },
+    ],
+  };
+
+  const result = await queueImport(request, number(5, 0), false, silentLogger, {
+    client: twenty.client,
+    adminClient: twenty.client,
+    enqueue: async () => undefined,
+  });
+
+  assert.deepEqual(result, { queued: 3, createdPeople: 0, failures: [] });
+  assert.equal(twenty.store.people.length, 1);
+  assert.deepEqual(twenty.store.people[0].name, { firstName: 'Known', lastName: '' });
+  const personIdByChatId = new Map(twenty.store.whatsappConversations.map((row) => [row.chatId, row.personId]));
+  assert.equal(personIdByChatId.get(chatId(3, 0)), 'known', 'an existing Person is still linked');
+  assert.equal(personIdByChatId.get(chatId(1, 0)), undefined);
+  assert.deepEqual(memberLookups, []);
+});
+
+test('importing history creates conversations that do not sync until syncing is turned on', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT] });
+  const bridge = mockBridge({
+    '/history/names': (body) => (body.chatIds as string[]).map((id) => ({ chatId: id, name: 'Ada Lovelace' })),
+    '/history/imports/queue': () => ({ queued: 1 }),
+  });
+  restore = bridge.restore;
+  const request = { action: 'import' as const, rangeDays: 30, chats: [{ chatId: chatId(1, 0) }] };
+
+  await queueImport(request, number(5, 0), false, silentLogger, {
+    client: twenty.client,
+    adminClient: twenty.client,
+    enqueue: async () => undefined,
+  });
+
+  assert.equal(twenty.store.whatsappConversations[0].isSyncEnabled, false);
+});
+
+test('turns syncing on, creating missing conversations, and off again', async () => {
+  const twenty = createFakeTwenty({
+    whatsappAccounts: [ACCOUNT],
+    whatsappConversations: [
+      { id: 'off', name: 'Off', chatId: chatId(1, 0), accountId: ACCOUNT.id, isSyncEnabled: false },
+    ],
+  });
+  const bridge = mockBridge({
+    '/history/names': (body) => (body.chatIds as string[]).map((id) => ({ chatId: id, name: 'Ada Lovelace' })),
+  });
+  restore = bridge.restore;
+  const dependencies = { client: twenty.client, adminClient: twenty.client };
+  const chats = [{ chatId: chatId(1, 0) }, { chatId: chatId(1, 1) }];
+  const isSyncEnabledByChatId = () =>
+    Object.fromEntries(twenty.store.whatsappConversations.map((row) => [row.chatId, row.isSyncEnabled]));
+
+  const enabled = await updateSync(
+    { action: 'sync', enabled: true, chats },
+    number(5, 0),
+    false,
+    silentLogger,
+    dependencies,
+  );
+
+  assert.equal(enabled.updated, 2);
+  assert.deepEqual(isSyncEnabledByChatId(), { [chatId(1, 0)]: true, [chatId(1, 1)]: true });
+
+  const disabled = await updateSync(
+    { action: 'sync', enabled: false, chats },
+    number(5, 0),
+    false,
+    silentLogger,
+    dependencies,
+  );
+
+  assert.equal(disabled.updated, 2);
+  assert.deepEqual(isSyncEnabledByChatId(), { [chatId(1, 0)]: false, [chatId(1, 1)]: false });
 });
 
 test('renames conversations from the names that changed, in one query and one upsert', async () => {

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
 import { syncMessages } from '../src/logic-functions/live-sync';
-import { deterministicId } from '../src/logic-functions/record-writes';
 import { createFakeTwenty, mockBridge } from './fake-twenty';
 
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -30,6 +29,14 @@ const person = (index: number) => ({
   phones: { primaryPhoneNumber: `+${number(index)}` },
 });
 
+const conversation = (index: number, personId?: string) => ({
+  id: `conversation-${index}`,
+  name: `+${number(index)}`,
+  chatId: chatId(index),
+  accountId: ACCOUNT.id,
+  ...(personId ? { personId } : {}),
+});
+
 type Event = ReturnType<typeof event>;
 
 const bridgeWith = (events: Event[], status: Record<string, unknown> = { twentyAccountId: ACCOUNT.id }) => {
@@ -54,13 +61,10 @@ test('imports 200 events from 80 chats in 4 requests, then a replay creates noth
   const twenty = createFakeTwenty({
     whatsappAccounts: [ACCOUNT],
     people: range(80).map(person),
-    whatsappConversations: range(40).map((index) => ({
-      id: `conversation-${index}`,
-      name: `Contact ${index}`,
-      chatId: chatId(index),
-      accountId: ACCOUNT.id,
-      personId: `person-${index}`,
-    })),
+    // Half the conversations are not linked to their Person yet.
+    whatsappConversations: range(80).map((index) =>
+      index < 40 ? { ...conversation(index, `person-${index}`), name: `Contact ${index}` } : conversation(index),
+    ),
   });
   const events = range(200).map((index) => event(index, chatId(index % 80)));
   const { acknowledged, released } = bridgeWith(events);
@@ -77,11 +81,10 @@ test('imports 200 events from 80 chats in 4 requests, then a replay creates noth
   assert.equal(result.jobKey, 'boot.2');
   assert.equal(twenty.store.whatsappMessages.length, 200);
   assert.equal(twenty.store.whatsappConversations.length, 80);
-  assert.ok(
-    twenty.store.whatsappConversations.some((row) => row.id === deterministicId('conversation', `acc:${chatId(79)}`)),
-  );
   const latest = twenty.store.whatsappConversations.find((row) => row.chatId === chatId(79));
   assert.equal(latest?.lastPreview, 'Message 159');
+  assert.equal(latest?.personId, 'person-79');
+  assert.equal(latest?.name, 'Contact 79');
   assert.equal(acknowledged.length, 1, 'one acknowledgement for the whole batch');
   assert.equal(acknowledged[0].length, 200);
   assert.equal(released[0].completed, true);
@@ -107,9 +110,10 @@ test('looks the account up once and asks the bridge to remember it', async () =>
   assert.deepEqual(remembered, [{ phoneNumber: ACCOUNT.phoneNumber, accountId: ACCOUNT.id }]);
 });
 
-test('skips unmatched chats and groups without a conversation, and keeps group senders', async () => {
+test('skips chats without a conversation, even with a matching Person, and keeps group senders', async () => {
   const twenty = createFakeTwenty({
     whatsappAccounts: [ACCOUNT],
+    people: [person(5)],
     whatsappConversations: [{ id: 'group', name: 'Project team', chatId: GROUP_ID, accountId: ACCOUNT.id }],
   });
   const groupEvent = event(1, GROUP_ID, { senderId: '15551234567@s.whatsapp.net', senderName: 'Alex Martin' });
@@ -124,8 +128,31 @@ test('skips unmatched chats and groups without a conversation, and keeps group s
   assert.equal(acknowledged[0].length, 3, 'skipped events are acknowledged too');
 });
 
+test('ignores chats whose syncing is off', async () => {
+  const twenty = createFakeTwenty({
+    whatsappAccounts: [ACCOUNT],
+    people: [person(1)],
+    whatsappConversations: [{ ...conversation(1), isSyncEnabled: false }, conversation(2)],
+  });
+  const { acknowledged } = bridgeWith([event(1, chatId(1)), event(2, chatId(2))]);
+
+  const result = await syncMessages(silentLogger, { client: twenty.client });
+
+  assert.equal(result.imported, 1);
+  assert.equal(result.ignored, 1);
+  assert.deepEqual(
+    twenty.store.whatsappMessages.map((message) => message.conversationId),
+    ['conversation-2'],
+  );
+  assert.equal(twenty.store.whatsappConversations[0].personId, undefined, 'an unsynced chat is not linked either');
+  assert.equal(acknowledged[0].length, 2);
+});
+
 test('retries chat by chat when the batch cannot be written, keeping only the bad chat queued', async () => {
-  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: range(3).map(person) });
+  const twenty = createFakeTwenty({
+    whatsappAccounts: [ACCOUNT],
+    whatsappConversations: range(3).map((index) => conversation(index)),
+  });
   twenty.rejectRecords((record) => record.text === 'Message 1');
   const { acknowledged } = bridgeWith(range(3).map((index) => event(index, chatId(index))));
 
@@ -150,7 +177,7 @@ test('when Twenty rate limits, acknowledges nothing and waits as long as Twenty 
 });
 
 test('imports a whole batch with media, handing the files to the bridge media queue', async () => {
-  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: [person(1)] });
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: [conversation(1)] });
   const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
   const events = range(30).map((index) => event(index, chatId(1), index % 3 ? {} : { media }));
   bridgeWith(events);
@@ -198,7 +225,7 @@ test('reports the requests a batch made, so the bridge can correct its estimate'
 });
 
 test('keeps the events queued when their files cannot be handed to the media queue', async () => {
-  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: [person(1)] });
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: [conversation(1)] });
   const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
   const { acknowledged } = bridgeWith([event(1, chatId(1), { media })]);
 
@@ -215,7 +242,7 @@ test('keeps the events queued when their files cannot be handed to the media que
 });
 
 test('with a bridge older than the app, still imports the messages, without their files', async () => {
-  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], people: [person(1)] });
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT], whatsappConversations: [conversation(1)] });
   const media = { kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg' };
   const { acknowledged } = bridgeWith([event(1, chatId(1), { media })], {
     twentyAccountId: ACCOUNT.id,
