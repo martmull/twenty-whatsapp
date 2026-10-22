@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { ApiBudget } from './api-budget.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
+import type { Storage } from './storage.js';
 
 // Files of imported messages wait here, keyed by event ID so the same file is never queued twice,
 // until a media job chain in Twenty uploads them. At most a few chains run, each one job at a time,
@@ -69,11 +70,11 @@ export class MediaQueue {
   private stallTimer: NodeJS.Timeout | undefined;
 
   constructor(
-    directory: string,
+    storage: Storage,
     encryptionKey: Buffer,
     { now = Date.now, budget, onChainsRestarted = () => undefined, canRun = () => true }: MediaQueueOptions = {},
   ) {
-    this.items = new EncryptedJsonStore(directory, encryptionKey);
+    this.items = new EncryptedJsonStore(storage, 'media-queue', encryptionKey);
     this.now = now;
     this.budget = budget;
     this.onChainsRestarted = onChainsRestarted;

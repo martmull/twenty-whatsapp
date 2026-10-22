@@ -1,0 +1,37 @@
+# Local development: Postgres and the bridge next to a Twenty instance at localhost:2020.
+# In production, run the published image with your own database and secrets (see the README).
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bridge
+      POSTGRES_PASSWORD: bridge
+      POSTGRES_DB: bridge
+    ports:
+      - 127.0.0.1:5433:5432
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U bridge]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bridge:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://bridge:bridge@postgres:5432/bridge
+      WHATSAPP_BRIDGE_HOST: 0.0.0.0
+      TWENTY_WEBHOOK_URL: http://host.docker.internal:2020/s/whatsapp/bridge/events
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - 127.0.0.1:8765:8765
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres:

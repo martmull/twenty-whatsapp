@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { ApiBudget } from './api-budget.js';
 import { EncryptedJsonStore } from './encrypted-json-store.js';
 import type { MessageEvent } from './message-event.js';
+import type { Storage } from './storage.js';
 
 // Twenty imports selected history in a chain of background jobs, one page per job. This queue holds
 // what is left to import and makes sure only one chain runs: each job must present the current run
@@ -129,13 +130,13 @@ export class HistoryImportQueue {
   private readonly budget: Pick<ApiBudget, 'take' | 'adjust' | 'waitMs'> | undefined;
 
   constructor(
-    directory: string,
+    storage: Storage,
     encryptionKey: Buffer,
     // Messages of a chat sorted by sentAt then eventId, as kept in the history cache.
     private readonly readMessages: (chatId: string) => Promise<MessageEvent[] | undefined>,
     { now = Date.now, onChainRestarted = () => undefined, canRun = () => true, budget }: HistoryImportQueueOptions = {},
   ) {
-    this.tasks = new EncryptedJsonStore(directory, encryptionKey);
+    this.tasks = new EncryptedJsonStore(storage, 'history-imports', encryptionKey);
     this.budget = budget;
     this.now = now;
     this.onChainRestarted = onChainRestarted;

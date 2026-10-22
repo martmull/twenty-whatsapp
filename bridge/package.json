@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "node --env-file=.env --import tsx src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
     "restart": "node scripts/restart.mjs",
     "address-book": "node scripts/check-address-book.mjs",
     "typecheck": "tsc --noEmit",
@@ -15,11 +17,13 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "6.7.24",
+    "pg": "8.23.1",
     "pino": "9.6.0",
     "qrcode": "1.5.4"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
     "@types/qrcode": "^1.5.6",
     "tsx": "^4.20.0",
     "typescript": "^5.9.3"

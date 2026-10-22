@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
 
 import { ApiBudget } from '../src/api-budget.js';
 import { HistoryImportQueue, MAX_PAGE_MESSAGES, type HistoryImportPage } from '../src/history-import-queue.js';
 import type { MessageEvent } from '../src/message-event.js';
+
+import { MemoryStorage } from './memory-storage.js';
 
 const CHAT_ID = '15551234567@s.whatsapp.net';
 const OTHER_CHAT_ID = '15557654321@s.whatsapp.net';
@@ -34,27 +33,23 @@ const withQueue = async (
     world: { connected: boolean; restartedChains: string[]; budget: ApiBudget },
   ) => Promise<void>,
 ) => {
-  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-imports-'));
+  const storage = new MemoryStorage();
   const clock = { now: Date.UTC(2026, 9, 16) };
   const world = {
     connected: true,
     restartedChains: [] as string[],
     budget: new ApiBudget(100, () => clock.now),
   };
-  try {
-    await run(
-      new HistoryImportQueue(directory, randomBytes(32), async (chatId) => messagesByChat[chatId], {
-        now: () => clock.now,
-        onChainRestarted: (runToken) => world.restartedChains.push(runToken),
-        canRun: () => world.connected,
-        budget: world.budget,
-      }),
-      clock,
-      world,
-    );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  await run(
+    new HistoryImportQueue(storage, randomBytes(32), async (chatId) => messagesByChat[chatId], {
+      now: () => clock.now,
+      onChainRestarted: (runToken) => world.restartedChains.push(runToken),
+      canRun: () => world.connected,
+      budget: world.budget,
+    }),
+    clock,
+    world,
+  );
 };
 
 const asPage = (result: unknown): HistoryImportPage => {

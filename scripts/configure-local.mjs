@@ -38,6 +38,12 @@ if (!/^TWENTY_WEBHOOK_URL=/m.test(env)) {
   await writeFile(envPath, env, { mode: 0o600 });
 }
 
+// The Postgres of bridge/compose.yaml, for npm run dev; the bridge container overrides it.
+if (!/^DATABASE_URL=/m.test(env)) {
+  env += 'DATABASE_URL=postgres://bridge:bridge@127.0.0.1:5433/bridge\n';
+  await writeFile(envPath, env, { mode: 0o600 });
+}
+
 const token = env.match(/^WHATSAPP_BRIDGE_TOKEN=(.+)$/m)?.[1];
 
 if (!token) {

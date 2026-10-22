@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
 
 import { encodeSyncdPatch, newLTHashState, proto, type SignalKeyStore, type WASocket } from '@whiskeysockets/baileys';
 
 import { fetchAddressBook, splitContactName } from '../src/address-book.js';
 import { WhatsAppConnection } from '../src/connection.js';
+
+import { MemoryStorage } from './memory-storage.js';
 
 const keyId = Buffer.from('contacts-key').toString('base64');
 const appStateKey = proto.Message.AppStateSyncKeyData.fromObject({ keyData: randomBytes(32), timestamp: 1 });
@@ -108,62 +107,54 @@ test('the address book is read with first and last names, including contacts sav
 });
 
 test('history review and import use the saved contact name over the WhatsApp profile name', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-address-book-'));
-  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const storage = new MemoryStorage();
+  const connection = new WhatsAppConnection(storage, randomBytes(32));
   const chatId = '33686388980@s.whatsapp.net';
 
-  try {
-    await connection.recordHistory(
-      [],
-      [
-        {
-          key: { remoteJid: chatId, id: 'saved-1', fromMe: false },
-          pushName: 'cam ☀️',
-          message: { conversation: 'Hello' },
-          messageTimestamp: Math.floor(Date.now() / 1000),
-        },
-      ],
-    );
-    await connection.recordAddressBook([
-      { ids: [chatId], fullName: 'Camille Durand', firstName: 'Camille', lastName: 'Durand' },
-    ]);
+  await connection.recordHistory(
+    [],
+    [
+      {
+        key: { remoteJid: chatId, id: 'saved-1', fromMe: false },
+        pushName: 'cam ☀️',
+        message: { conversation: 'Hello' },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+      },
+    ],
+  );
+  await connection.recordAddressBook([
+    { ids: [chatId], fullName: 'Camille Durand', firstName: 'Camille', lastName: 'Durand' },
+  ]);
 
-    const [candidate] = (await connection.getHistoryCandidates(0, 0, 20)).items;
-    assert.equal(candidate.name, 'Camille Durand');
-    assert.equal(candidate.firstName, 'Camille');
-    assert.equal(candidate.lastName, 'Durand');
-    const history = await connection.getHistoryMessages(chatId, 0, 0, 25);
-    assert.equal(history.firstName, 'Camille');
-    assert.equal(history.lastName, 'Durand');
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  const [candidate] = (await connection.getHistoryCandidates(0, 0, 20)).items;
+  assert.equal(candidate.name, 'Camille Durand');
+  assert.equal(candidate.firstName, 'Camille');
+  assert.equal(candidate.lastName, 'Durand');
+  const history = await connection.getHistoryMessages(chatId, 0, 0, 25);
+  assert.equal(history.firstName, 'Camille');
+  assert.equal(history.lastName, 'Durand');
 });
 
 test('a contact saved by LID names the phone number once WhatsApp shares it', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'twenty-whatsapp-address-book-lid-'));
-  const connection = new WhatsAppConnection(directory, randomBytes(32));
+  const storage = new MemoryStorage();
+  const connection = new WhatsAppConnection(storage, randomBytes(32));
   const lid = '123456789012345@lid';
   const chatId = '33637952219@s.whatsapp.net';
 
-  try {
-    await connection.recordAddressBook([{ ids: [lid], fullName: 'Léa Moreau', firstName: 'Léa', lastName: 'Moreau' }]);
-    await connection.recordHistory(
-      [{ id: lid, lid, jid: chatId }],
-      [
-        {
-          key: { remoteJid: chatId, id: 'lid-1', fromMe: true },
-          message: { conversation: 'Hello' },
-          messageTimestamp: Math.floor(Date.now() / 1000),
-        },
-      ],
-    );
+  await connection.recordAddressBook([{ ids: [lid], fullName: 'Léa Moreau', firstName: 'Léa', lastName: 'Moreau' }]);
+  await connection.recordHistory(
+    [{ id: lid, lid, jid: chatId }],
+    [
+      {
+        key: { remoteJid: chatId, id: 'lid-1', fromMe: true },
+        message: { conversation: 'Hello' },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+      },
+    ],
+  );
 
-    const [candidate] = (await connection.getHistoryCandidates(0, 0, 20)).items;
-    assert.equal(candidate.name, 'Léa Moreau');
-    assert.equal(candidate.firstName, 'Léa');
-    assert.equal(candidate.lastName, 'Moreau');
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  const [candidate] = (await connection.getHistoryCandidates(0, 0, 20)).items;
+  assert.equal(candidate.name, 'Léa Moreau');
+  assert.equal(candidate.firstName, 'Léa');
+  assert.equal(candidate.lastName, 'Moreau');
 });
