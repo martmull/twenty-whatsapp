@@ -187,10 +187,11 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
     setError('');
     const failed = new Set<string>();
     const done = new Set<string>();
+    const toChange = selectedChats.filter((chat) => Boolean(chat.synced) !== enabled);
 
     try {
-      for (let start = 0; start < selectedChats.length; start += CHATS_PER_REQUEST) {
-        const batch = selectedChats.slice(start, start + CHATS_PER_REQUEST);
+      for (let start = 0; start < toChange.length; start += CHATS_PER_REQUEST) {
+        const batch = toChange.slice(start, start + CHATS_PER_REQUEST);
         const result = await historyRequest<SyncResult>({
           action: 'sync',
           enabled,
@@ -379,7 +380,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
           variant="outline"
           size="sm"
           loading={updatingSync === true}
-          disabled={busy || selectedChats.length === 0}
+          disabled={busy || selectedChats.every((chat) => chat.synced)}
           onClick={() => void changeSync(true)}
         >
           {t('Sync new messages')}
