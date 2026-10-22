@@ -894,9 +894,7 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                     }}
                   >
                     {formatTime(message.sentAt)}
-                    {message.direction === 'OUTBOUND' && (
-                      <DeliveryMark state={message.deliveryState} isDark={isDark} />
-                    )}
+                    {message.direction === 'OUTBOUND' && <DeliveryMark state={message.deliveryState} isDark={isDark} />}
                   </small>
                 </div>
               ))}
