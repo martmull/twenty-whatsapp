@@ -31,7 +31,7 @@ export type Message = {
   direction: 'INBOUND' | 'OUTBOUND';
   text: string;
   sentAt: string;
-  deliveryState: 'UNKNOWN' | 'SENT' | 'RECEIVED';
+  deliveryState: 'UNKNOWN' | 'SENT' | 'RECEIVED' | 'DELIVERED' | 'READ' | 'FAILED';
   requestId?: string | null;
   senderId?: string | null;
   senderName?: string | null;

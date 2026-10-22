@@ -17,6 +17,9 @@ const MANY_MUTATIONS: Record<string, string> = {
   createWhatsappConversations: 'WhatsappConversations',
   createPeople: 'People',
 };
+const UPDATE_MANY_MUTATIONS: Record<string, string> = {
+  updateWhatsappMessages: 'WhatsappMessages',
+};
 const SINGLE_MUTATIONS: Record<string, string> = {
   createWhatsappMessage: 'WhatsappMessages',
   updateWhatsappMessage: 'WhatsappMessages',
@@ -104,6 +107,14 @@ export const createFakeTwenty = (seed: Partial<Record<string, Row[]>> = {}) => {
         throw error;
       }
       const args = body.__args as { data: Record<string, unknown> | Record<string, unknown>[]; id?: string };
+      const updateMany = UPDATE_MANY_MUTATIONS[name];
+      if (updateMany) {
+        const { filter, data } = body.__args as { filter: Record<string, Record<string, unknown>>; data: object };
+        const rows = store[OBJECTS[updateMany].collection].filter((row) => matchesFilter(row, filter));
+        const now = tick();
+        for (const row of rows) Object.assign(row, data, { updatedAt: now });
+        return { [name]: rows };
+      }
       const many = MANY_MUTATIONS[name];
       if (many) {
         return { [name]: upsert(many, args.data as Record<string, unknown>[]) };

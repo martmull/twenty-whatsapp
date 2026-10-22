@@ -24,6 +24,7 @@ import { EncryptedJsonStore } from './encrypted-json-store.js';
 import { HistoryImportQueue } from './history-import-queue.js';
 import { MediaQueue } from './media-queue.js';
 import { describeMedia, downloadMedia, type MediaReference } from './media.js';
+import { ReceiptQueue, receiptStateOf, type Receipt } from './receipt-queue.js';
 import {
   isDirectChatId,
   isGroupChatId,
@@ -74,6 +75,8 @@ export const MAX_SYNC_EVENTS = 200;
 // lookup until Twenty's account ID is remembered.
 const SYNC_BATCH_COST = 4;
 const ACCOUNT_LOOKUP_COST = 2;
+// A receipts batch: one message query and up to three updates (failed, delivered, read).
+const RECEIPT_BATCH_COST = 4;
 // If the sync job told to wait never comes back, the bridge signals again this long after.
 const SYNC_RESIGNAL_GRACE_MS = 30_000;
 
@@ -135,6 +138,7 @@ export class WhatsAppConnection {
   private readonly mediaReferences: EncryptedJsonStore<MediaReference>;
   readonly historyImports: HistoryImportQueue;
   readonly mediaQueue: MediaQueue;
+  private readonly receipts: ReceiptQueue;
   private readonly groupMembersCache = new Map<string, { expiresAt: number; members: GroupMember[] }>();
   private readonly groupSubjectLookups = new Map<string, Promise<string | undefined>>();
   private readonly groupMetadataQueue: (() => void)[] = [];
@@ -190,6 +194,7 @@ export class WhatsAppConnection {
         budget,
       },
     );
+    this.receipts = new ReceiptQueue(storage, encryptionKey);
     this.mediaQueue = new MediaQueue(storage, encryptionKey, {
       budget,
       onChainsRestarted: (mediaRunTokens) => this.onSignal({ mediaRunTokens }),
@@ -886,6 +891,38 @@ export class WhatsAppConnection {
     return { acknowledged: eventIds.length };
   }
 
+  // Delivery and read receipts wait here until Twenty's sync job writes them, under the same API
+  // budget as messages. A job told to wait is replaced by a new signal (see scheduleSyncRetry).
+  async claimReceipts(): Promise<{ receipts: Receipt[]; remaining?: boolean; waitMs?: number }> {
+    const claimed = await this.receipts.claim();
+    if (claimed.receipts.length === 0) return claimed;
+
+    const decision = this.budget.take(RECEIPT_BATCH_COST, 'live');
+    if (!decision.granted) return { receipts: [], ...this.scheduleSyncRetry(decision.waitMs) };
+    return claimed;
+  }
+
+  ackReceipts(written: Receipt[], missing: string[]): Promise<{ acknowledged: number }> {
+    return this.receipts.ack(written, missing);
+  }
+
+  // Receipts for messages this account sent, from Twenty or from the phone. Group receipts per
+  // participant are not tracked: a group message shows "sent".
+  private async recordReceipts(updates: { key: proto.IMessageKey; update: { status?: number | null } }[]) {
+    const receipts: Receipt[] = [];
+    for (const { key, update } of updates) {
+      const state = receiptStateOf(update.status);
+      if (!state || !key.fromMe || !key.id || !key.remoteJid) continue;
+
+      const chatId = key.remoteJid.endsWith('@lid')
+        ? (await this.phoneNumbers.read(key.remoteJid))?.chatId
+        : key.remoteJid;
+      if (chatId && isSupportedChatId(chatId)) receipts.push({ eventId: messageEventId(chatId, key.id), state });
+    }
+
+    if (receipts.length > 0 && (await this.receipts.record(receipts))) this.signalEvents();
+  }
+
   async sendText(requestId: string, chatId: string, text: string, accountPhoneNumber: string): Promise<SendReceipt> {
     if (
       !/^[a-f\d-]{36}$/i.test(requestId) ||
@@ -1098,6 +1135,12 @@ export class WhatsAppConnection {
           this.signalEvents();
         }
       }
+    });
+    socket.ev.on('messages.update', async (updates) => {
+      if (generation !== this.generation) return;
+      await this.recordReceipts(updates).catch((error: unknown) =>
+        this.log('Could not record receipts', { error: error instanceof Error ? error.message : String(error) }),
+      );
     });
     socket.ev.on('messaging-history.set', async ({ chats, contacts, messages }) => {
       if (generation === this.generation) {

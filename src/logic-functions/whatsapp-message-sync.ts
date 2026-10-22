@@ -4,6 +4,7 @@ import { enqueueJobs } from 'twenty-sdk/logic-function';
 import { MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
 import { syncMessages, type SyncResult } from 'src/logic-functions/live-sync';
 import { syncConversationNames } from 'src/logic-functions/message-data';
+import { syncReceipts } from 'src/logic-functions/receipt-sync';
 import { createLogger, type Logger } from 'src/logic-functions/utils/logger';
 
 export type MessageSyncPayload = { events?: boolean; names?: boolean; attempt?: number };
@@ -38,7 +39,12 @@ export const nextMessageSync = (result: SyncResult | undefined, attempt: number)
 export const runMessageSync = async (
   payload: MessageSyncPayload,
   logger: Logger,
-  { sync = syncMessages, syncNames = syncConversationNames, enqueue = enqueueMessageSync } = {},
+  {
+    sync = syncMessages,
+    syncNames = syncConversationNames,
+    syncDeliveryReceipts = syncReceipts,
+    enqueue = enqueueMessageSync,
+  } = {},
 ): Promise<SyncResult | undefined> => {
   let result: SyncResult | undefined;
 
@@ -49,7 +55,15 @@ export const runMessageSync = async (
       logger.error('Message sync failed', { error: error instanceof Error ? error.message : String(error) });
     }
 
-    const next = nextMessageSync(result, payload.attempt ?? 0);
+    // Receipts ride on the same signal and job: the bridge signals events when one arrives.
+    const receipts = await syncDeliveryReceipts(logger).catch((error: unknown) => {
+      logger.warn('Could not sync receipts', { error: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    });
+
+    const next =
+      nextMessageSync(result, payload.attempt ?? 0) ??
+      (receipts?.remaining ? { attempt: payload.attempt ?? 0, delayMs: 0 } : undefined);
     if (next) {
       await enqueue({ events: true, attempt: next.attempt }, next.delayMs, syncJobId(result?.jobKey)).catch(
         (error: unknown) =>
@@ -82,7 +96,8 @@ const handler = async (payload: MessageSyncPayload) =>
 export default defineLogicFunction({
   universalIdentifier: MESSAGE_SYNC_JOB_UNIVERSAL_IDENTIFIER,
   name: 'whatsapp-message-sync',
-  description: 'Import queued WhatsApp messages and refresh conversation names when the bridge signals them.',
+  description:
+    'Import queued WhatsApp messages and delivery receipts, and refresh conversation names, when the bridge signals them.',
   timeoutSeconds: 300,
   handler,
 });
