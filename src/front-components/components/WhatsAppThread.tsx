@@ -604,7 +604,9 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                   <strong style={{ fontWeight: conversation.unread ? 700 : 600 }}>{conversation.name}</strong>
                   {conversation.assigneeId && (
                     <small style={{ ...styles.label, flexShrink: 0 }}>
-                      {conversation.assigneeId === data?.currentMemberId ? t('You') : memberName(conversation.assigneeId)}
+                      {conversation.assigneeId === data?.currentMemberId
+                        ? t('You')
+                        : memberName(conversation.assigneeId)}
                     </small>
                   )}
                 </span>
