@@ -103,6 +103,9 @@ export default defineObject({
         { value: 'UNKNOWN', label: 'Unknown', color: 'orange', position: 0 },
         { value: 'SENT', label: 'Sent', color: 'green', position: 1 },
         { value: 'RECEIVED', label: 'Received', color: 'blue', position: 2 },
+        { value: 'DELIVERED', label: 'Delivered', color: 'turquoise', position: 3 },
+        { value: 'READ', label: 'Read', color: 'sky', position: 4 },
+        { value: 'FAILED', label: 'Failed', color: 'red', position: 5 },
       ],
     },
     {

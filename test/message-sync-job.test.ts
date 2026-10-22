@@ -19,6 +19,7 @@ const run = async (outcome: ReturnType<typeof result> | Error, attempt = 0) => {
       if (outcome instanceof Error) throw outcome;
       return outcome;
     },
+    syncDeliveryReceipts: async () => ({ updated: 0, remaining: false }),
     enqueue: async (payload, delayMs, jobId) => {
       queued.push({ payload, delayMs, ...(jobId ? { jobId } : {}) });
     },
@@ -53,4 +54,25 @@ test('waits as long as Twenty asks after a rate limit, without counting it as a 
   assert.deepEqual(await run(result(0, true, { retryInMs: 4_200 }), 3), [
     { payload: { events: true, attempt: 3 }, delayMs: 4_200 },
   ]);
+});
+
+test('syncs receipts after the messages, and queues another run while receipts remain', async () => {
+  const queued: { payload: object; delayMs: number }[] = [];
+  const order: string[] = [];
+  await runMessageSync({ events: true }, silentLogger, {
+    sync: async () => {
+      order.push('messages');
+      return result(1, false);
+    },
+    syncDeliveryReceipts: async () => {
+      order.push('receipts');
+      return { updated: 200, remaining: true };
+    },
+    enqueue: async (payload, delayMs) => {
+      queued.push({ payload, delayMs });
+    },
+  });
+
+  assert.deepEqual(order, ['messages', 'receipts']);
+  assert.deepEqual(queued, [{ payload: { events: true, attempt: 0 }, delayMs: 0 }]);
 });

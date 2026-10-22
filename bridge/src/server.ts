@@ -9,6 +9,7 @@ import { verifyEncryptionKey } from './encrypted-json-store.js';
 import type { MediaSource } from './media-queue.js';
 import { isGroupChatId, isSupportedChatId } from './message-event.js';
 import { migrate, PostgresStorage } from './postgres-storage.js';
+import { MAX_RECEIPTS_PER_CLAIM, type Receipt } from './receipt-queue.js';
 
 const token = process.env.WHATSAPP_BRIDGE_TOKEN;
 const keyHex = process.env.WHATSAPP_SESSION_KEY;
@@ -170,6 +171,8 @@ const isImportedByChat = (value: unknown) =>
   Object.entries(value as Record<string, unknown>).every(
     ([chatId, count]) => isSupportedChatId(chatId) && isCount(count),
   );
+const isReceipt = (item: Record<string, unknown>) =>
+  isEventId(item?.eventId) && ['failed', 'delivered', 'read'].includes(item.state as string);
 const isDelay = (value: unknown) =>
   Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24 * 60 * 60_000;
 const requireConnected = () => check(connection.getStatus().state === 'connected', 'WhatsApp is disconnected');
@@ -206,6 +209,18 @@ const jsonRoutes: Record<string, Route> = {
         body.eventIds.every((id) => typeof id === 'string'),
     );
     return connection.ackEvents(body.eventIds as string[]);
+  },
+  'POST /receipts/claim': () => connection.claimReceipts(),
+  'POST /receipts/ack': (body) => {
+    check(
+      Array.isArray(body.written) &&
+        body.written.length <= MAX_RECEIPTS_PER_CLAIM &&
+        body.written.every(isReceipt) &&
+        Array.isArray(body.missing) &&
+        body.missing.length <= MAX_RECEIPTS_PER_CLAIM &&
+        body.missing.every(isEventId),
+    );
+    return connection.ackReceipts(body.written as Receipt[], body.missing as string[]);
   },
   'POST /send': (body) => {
     check(

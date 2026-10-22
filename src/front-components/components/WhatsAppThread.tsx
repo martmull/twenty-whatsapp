@@ -98,6 +98,31 @@ const TextWithLinks = ({ text }: { text: string }) =>
     ),
   );
 
+// WhatsApp's marks: one tick sent, two delivered, two blue read.
+const DeliveryMark = ({ state, isDark }: { state: string; isDark: boolean }) => {
+  const mark =
+    state === 'READ'
+      ? { symbol: '✓✓', label: t('Read'), color: '#53bdeb' }
+      : state === 'DELIVERED'
+        ? { symbol: '✓✓', label: t('Delivered'), color: undefined }
+        : state === 'SENT'
+          ? { symbol: '✓', label: t('Sent'), color: undefined }
+          : state === 'FAILED'
+            ? { symbol: '!', label: t('Not delivered'), color: isDark ? '#f15c6d' : '#ea0038' }
+            : { symbol: '…', label: t('Delivery unknown'), color: undefined };
+
+  return (
+    <span
+      role="img"
+      aria-label={mark.label}
+      title={mark.label}
+      style={{ color: mark.color, fontWeight: 600, letterSpacing: mark.symbol === '✓✓' ? -3 : undefined }}
+    >
+      {mark.symbol}
+    </span>
+  );
+};
+
 const formatTime = (value?: string | null) =>
   value ? new Date(value).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '';
 
@@ -858,10 +883,18 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                     </div>
                   )}
                   <small
-                    style={{ ...styles.label, color: isDark ? '#aebac1' : '#667781', display: 'block', marginTop: 6 }}
+                    style={{
+                      ...styles.label,
+                      alignItems: 'center',
+                      color: isDark ? '#aebac1' : '#667781',
+                      display: 'flex',
+                      gap: 4,
+                      justifyContent: 'flex-end',
+                      marginTop: 6,
+                    }}
                   >
                     {formatTime(message.sentAt)}
-                    {message.direction === 'OUTBOUND' ? ` · ${message.deliveryState.toLowerCase()}` : ''}
+                    {message.direction === 'OUTBOUND' && <DeliveryMark state={message.deliveryState} isDark={isDark} />}
                   </small>
                 </div>
               ))}
