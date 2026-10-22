@@ -1,3 +1,4 @@
+import { MetadataApiClient } from 'twenty-client-sdk/metadata';
 import { defineLogicFunction } from 'twenty-sdk/define';
 
 import { bridgePost, getBridgeStatus } from 'src/logic-functions/bridge-request';
@@ -13,7 +14,45 @@ import {
 import { HttpError, requireUser, route } from 'src/logic-functions/utils/route';
 import { isGroupChatId, isUuid } from 'src/logic-functions/utils/validators';
 
-type ListRequest = { personId?: string; conversationId?: string; search?: string; before?: string };
+type View = 'open' | 'mine' | 'closed' | 'all';
+type ListRequest = { personId?: string; conversationId?: string; search?: string; before?: string; view?: View };
+type Member = { id: string; name: { firstName?: string | null; lastName?: string | null } };
+
+const VIEWS: View[] = ['open', 'mine', 'closed', 'all'];
+// Conversations created before the status field have none: they count as open.
+const OPEN_FILTER = { or: [{ status: { eq: 'OPEN' } }, { status: { is: 'NULL' } }] };
+
+const viewFilter = (view: View, memberId: string | undefined) =>
+  view === 'open'
+    ? OPEN_FILTER
+    : view === 'closed'
+      ? { status: { eq: 'CLOSED' } }
+      : view === 'mine'
+        ? { ...OPEN_FILTER, assigneeId: { eq: memberId ?? '00000000-0000-0000-0000-000000000000' } }
+        : {};
+
+const loadCurrentMemberId = async (): Promise<string | undefined> => {
+  const { currentUser } = await new MetadataApiClient().query({
+    currentUser: { workspaceMember: { id: true } },
+  });
+  return currentUser?.workspaceMember?.id ?? undefined;
+};
+
+// The members a conversation can be assigned to, by name.
+const loadMembers = async (): Promise<{ id: string; name: string }[]> => {
+  const result = await userClient().query({
+    workspaceMembers: {
+      __args: { first: 200 },
+      edges: { node: { id: true, name: { firstName: true, lastName: true } } },
+    },
+  });
+  return nodesOf<Member>(result.workspaceMembers)
+    .map((member) => ({
+      id: member.id,
+      name: [member.name?.firstName, member.name?.lastName].filter(Boolean).join(' ').trim() || member.id,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+};
 type GroupMember = { id: string; phoneNumber?: string; displayName?: string; isMe?: boolean };
 
 const MESSAGE_PAGE_SIZE = 100;
@@ -76,12 +115,15 @@ const loadLastReadAt = async (userWorkspaceId: string, conversations: Conversati
 const handler = route<ListRequest>('whatsapp-message-list', async (event) => {
   const userWorkspaceId = requireUser(event);
   const { personId, conversationId, search, before } = event.body ?? {};
+  // The Person widget shows every conversation of its Person; the inbox shows open ones by default.
+  const view: View = event.body?.view ?? (personId ? 'all' : 'open');
 
   if (
     (personId && !isUuid(personId)) ||
     (conversationId && !isUuid(conversationId)) ||
     (search !== undefined && (typeof search !== 'string' || search.length > 100)) ||
-    (before !== undefined && !Number.isFinite(Date.parse(before)))
+    (before !== undefined && !Number.isFinite(Date.parse(before))) ||
+    !VIEWS.includes(view)
   ) {
     throw new HttpError(400, 'Invalid request');
   }
@@ -91,11 +133,17 @@ const handler = route<ListRequest>('whatsapp-message-list', async (event) => {
     return loadMessages(conversationId, before);
   }
 
+  // The inbox needs the member list and who is asking (assignee menu, "Mine"); the Person widget does not.
+  const [currentMemberId, members] = personId
+    ? [undefined, undefined]
+    : await Promise.all([loadCurrentMemberId().catch(() => undefined), loadMembers().catch(() => undefined)]);
+
   const [result, status] = await Promise.all([
     userClient().query({
       whatsappConversations: {
         __args: {
           filter: {
+            ...viewFilter(view, currentMemberId),
             ...(personId ? { personId: { eq: personId } } : {}),
             ...(search?.trim() ? { name: { ilike: `%${search.trim()}%` } } : {}),
           },
@@ -140,6 +188,7 @@ const handler = route<ListRequest>('whatsapp-message-list', async (event) => {
     ...thread,
     groupMembers,
     connectionState: status.state,
+    ...(members ? { members, currentMemberId } : {}),
   };
 });
 

@@ -234,3 +234,29 @@ test('with a bridge older than the app, still imports the messages, without thei
   assert.equal(queued, 0);
   assert.equal(acknowledged[0].length, 1);
 });
+
+test('reopens a closed conversation when the contact writes, and leaves it closed for own messages', async () => {
+  const conversation = (index: number) => ({
+    id: `conversation-${index}`,
+    name: `Contact ${index}`,
+    chatId: chatId(index),
+    accountId: ACCOUNT.id,
+    personId: `person-${index}`,
+    status: 'CLOSED',
+  });
+  const twenty = createFakeTwenty({
+    whatsappAccounts: [ACCOUNT],
+    people: [person(0), person(1)],
+    whatsappConversations: [conversation(0), conversation(1)],
+  });
+  bridgeWith([event(1, chatId(0)), event(2, chatId(1), { direction: 'outbound' })]);
+
+  await syncMessages(silentLogger, { client: twenty.client });
+
+  const statusOf = (index: number) =>
+    (twenty.store.whatsappConversations as { id: string; status?: string }[]).find(
+      (item) => item.id === `conversation-${index}`,
+    )?.status;
+  assert.equal(statusOf(0), 'OPEN');
+  assert.equal(statusOf(1), 'CLOSED');
+});

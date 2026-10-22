@@ -20,6 +20,8 @@ export type Conversation = {
   lastMessageAt?: string | null;
   lastInboundAt?: string | null;
   lastPreview?: string | null;
+  status?: 'OPEN' | 'CLOSED' | null;
+  assigneeId?: string | null;
 };
 
 export type Message = {
@@ -76,6 +78,8 @@ export const CONVERSATION_FIELDS = {
   lastMessageAt: true,
   lastInboundAt: true,
   lastPreview: true,
+  status: true,
+  assigneeId: true,
 } as const;
 export const MESSAGE_FIELDS = {
   id: true,

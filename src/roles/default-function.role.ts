@@ -37,6 +37,14 @@ export default defineApplicationRole({
       canSoftDeleteObjectRecords: false,
       canDestroyObjectRecords: false,
     },
+    // Lists the members a conversation can be assigned to.
+    {
+      objectUniversalIdentifier: STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS.workspaceMember.universalIdentifier,
+      canReadObjectRecords: true,
+      canUpdateObjectRecords: false,
+      canSoftDeleteObjectRecords: false,
+      canDestroyObjectRecords: false,
+    },
     appObject(WHATSAPP_ACCOUNT_OBJECT_ID),
     appObject(WHATSAPP_CONVERSATION_OBJECT_ID),
     appObject(WHATSAPP_CONVERSATION_READ_STATE_OBJECT_ID),
