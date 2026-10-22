@@ -10,6 +10,7 @@ import {
 import {
   ACCOUNT_CONVERSATIONS_FIELD_ID,
   CONVERSATION_ACCOUNT_FIELD_ID,
+  CONVERSATION_ASSIGNEE_FIELD_ID,
   CONVERSATION_CHAT_ID_FIELD_ID,
   CONVERSATION_MESSAGES_FIELD_ID,
   CONVERSATION_NAME_FIELD_ID,
@@ -19,6 +20,7 @@ import {
   WHATSAPP_ACCOUNT_OBJECT_ID,
   WHATSAPP_CONVERSATION_OBJECT_ID,
   WHATSAPP_MESSAGE_OBJECT_ID,
+  WORKSPACE_MEMBER_CONVERSATIONS_FIELD_ID,
 } from 'src/constants/universal-identifiers';
 
 export default defineObject({
@@ -83,6 +85,34 @@ export default defineObject({
       relationTargetObjectMetadataUniversalIdentifier: WHATSAPP_MESSAGE_OBJECT_ID,
       relationTargetFieldMetadataUniversalIdentifier: MESSAGE_CONVERSATION_FIELD_ID,
       universalSettings: { relationType: RelationType.ONE_TO_MANY },
+    },
+    {
+      universalIdentifier: '63d83fae-8c48-4f60-b1c7-526edb3b60cd',
+      type: FieldType.SELECT,
+      name: 'status',
+      label: 'Status',
+      icon: 'IconStatusChange',
+      defaultValue: "'OPEN'",
+      options: [
+        { value: 'OPEN', label: 'Open', color: 'green', position: 0 },
+        { value: 'CLOSED', label: 'Closed', color: 'gray', position: 1 },
+      ],
+    },
+    {
+      universalIdentifier: CONVERSATION_ASSIGNEE_FIELD_ID,
+      type: FieldType.RELATION,
+      name: 'assignee',
+      label: 'Assignee',
+      icon: 'IconUserCircle',
+      isNullable: true,
+      relationTargetObjectMetadataUniversalIdentifier:
+        STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS.workspaceMember.universalIdentifier,
+      relationTargetFieldMetadataUniversalIdentifier: WORKSPACE_MEMBER_CONVERSATIONS_FIELD_ID,
+      universalSettings: {
+        relationType: RelationType.MANY_TO_ONE,
+        onDelete: OnDeleteAction.SET_NULL,
+        joinColumnName: 'assigneeId',
+      },
     },
     // Rewritten on every message: kept out of the timeline.
     {

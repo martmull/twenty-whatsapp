@@ -232,7 +232,9 @@ const conversationWrite = (accountId: string, batch: ChatBatch): Record<string, 
     isPhoneLikeName(conversation.name) && name.trim() && !isPhoneLikeName(name)
       ? { name: name.trim().slice(0, 120) }
       : {};
-  const data = { ...patch, ...rename };
+  // A closed conversation opens again when the contact writes.
+  const reopen = conversation.status === 'CLOSED' && 'lastInboundAt' in patch ? { status: 'OPEN' } : {};
+  const data = { ...patch, ...rename, ...reopen };
 
   return Object.keys(data).length > 0 ? { id: conversation.id, ...data } : undefined;
 };

@@ -21,7 +21,12 @@ type Conversation = {
   lastReadAt?: string | null;
   lastPreview?: string | null;
   unread?: boolean;
+  status?: 'OPEN' | 'CLOSED' | null;
+  assigneeId?: string | null;
 };
+
+type View = 'open' | 'mine' | 'closed';
+type Member = { id: string; name: string };
 
 type Message = {
   id: string;
@@ -50,6 +55,9 @@ type InboxData = {
   messages: Message[];
   groupMembers?: GroupMember[];
   connectionState: 'disconnected' | 'pairing' | 'connected' | 'reconnecting' | 'unavailable';
+  // Inbox only: who conversations can be assigned to, and who is looking.
+  members?: Member[];
+  currentMemberId?: string;
 };
 
 const POLL_INTERVAL_MS = 5_000;
@@ -111,14 +119,20 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
   const [showGroupMembers, setShowGroupMembers] = useState(false);
   const [search, setSearch] = useState('');
   const searchRef = useRef('');
+  const [view, setView] = useState<View>('open');
+  const viewRef = useRef<View>('open');
+  const [updating, setUpdating] = useState(false);
 
-  // The list request for the current search, so polling and selection never drop the filter.
+  // The search and view a list request was made for, to drop answers to filters since replaced.
+  const currentFilterKey = () => `${viewRef.current}:${searchRef.current.trim()}`;
+
+  // The list request for the current filters, so polling and selection never drop them.
   const listInbox = (conversationId?: string) => {
     const term = searchRef.current.trim();
     return {
-      term,
+      filterKey: currentFilterKey(),
       request: new RestApiClient().post<InboxData>('/s/whatsapp/messages/list', {
-        ...(personId ? { personId } : {}),
+        ...(personId ? { personId } : { view: viewRef.current }),
         ...(conversationId ? { conversationId } : {}),
         ...(term ? { search: term } : {}),
       }),
@@ -167,10 +181,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     }
 
     try {
-      const { term, request } = listInbox(conversationId);
+      const { filterKey, request } = listInbox(conversationId);
       const next = await request;
       // A newer selection or search has been made since: its own request shows the result.
-      if (conversationId !== selectedIdRef.current || term !== searchRef.current.trim()) return;
+      if (conversationId !== selectedIdRef.current || filterKey !== currentFilterKey()) return;
       setData(next);
       setSelectedId(next.selectedConversationId);
       selectedIdRef.current = next.selectedConversationId;
@@ -190,10 +204,10 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     const refresh = async () => {
       try {
         const requestedId = selectedIdRef.current;
-        const { term, request } = listInbox(requestedId);
+        const { filterKey, request } = listInbox(requestedId);
         const next = await request;
 
-        if (active && requestedId === selectedIdRef.current && term === searchRef.current.trim()) {
+        if (active && requestedId === selectedIdRef.current && filterKey === currentFilterKey()) {
           selectedIdRef.current = next.selectedConversationId;
           setData(next);
           setSelectedId(next.selectedConversationId);
@@ -238,6 +252,41 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
     const timer = setTimeout(() => void load(selectedIdRef.current, true), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [search]);
+
+  const changeView = (next: View) => {
+    if (next === viewRef.current) return;
+    viewRef.current = next;
+    setView(next);
+    void load(selectedIdRef.current, true);
+  };
+
+  // Assigns, closes or reopens the open conversation. Shown at once, then confirmed by a reload.
+  const updateConversation = async (patch: { status?: 'OPEN' | 'CLOSED'; assigneeId?: string | null }) => {
+    const conversationId = selectedIdRef.current;
+    if (!conversationId || updating) return;
+
+    const apply = (item: Conversation) => (item.id === conversationId ? { ...item, ...patch } : item);
+    setUpdating(true);
+    setError('');
+    setData((previous) =>
+      previous
+        ? {
+            ...previous,
+            conversations: previous.conversations.map(apply),
+            selectedConversation: previous.selectedConversation && apply(previous.selectedConversation),
+          }
+        : previous,
+    );
+
+    try {
+      await new RestApiClient().post('/s/whatsapp/conversations/update', { conversationId, ...patch });
+    } catch {
+      setError(t('Could not update the conversation.'));
+    } finally {
+      setUpdating(false);
+      await load(conversationId, true);
+    }
+  };
 
   const selectConversation = (conversationId: string) => {
     setDraft('');
@@ -357,6 +406,13 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
       ? data?.selectedConversation
       : data?.conversations.find((conversation) => conversation.id === selectedId);
   const searching = search.trim().length > 0;
+  const memberName = (memberId?: string | null) =>
+    memberId ? (data?.members?.find((member) => member.id === memberId)?.name ?? t('Someone')) : undefined;
+  const views: { value: View; label: string }[] = [
+    { value: 'open', label: t('Open') },
+    { value: 'mine', label: t('Mine') },
+    { value: 'closed', label: t('Closed') },
+  ];
   const connected = data?.connectionState === 'connected';
   const connectionWarning =
     data?.connectionState === 'reconnecting'
@@ -468,13 +524,47 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                   width: '100%',
                 }}
               />
+              <div
+                role="tablist"
+                aria-label={t('Conversation filter')}
+                style={{ display: 'flex', gap: themeCssVariables.spacing[1], marginTop: themeCssVariables.spacing[2] }}
+              >
+                {views.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="tab"
+                    aria-selected={view === option.value}
+                    onClick={() => changeView(option.value)}
+                    style={{
+                      background: view === option.value ? themeCssVariables.background.secondary : 'transparent',
+                      border: 0,
+                      borderRadius: themeCssVariables.border.radius.sm,
+                      color: view === option.value ? themeCssVariables.font.color.primary : styles.muted.color,
+                      cursor: 'pointer',
+                      fontFamily: themeCssVariables.font.family,
+                      fontSize: themeCssVariables.font.size.sm,
+                      fontWeight: view === option.value ? 600 : 500,
+                      padding: `${themeCssVariables.spacing[1]} ${themeCssVariables.spacing[2]}`,
+                    }}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </div>
             {loading && !data && (
               <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>{t('Loading conversations…')}</p>
             )}
             {!loading && data?.conversations.length === 0 && (
               <p style={{ ...styles.muted, padding: themeCssVariables.spacing[3] }}>
-                {searching ? t('No conversations match this search.') : t('No conversations yet.')}
+                {searching
+                  ? t('No conversations match this search.')
+                  : view === 'mine'
+                    ? t('No open conversations assigned to you.')
+                    : view === 'closed'
+                      ? t('No closed conversations.')
+                      : t('No open conversations.')}
               </p>
             )}
             {data?.conversations.map((conversation) => (
@@ -512,6 +602,11 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                   }}
                 >
                   <strong style={{ fontWeight: conversation.unread ? 700 : 600 }}>{conversation.name}</strong>
+                  {conversation.assigneeId && (
+                    <small style={{ ...styles.label, flexShrink: 0 }}>
+                      {conversation.assigneeId === data?.currentMemberId ? t('You') : memberName(conversation.assigneeId)}
+                    </small>
+                  )}
                 </span>
                 <span
                   style={{
@@ -561,11 +656,48 @@ export const WhatsAppThread = ({ personId }: WhatsAppThreadProps) => {
                 }}
               >
                 <strong>{selected?.name ?? t('Select a conversation')}</strong>
-                {isGroup && data?.groupMembers && (
-                  <PreviewButton onClick={() => setShowGroupMembers((previous) => !previous)}>
-                    {showGroupMembers ? t('Hide members') : `${t('Members')} (${data.groupMembers.length})`}
-                  </PreviewButton>
-                )}
+                <div style={{ alignItems: 'center', display: 'flex', gap: themeCssVariables.spacing[2] }}>
+                  {isGroup && data?.groupMembers && (
+                    <PreviewButton onClick={() => setShowGroupMembers((previous) => !previous)}>
+                      {showGroupMembers ? t('Hide members') : `${t('Members')} (${data.groupMembers.length})`}
+                    </PreviewButton>
+                  )}
+                  {selected && data?.members && (
+                    <select
+                      aria-label={t('Assignee')}
+                      value={selected.assigneeId ?? ''}
+                      disabled={updating}
+                      onChange={(event) => void updateConversation({ assigneeId: event.target.value || null })}
+                      style={{
+                        background: themeCssVariables.background.primary,
+                        border: `1px solid ${themeCssVariables.border.color.medium}`,
+                        borderRadius: themeCssVariables.border.radius.sm,
+                        color: themeCssVariables.font.color.primary,
+                        fontFamily: themeCssVariables.font.family,
+                        fontSize: themeCssVariables.font.size.sm,
+                        maxWidth: 180,
+                        padding: themeCssVariables.spacing[1],
+                      }}
+                    >
+                      <option value="">{t('Unassigned')}</option>
+                      {data.members.map((member) => (
+                        <option key={member.id} value={member.id}>
+                          {member.id === data.currentMemberId ? `${member.name} (${t('you')})` : member.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {selected && data?.members && (
+                    <PreviewButton
+                      disabled={updating}
+                      onClick={() =>
+                        void updateConversation({ status: selected.status === 'CLOSED' ? 'OPEN' : 'CLOSED' })
+                      }
+                    >
+                      {selected.status === 'CLOSED' ? t('Reopen') : t('Close')}
+                    </PreviewButton>
+                  )}
+                </div>
               </div>
               {isGroup && showGroupMembers && data?.groupMembers && (
                 <div
