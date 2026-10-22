@@ -32,7 +32,9 @@ type ChatSelection = {
 };
 
 type HistoryRequest = {
-  action?: 'list' | 'import' | 'progress' | 'cancel';
+  action?: 'list' | 'import' | 'sync' | 'progress' | 'cancel';
+  // For `sync`: whether the chats' new messages are synced.
+  enabled?: boolean;
   rangeDays?: number;
   kind?: 'all' | 'direct' | 'group';
   offset?: number;
@@ -52,7 +54,8 @@ type HistoryCandidate = {
 };
 type GroupMember = { phoneNumber?: string; firstName?: string; lastName?: string; isSavedContact?: boolean };
 
-const listCandidates = async (request: HistoryRequest) => {
+// Each chat says whether its new messages are synced: its conversation exists and syncing is on.
+const listCandidates = async (request: HistoryRequest, accountPhoneNumber: string, cachedAccountId?: string) => {
   const offset = request.offset ?? 0;
   const kind = request.kind ?? 'all';
 
@@ -60,11 +63,28 @@ const listCandidates = async (request: HistoryRequest) => {
     throw new HttpError(400, 'Invalid history request');
   }
 
-  return bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
-    '/history/list',
-    { rangeDays: request.rangeDays, kind, offset, limit: 50 },
-    30_000,
+  const client = applicationClient();
+  const [history, accountId] = await Promise.all([
+    bridgePost<{ items: HistoryCandidate[]; total: number; historyReceivedAt?: string }>(
+      '/history/list',
+      { rangeDays: request.rangeDays, kind, offset, limit: 50 },
+      30_000,
+    ),
+    cachedAccountId ?? ensureAccount(client, `+${accountPhoneNumber}`),
+  ]);
+  const conversations = await findConversations(
+    client,
+    accountId,
+    history.items.map((item) => item.chatId),
   );
+
+  return {
+    ...history,
+    items: history.items.map((item) => {
+      const conversation = conversations.get(item.chatId);
+      return { ...item, synced: Boolean(conversation) && conversation?.isSyncEnabled !== false };
+    }),
+  };
 };
 
 type PersonPlan = { person?: Person; write?: Record<string, unknown>; createdPerson: boolean };
@@ -151,42 +171,54 @@ const savedGroupMembers = async (groupChatIds: string[], logger: Logger): Promis
     );
 };
 
-type QueueImportDependencies = {
-  client?: CoreApiClient;
-  // Writes People as the admin, so their own permissions apply.
-  adminClient?: CoreApiClient;
-  enqueue?: (runToken: string, delayMs: number, position?: ChainPosition) => Promise<void>;
-};
-
-// Creates the People and conversations of the selected chats, then hands the messages to the
-// background import. Chats that cannot be imported are reported without stopping the others.
-// People and conversations are each written in one upsert, whatever the number of chats.
-export const queueImport = async (
-  request: HistoryRequest,
-  accountPhoneNumber: string,
-  createPeople: boolean,
-  logger: Logger,
-  {
-    client = applicationClient(),
-    adminClient = userClient(),
-    enqueue = enqueueHistoryImport,
-  }: QueueImportDependencies = {},
-) => {
-  const requestedChats = request.chats;
+const validChatIds = (request: HistoryRequest): string[] => {
+  const chats = request.chats;
 
   if (
-    !Array.isArray(requestedChats) ||
-    requestedChats.length === 0 ||
-    requestedChats.length > MAX_CHATS_PER_IMPORT ||
-    !requestedChats.every((chat) => isChatId(chat?.chatId)) ||
-    new Set(requestedChats.map((chat) => chat.chatId)).size !== requestedChats.length
+    !Array.isArray(chats) ||
+    chats.length === 0 ||
+    chats.length > MAX_CHATS_PER_IMPORT ||
+    !chats.every((chat) => isChatId(chat?.chatId)) ||
+    new Set(chats.map((chat) => chat.chatId)).size !== chats.length
   ) {
     throw new HttpError(400, 'Invalid history import request');
   }
 
-  const chats = requestedChats.map((chat) => ({ ...chat, createPerson: createPeople && chat.createPerson === true }));
+  return chats.map((chat) => chat.chatId as string);
+};
 
-  const chatIds = chats.map((chat) => chat.chatId as string);
+type ConversationDependencies = {
+  client?: CoreApiClient;
+  // Writes People as the admin, so their own permissions apply.
+  adminClient?: CoreApiClient;
+};
+
+type QueueImportDependencies = ConversationDependencies & {
+  enqueue?: (runToken: string, delayMs: number, position?: ChainPosition) => Promise<void>;
+};
+
+type PreparedConversations = {
+  conversationIdByChatId: Map<string, string>;
+  createdPeople: number;
+  failures: { chatId: string; error: string }[];
+};
+
+// Creates the People and conversations of the selected chats. Chats that cannot be prepared are
+// reported without stopping the others. People and conversations are each written in one upsert,
+// whatever the number of chats. `enableSync` turns syncing on, for new and existing conversations.
+const prepareConversations = async (
+  request: HistoryRequest,
+  accountPhoneNumber: string,
+  createPeople: boolean,
+  enableSync: boolean,
+  logger: Logger,
+  { client = applicationClient(), adminClient = userClient() }: ConversationDependencies,
+): Promise<PreparedConversations> => {
+  const chatIds = validChatIds(request);
+  const chats = (request.chats ?? []).map((chat) => ({
+    ...chat,
+    createPerson: createPeople && chat.createPerson === true,
+  }));
 
   if (chatIds.some((chatId) => chatNumber(chatId) === accountPhoneNumber)) {
     throw new HttpError(400, 'Cannot import the linked account as a contact');
@@ -257,27 +289,59 @@ export const queueImport = async (
           name,
           chatId,
           accountId,
+          isSyncEnabled: enableSync,
           ...(person ? { personId: person.id } : {}),
         },
       ];
     }
 
     // A conversation still named after its phone number takes the contact's name.
-    return isPhoneLikeName(existing.name) && name.trim() && !isPhoneLikeName(name)
-      ? [{ id: existing.id, name: name.trim().slice(0, 120) }]
-      : [];
+    const rename =
+      isPhoneLikeName(existing.name) && name.trim() && !isPhoneLikeName(name)
+        ? { name: name.trim().slice(0, 120) }
+        : {};
+    const sync = enableSync && existing.isSyncEnabled === false ? { isSyncEnabled: true } : {};
+    return Object.keys({ ...rename, ...sync }).length > 0 ? [{ id: existing.id, ...rename, ...sync }] : [];
   });
   const writtenIdByChatId = new Map(
     (conversationWrites.length > 0 ? await upsertConversations(client, conversationWrites) : []).map(
       ({ id, chatId }) => [chatId, id],
     ),
   );
+  const conversationIdByChatId = new Map(
+    resolved.map(({ chatId }) => {
+      const conversationId = conversations.get(chatId)?.id ?? writtenIdByChatId.get(chatId);
+      if (!conversationId) throw new Error('Could not create WhatsApp conversation');
+      return [chatId, conversationId];
+    }),
+  );
 
-  const tasks = resolved.map(({ chatId }) => {
-    const conversationId = conversations.get(chatId)?.id ?? writtenIdByChatId.get(chatId);
-    if (!conversationId) throw new Error('Could not create WhatsApp conversation');
-    return { chatId, conversationId, rangeDays: request.rangeDays as 0 | 30 | 90 };
-  });
+  logger.info('Prepared conversations', { chats: resolved.length, failed: failures.length, createdPeople });
+  return { conversationIdByChatId, createdPeople, failures };
+};
+
+// Hands the messages of the selected chats to the background import. A new conversation is not
+// synced until an admin turns syncing on.
+export const queueImport = async (
+  request: HistoryRequest,
+  accountPhoneNumber: string,
+  createPeople: boolean,
+  logger: Logger,
+  { enqueue = enqueueHistoryImport, ...dependencies }: QueueImportDependencies = {},
+) => {
+  const { conversationIdByChatId, createdPeople, failures } = await prepareConversations(
+    request,
+    accountPhoneNumber,
+    createPeople,
+    false,
+    logger,
+    dependencies,
+  );
+  const tasks = [...conversationIdByChatId].map(([chatId, conversationId]) => ({
+    chatId,
+    conversationId,
+    rangeDays: request.rangeDays as 0 | 30 | 90,
+  }));
 
   if (tasks.length > 0) {
     const { runToken } = await bridgePost<{ runToken?: string }>('/history/imports/queue', { tasks }, 30_000);
@@ -294,6 +358,48 @@ export const queueImport = async (
 
   logger.info('Queued history import', { queued: tasks.length, failed: failures.length, createdPeople });
   return { queued: tasks.length, createdPeople, failures };
+};
+
+// Turns syncing of new messages on (creating the conversations it needs) or off for the selected chats.
+export const updateSync = async (
+  request: HistoryRequest,
+  accountPhoneNumber: string,
+  createPeople: boolean,
+  logger: Logger,
+  dependencies: ConversationDependencies = {},
+) => {
+  if (typeof request.enabled !== 'boolean') {
+    throw new HttpError(400, 'Invalid sync request');
+  }
+
+  if (request.enabled) {
+    const { conversationIdByChatId, createdPeople, failures } = await prepareConversations(
+      request,
+      accountPhoneNumber,
+      createPeople,
+      true,
+      logger,
+      dependencies,
+    );
+    return { updated: conversationIdByChatId.size, createdPeople, failures };
+  }
+
+  const chatIds = validChatIds(request);
+  const client = dependencies.client ?? applicationClient();
+  const accountId = await ensureAccount(client, `+${accountPhoneNumber}`);
+  const synced = [...(await findConversations(client, accountId, chatIds)).values()].filter(
+    (conversation) => conversation.isSyncEnabled !== false,
+  );
+
+  if (synced.length > 0) {
+    await upsertConversations(
+      client,
+      synced.map((conversation) => ({ id: conversation.id, isSyncEnabled: false })),
+    );
+  }
+
+  logger.info('Stopped syncing chats', { count: synced.length });
+  return { updated: synced.length, createdPeople: 0, failures: [] };
 };
 
 // Stops the running import: the bridge drops the chats and files still queued, and the chain's job
@@ -337,7 +443,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
     return cancelImport(logger);
   }
 
-  if (!RANGE_DAYS.includes(request.rangeDays ?? 0)) {
+  if (request.action !== 'sync' && !RANGE_DAYS.includes(request.rangeDays ?? 0)) {
     throw new HttpError(400, 'Invalid history range');
   }
 
@@ -352,11 +458,15 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
   }
 
   if (request.action === 'list') {
-    return listCandidates(request);
+    return listCandidates(request, digits(status.phoneNumber), status.twentyAccountId);
   }
 
   if (request.action === 'import') {
     return queueImport(request, digits(status.phoneNumber), status.createPeople === true, logger);
+  }
+
+  if (request.action === 'sync') {
+    return updateSync(request, digits(status.phoneNumber), status.createPeople === true, logger);
   }
 
   throw new HttpError(400, 'Invalid history request');
@@ -365,7 +475,7 @@ const handler = route<HistoryRequest>('whatsapp-history', async (event, logger) 
 export default defineLogicFunction({
   universalIdentifier: '6e6ef756-2022-4d4d-93af-3f1a95fe5a86',
   name: 'whatsapp-history',
-  description: 'Review available WhatsApp history and queue selected chats for a background import.',
+  description: 'List WhatsApp chats, import their history in the background, and turn syncing on or off.',
   timeoutSeconds: 60,
   handler,
   httpRouteTriggerSettings: {

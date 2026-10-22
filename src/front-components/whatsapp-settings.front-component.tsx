@@ -204,7 +204,7 @@ const WhatsAppSettings = () => {
             </span>
             <span style={styles.muted}>
               {t(
-                'New messages of the chats you import below, including available images, videos, and audio, appear in the inbox and on Person records. Other chats are ignored.',
+                'New messages of the chats you sync below, including available images, videos, and audio, appear in the inbox and on Person records. Other chats are ignored.',
               )}
             </span>
             {status.canManage && (
@@ -218,7 +218,7 @@ const WhatsAppSettings = () => {
                   <span>{t('Create People from WhatsApp contact info')}</span>
                   <span style={styles.muted}>
                     {t(
-                      'Contacts saved on the phone become People when you import their chat, or when they write in an imported group.',
+                      'Contacts saved on the phone become People when you import or sync their chat, or when they write in a synced group.',
                     )}
                   </span>
                 </span>
@@ -293,7 +293,7 @@ const WhatsAppSettings = () => {
               <strong>{t('Before you connect')}</strong>
               <p style={styles.muted}>
                 {t(
-                  'This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. Only the chats you import are shared with permitted workspace members, with their new messages and available images, videos, and audio. Saved contacts are added as People only if you turn that on. Messages of other chats stay encrypted on the bridge.',
+                  'This app uses an unofficial WhatsApp Web client. WhatsApp may restrict or disconnect your number. This app is not affiliated with Meta. Only the chats you import or sync are shared with permitted workspace members, with their new messages and available images, videos, and audio. Saved contacts are added as People only if you turn that on. Messages of other chats stay encrypted on the bridge.',
                 )}
               </p>
               <a href="https://www.whatsapp.com/legal/terms-of-service" target="_blank" rel="noreferrer">

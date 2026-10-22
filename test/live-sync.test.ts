@@ -128,6 +128,26 @@ test('skips chats without a conversation, even with a matching Person, and keeps
   assert.equal(acknowledged[0].length, 3, 'skipped events are acknowledged too');
 });
 
+test('ignores chats whose syncing is off', async () => {
+  const twenty = createFakeTwenty({
+    whatsappAccounts: [ACCOUNT],
+    people: [person(1)],
+    whatsappConversations: [{ ...conversation(1), isSyncEnabled: false }, conversation(2)],
+  });
+  const { acknowledged } = bridgeWith([event(1, chatId(1)), event(2, chatId(2))]);
+
+  const result = await syncMessages(silentLogger, { client: twenty.client });
+
+  assert.equal(result.imported, 1);
+  assert.equal(result.ignored, 1);
+  assert.deepEqual(
+    twenty.store.whatsappMessages.map((message) => message.conversationId),
+    ['conversation-2'],
+  );
+  assert.equal(twenty.store.whatsappConversations[0].personId, undefined, 'an unsynced chat is not linked either');
+  assert.equal(acknowledged[0].length, 2);
+});
+
 test('retries chat by chat when the batch cannot be written, keeping only the bad chat queued', async () => {
   const twenty = createFakeTwenty({
     whatsappAccounts: [ACCOUNT],

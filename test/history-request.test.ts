@@ -3,7 +3,7 @@ import { afterEach, test } from 'node:test';
 
 import { syncConversationNames } from '../src/logic-functions/message-data';
 import { deterministicId } from '../src/logic-functions/record-writes';
-import { queueImport } from '../src/logic-functions/whatsapp-history';
+import { queueImport, updateSync } from '../src/logic-functions/whatsapp-history';
 import { createFakeTwenty, mockBridge } from './fake-twenty';
 
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -127,6 +127,63 @@ test('imports every selected chat without creating or renaming People when the s
   assert.equal(personIdByChatId.get(chatId(3, 0)), 'known', 'an existing Person is still linked');
   assert.equal(personIdByChatId.get(chatId(1, 0)), undefined);
   assert.deepEqual(memberLookups, []);
+});
+
+test('importing history creates conversations that do not sync until syncing is turned on', async () => {
+  const twenty = createFakeTwenty({ whatsappAccounts: [ACCOUNT] });
+  const bridge = mockBridge({
+    '/history/names': (body) => (body.chatIds as string[]).map((id) => ({ chatId: id, name: 'Ada Lovelace' })),
+    '/history/imports/queue': () => ({ queued: 1 }),
+  });
+  restore = bridge.restore;
+  const request = { action: 'import' as const, rangeDays: 30, chats: [{ chatId: chatId(1, 0) }] };
+
+  await queueImport(request, number(5, 0), false, silentLogger, {
+    client: twenty.client,
+    adminClient: twenty.client,
+    enqueue: async () => undefined,
+  });
+
+  assert.equal(twenty.store.whatsappConversations[0].isSyncEnabled, false);
+});
+
+test('turns syncing on, creating missing conversations, and off again', async () => {
+  const twenty = createFakeTwenty({
+    whatsappAccounts: [ACCOUNT],
+    whatsappConversations: [
+      { id: 'off', name: 'Off', chatId: chatId(1, 0), accountId: ACCOUNT.id, isSyncEnabled: false },
+    ],
+  });
+  const bridge = mockBridge({
+    '/history/names': (body) => (body.chatIds as string[]).map((id) => ({ chatId: id, name: 'Ada Lovelace' })),
+  });
+  restore = bridge.restore;
+  const dependencies = { client: twenty.client, adminClient: twenty.client };
+  const chats = [{ chatId: chatId(1, 0) }, { chatId: chatId(1, 1) }];
+  const isSyncEnabledByChatId = () =>
+    Object.fromEntries(twenty.store.whatsappConversations.map((row) => [row.chatId, row.isSyncEnabled]));
+
+  const enabled = await updateSync(
+    { action: 'sync', enabled: true, chats },
+    number(5, 0),
+    false,
+    silentLogger,
+    dependencies,
+  );
+
+  assert.equal(enabled.updated, 2);
+  assert.deepEqual(isSyncEnabledByChatId(), { [chatId(1, 0)]: true, [chatId(1, 1)]: true });
+
+  const disabled = await updateSync(
+    { action: 'sync', enabled: false, chats },
+    number(5, 0),
+    false,
+    silentLogger,
+    dependencies,
+  );
+
+  assert.equal(disabled.updated, 2);
+  assert.deepEqual(isSyncEnabledByChatId(), { [chatId(1, 0)]: false, [chatId(1, 1)]: false });
 });
 
 test('renames conversations from the names that changed, in one query and one upsert', async () => {

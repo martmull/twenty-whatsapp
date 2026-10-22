@@ -19,11 +19,17 @@ type HistoryCandidate = {
   name: string;
   messageCount: number;
   lastMessageAt?: string;
+  // New messages of this chat are synced.
+  synced?: boolean;
 };
 
 type HistoryList = { items: HistoryCandidate[]; total: number };
 
-type QueueResult = { queued: number; createdPeople: number; failures: { chatId: string; error: string }[] };
+type ChatFailure = { chatId: string; error: string };
+
+type QueueResult = { queued: number; createdPeople: number; failures: ChatFailure[] };
+
+type SyncResult = { updated: number; createdPeople: number; failures: ChatFailure[] };
 
 type ImportProgress = { chatId: string; processed: number; total: number; state: 'queued' | 'done' | 'failed' };
 
@@ -58,6 +64,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
   const [rangeDays, setRangeDays] = useState<RangeDays>(30);
   const [chats, setChats] = useState<HistoryCandidate[]>();
   const [loadingChats, setLoadingChats] = useState(false);
+  const [updatingSync, setUpdatingSync] = useState<boolean>();
   const [selected, setSelected] = useState<string[]>([]);
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -175,6 +182,38 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
     }
   };
 
+  const changeSync = async (enabled: boolean) => {
+    setUpdatingSync(enabled);
+    setError('');
+    const failed = new Set<string>();
+    const done = new Set<string>();
+
+    try {
+      for (let start = 0; start < selectedChats.length; start += CHATS_PER_REQUEST) {
+        const batch = selectedChats.slice(start, start + CHATS_PER_REQUEST);
+        const result = await historyRequest<SyncResult>({
+          action: 'sync',
+          enabled,
+          chats: batch.map((chat) => ({ chatId: chat.chatId, createPerson: createPeople })),
+        });
+        result.failures.forEach((failure) => failed.add(failure.chatId));
+        batch.forEach((chat) => done.add(chat.chatId));
+      }
+
+      if (failed.size > 0) setError(`${failed.size} ${t('chats could not be updated; retry them')}`);
+      setSelected([]);
+    } catch (requestError) {
+      setError(bridgeError(requestError));
+    } finally {
+      setChats((previous) =>
+        previous?.map((chat) =>
+          done.has(chat.chatId) && !failed.has(chat.chatId) ? { ...chat, synced: enabled } : chat,
+        ),
+      );
+      setUpdatingSync(undefined);
+    }
+  };
+
   const cancelImport = async () => {
     setCancelling(true);
     setError('');
@@ -191,6 +230,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
   };
 
   const running = starting || importRunning;
+  const busy = starting || loadingChats || updatingSync !== undefined;
 
   return (
     <section
@@ -200,15 +240,15 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
         gap: themeCssVariables.spacing[4],
         padding: themeCssVariables.spacing[4],
       }}
-      aria-label={t('Import existing history')}
+      aria-label={t('Chats')}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: themeCssVariables.spacing[2] }}>
         <IconHistory size={themeCssVariables.icon.size.md} />
-        <strong>{t('Import existing history')}</strong>
+        <strong>{t('Chats')}</strong>
       </div>
       <p style={{ ...styles.muted, margin: 0 }}>
         {t(
-          'Choose the chats to import. Only imported chats receive new messages. Imported messages are visible to workspace members with access to these records. Messages already imported are skipped.',
+          'Select chats, then import their messages from the chosen period, or turn syncing of their new messages on or off. Imported and synced messages are visible to workspace members with access to these records. Messages already imported are skipped.',
         )}
       </p>
       <label style={{ display: 'grid', gap: themeCssVariables.spacing[1] }}>
@@ -267,7 +307,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
               >
                 <FrontComponentCheckbox
                   checked={allSelected}
-                  disabled={running || loadingChats}
+                  disabled={busy}
                   onChange={(event) => toggleAll(event.target.checked)}
                 />
                 <span style={styles.label}>
@@ -287,7 +327,7 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
                 >
                   <FrontComponentCheckbox
                     checked={selected.includes(chat.chatId)}
-                    disabled={running || loadingChats}
+                    disabled={busy}
                     onChange={(event) => toggle(chat.chatId, event.target.checked)}
                   />
                   <span style={{ display: 'grid', flex: 1, minWidth: 0 }}>
@@ -301,6 +341,11 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
                         : ''}
                     </span>
                   </span>
+                  {chat.synced && (
+                    <Tag color="green" variant="soft" preventShrink>
+                      {t('Synced')}
+                    </Tag>
+                  )}
                   {chat.kind === 'group' && (
                     <Tag color="gray" variant="soft" preventShrink>
                       {t('Group')}
@@ -312,17 +357,43 @@ export const WhatsAppHistoryImport = ({ createPeople }: WhatsAppHistoryImportPro
           )}
         </div>
       )}
-      <div style={{ display: 'flex', gap: themeCssVariables.spacing[2] }}>
+      <div style={{ alignItems: 'center', display: 'flex', flexWrap: 'wrap', gap: themeCssVariables.spacing[2] }}>
+        {chats && (
+          <span style={styles.label}>
+            {selectedChats.length} {t('selected')}
+          </span>
+        )}
         <Button
           type="button"
           variant="solid"
           color="accent"
           size="sm"
           loading={starting}
-          disabled={running || loadingChats || selectedChats.length === 0}
+          disabled={running || busy || selectedChats.length === 0}
           onClick={() => void runImport()}
         >
-          {selectedChats.length > 0 ? `${t('Import')} (${selectedChats.length})` : t('Import')}
+          {t('Import history')}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          loading={updatingSync === true}
+          disabled={busy || selectedChats.length === 0}
+          onClick={() => void changeSync(true)}
+        >
+          {t('Sync new messages')}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          color="neutral"
+          size="sm"
+          loading={updatingSync === false}
+          disabled={busy || selectedChats.every((chat) => !chat.synced)}
+          onClick={() => void changeSync(false)}
+        >
+          {t('Stop syncing')}
         </Button>
         {importRunning && !starting && (
           <Button

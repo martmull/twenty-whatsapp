@@ -72,7 +72,7 @@ const resolveAccountId = async (client: CoreApiClient, phoneNumber: string, cach
   return accountId;
 };
 
-// Only chats an admin imported (their conversation exists) are synced. A direct conversation without
+// Only chats an admin turned syncing on for are synced. A direct conversation without
 // a Person links to the one Person with its number, if any. A conversation still named after a number
 // takes the name the bridge knows.
 const planChats = (
@@ -310,13 +310,17 @@ export const syncMessages = async (
     const chatIds = [...eventsByChat.keys()];
     const createPeople = status.createPeople === true;
     const savedSenders = createPeople ? await findSavedGroupSenders(valid, logger) : [];
-    const [people, conversations] = await Promise.all([
+    const [people, allConversations] = await Promise.all([
       findPeopleByPhones(client, [
         ...chatIds.filter(isDirectChatId).map(chatNumber),
         ...savedSenders.map((sender) => digits(sender.phoneNumber)),
       ]),
       findConversations(client, accountId, chatIds),
     ]);
+    // A chat whose syncing is off counts as not imported: no messages, no People.
+    const conversations = new Map(
+      [...allConversations].filter(([, conversation]) => conversation.isSyncEnabled !== false),
+    );
     const contactByChatId = await findContactNames(chatIds, people, conversations, createPeople, logger);
     const unwrittenChatIds = createPeople
       ? await createSavedContactPeople(client, {
