@@ -38,6 +38,18 @@ const loadMessages = async (conversationId: string, before?: string) => {
   };
 };
 
+// One conversation by ID, if this member may read it.
+const loadConversation = async (conversationId: string): Promise<Conversation | undefined> => {
+  const result = await userClient().query({
+    whatsappConversations: {
+      __args: { filter: { id: { eq: conversationId } }, first: 1 },
+      edges: { node: CONVERSATION_FIELDS },
+    },
+  });
+
+  return nodesOf<Conversation>(result.whatsappConversations)[0];
+};
+
 const loadLastReadAt = async (userWorkspaceId: string, conversations: Conversation[]) => {
   if (conversations.length === 0) {
     return new Map<string, string>();
@@ -96,29 +108,35 @@ const handler = route<ListRequest>('whatsapp-message-list', async (event) => {
     getBridgeStatus().catch(() => ({ state: 'unavailable' as const })),
   ]);
   const visibleConversations = nodesOf<Conversation>(result.whatsappConversations);
+  // The open conversation stays open when a search, or the 50-conversation limit, leaves it out of the list.
   const selected =
-    visibleConversations.find((conversation) => conversation.id === conversationId) ?? visibleConversations[0];
+    visibleConversations.find((conversation) => conversation.id === conversationId) ??
+    (conversationId ? await loadConversation(conversationId) : undefined) ??
+    visibleConversations[0];
+  const readStateConversations =
+    selected && !visibleConversations.includes(selected) ? [...visibleConversations, selected] : visibleConversations;
 
   const [lastReadAtByName, thread, groupMembers] = await Promise.all([
-    loadLastReadAt(userWorkspaceId, visibleConversations),
+    loadLastReadAt(userWorkspaceId, readStateConversations),
     selected ? loadMessages(selected.id) : { messages: [], hasMoreMessages: false },
     selected && isGroupChatId(selected.chatId) && status.state === 'connected'
       ? bridgePost<GroupMember[]>('/history/members', { chatId: selected.chatId }).catch(() => undefined)
       : undefined,
   ]);
 
-  const conversations = visibleConversations.map((conversation) => {
+  const withReadState = (conversation: Conversation) => {
     const lastReadAt = lastReadAtByName.get(`${userWorkspaceId}:${conversation.id}`);
     return {
       ...conversation,
       lastReadAt,
       unread: Boolean(conversation.lastInboundAt && (!lastReadAt || conversation.lastInboundAt > lastReadAt)),
     };
-  });
+  };
 
   return {
-    conversations,
+    conversations: visibleConversations.map(withReadState),
     selectedConversationId: selected?.id,
+    selectedConversation: selected ? withReadState(selected) : undefined,
     ...thread,
     groupMembers,
     connectionState: status.state,
